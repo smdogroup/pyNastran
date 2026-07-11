@@ -33,7 +33,8 @@ else:
             #   what about if you don't have git?
             # can raise a subprocess.CalledProcessError, which means the return code != 0
             ghash_bytes = subprocess.check_output(['git', 'describe', '--always'],
-                                                  cwd=os.path.dirname(__file__))
+                                                  cwd=os.path.dirname(__file__),
+                                                  stderr=subprocess.DEVNULL)
             ghash = ghash_bytes.decode('utf-8').rstrip()
 
             #git show -s --format=%cd --date=short
@@ -43,7 +44,8 @@ else:
             #2024-03-11 16:37:20 -0700
             date_bytes = subprocess.check_output(
                 ['git', 'show', '-s', '--format=%cd', '--date=short'],
-                cwd=os.path.dirname(__file__))
+                cwd=os.path.dirname(__file__),
+                stderr=subprocess.DEVNULL)
             date = date_bytes.decode('utf-8').rstrip()
             year, month, day = date.split('-')
             month = month.lstrip('0')
