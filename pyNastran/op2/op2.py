@@ -30,6 +30,7 @@ from typing import Optional, Any, TYPE_CHECKING
 import numpy as np
 
 #import pyNastran
+from pyNastran import IS_CI
 from pyNastran.utils import (
     object_attributes, object_methods, ipython_info, PathLike)
 from pyNastran.utils.numpy_utils import integer_types
@@ -48,6 +49,7 @@ from pyNastran.op2.op2_interface.transforms import (
 from pyNastran.utils import check_path
 if TYPE_CHECKING:  # pragma: no cover
     from h5py import File as H5File
+    from cpylog import SimpleLogger
     from pyNastran.op2.op2_geom import OP2Geom
 
 
@@ -59,8 +61,9 @@ class OP2(OP2_Scalar, OP2Writer):
     def __init__(self,
                  debug: Optional[bool]=True,
                  log: Any=None,
-                 debug_file: Optional[str]=None,
-                 mode: Optional[str]=None) -> None:
+                 debug_file: Optional[PathLike]=None,
+                 mode: Optional[str]=None,
+                 revision: str='') -> None:
         """
         Initializes the OP2 object
 
@@ -78,6 +81,8 @@ class OP2(OP2_Scalar, OP2Writer):
             sets the filename that will be written to
         mode : str; default=None -> 'msc'
             {msc, nx}
+        revision : str; default=None
+            the nastran revision (e.g., XXXXXXXX, 2412.5)
 
         """
         # Nastran closes the file properly 99.9% of the time, but when working
@@ -109,8 +114,11 @@ class OP2(OP2_Scalar, OP2Writer):
 
         self.encoding = None
         self.mode = mode
+        self._nastran_format = ''
         if mode is not None:
             self.set_mode(mode)
+        if revision:
+            self._nastran_revision = revision
         make_geom = False
 
         # Interlacing only applies to 64-bit strings
@@ -126,11 +134,22 @@ class OP2(OP2_Scalar, OP2Writer):
         self.ask = False
         self.post = None
         self.table_count = defaultdict(int)
-        self._set_mode(mode)
+        # self._set_mode(mode)
+
+        # hackery to fix the version
+        if self._nastran_format == '':
+            self._nastran_format = None
+
 
     def __del__(self) -> None:
         if hasattr(self, 'h5_file') and self.h5_file is not None:
             self.h5_file.close()
+
+    def set_revision_from_model(self, model: OP2, revision: str='') -> None:
+        if revision:
+            self._nastran_revision = revision
+        else:
+            self._nastran_revision = model._nastran_revision
 
     def object_attributes(self, mode: str='public',
                           keys_to_skip: Optional[list[str]]=None,
@@ -279,6 +298,8 @@ class OP2(OP2_Scalar, OP2Writer):
             if len(adict) != len(bdict):
                 self.log.warning('len(self.%s)=%s len(op2_model.%s)=%s' % (
                     table_type, len(adict), table_type, len(bdict)))
+                if table_type == 'params':
+                    continue
                 if stop_on_failure:
                     return False
                 continue
@@ -396,10 +417,10 @@ class OP2(OP2_Scalar, OP2Writer):
             return False
         return True
 
-    def _set_mode(self, mode: str):
-        """explicitly set the format"""
-        if mode is None:
-            return
+    # def _set_mode(self, mode: str):
+    #     """explicitly set the format"""
+    #     if mode is None:
+    #         return
         # elif mode == 'msc':
             # self.set_as_msc()
         # elif mode == 'nx':
@@ -413,6 +434,7 @@ class OP2(OP2_Scalar, OP2Writer):
         """
         Sets the mode as 'msc', 'nx', 'autodesk', or 'optistruct'
         """
+        assert isinstance(mode, str), mode
         if mode.lower() == 'msc':
             self.set_as_msc()
         elif mode.lower() == 'nx':
@@ -438,6 +460,7 @@ class OP2(OP2_Scalar, OP2Writer):
             self.set_as_msc()
 
     def include_exclude_results(self,
+                                flag_dict: dict[str, bool]=None,
                                 exclude_results: Optional[list[str]]=None,
                                 include_results: Optional[list[str]]=None) -> None:
         """
@@ -445,11 +468,23 @@ class OP2(OP2_Scalar, OP2Writer):
 
         Parameters
         ----------
+        flag_dict : dict[key, value]
+            flags to have finer control over results
+            eigenvectors_real: True
+            eigenvectors_complex: True
         exclude_results / include_results : list[str] / str; default=None
             a list of result types to exclude/include
             one of these must be None
 
         """
+        if flag_dict:
+            # eigenvectors_real: True
+            # eigenvectors_complex: True
+            for key, flag in flag_dict.items():
+                assert key in self.flags, (key, flag)
+                assert isinstance(flag, bool), (key, flag)
+                self.flags[key] = flag
+
         if exclude_results and include_results:
             msg = (
                 'exclude_results or include_results must be None\n'
@@ -618,7 +653,10 @@ class OP2(OP2_Scalar, OP2Writer):
                 build_dataframe = True
 
         if encoding is None:
-            encoding = sys.getdefaultencoding()
+            # worked on Python < 3.13
+            # encoding = sys.getdefaultencoding()
+            import locale
+            encoding = locale.getpreferredencoding(False)
         self.encoding = encoding
 
         self.skip_undefined_matrices = skip_undefined_matrices
@@ -673,10 +711,16 @@ class OP2(OP2_Scalar, OP2Writer):
             'params', 'gpdt', 'bgpdt', 'eqexin', 'psds', 'monitor1', 'monitor3',
             'cstm', 'trmbu', 'trmbd',
         )
+        import getpass
+        is_user = (getpass.getuser() == 'sdoyle')
+        dev = (IS_CI or is_user)
+        failed_classes_set = set()
+
         for result_type in result_types:
             if result_type in skip_results or result_type.startswith('responses.'):
                 continue
             result = self.get_result(result_type)
+
             try:
                 values = result.values()
             except AttributeError:
@@ -692,7 +736,14 @@ class OP2(OP2_Scalar, OP2Writer):
                 elif hasattr(obj, 'tCode') and not obj.is_sort1:
                     raise RuntimeError('object has not implemented finalize\n%s' % (
                         ''.join(obj.get_stats())))
+                if dev:
+                    _check_result_slice(obj, self.log, failed_classes_set)
+
         self.del_structs()
+        if len(failed_classes_set):
+            failed_classes_list = list(failed_classes_set)
+            failed_classes_list.sort()
+            #raise RuntimeError(f'The following classes dont support slice_by_element_id/slice_by_node_id:\n - {failed_classes_list}')
 
     def build_dataframe(self) -> None:
         """
@@ -777,9 +828,32 @@ class OP2(OP2_Scalar, OP2Writer):
                     self.log.error(f'build_dataframe is broken for {class_name}')
                     raise
 
-    def load_hdf5_filename(self, hdf5_filename: PathLike, combine: bool=True) -> None:
+    def read_h5(hdf5_filename: PathLike, combine: bool=True):
         """
-        Loads an h5 file into an OP2 object
+        Loads an MSC-style h5 file into an OP2 object
+
+        Parameters
+        ----------
+        hdf5_filename : str
+            the path to the an hdf5 file
+        combine : bool; default=True
+            runs the combine routine
+
+        """
+        check_path(hdf5_filename, 'hdf5_filename')
+        self.op2_filename = hdf5_filename
+
+        self.log.info(f'hdf5_op2_filename = {hdf5_filename!r}')
+        debug = False
+        from tables import File
+        with File(hdf5_filename, 'r') as h5_file:
+            load_op2_from_hdf5_file(self, h5_file, self.log, debug=debug)
+        self.combine_results(combine=combine)
+
+    def load_hdf5_filename(self, hdf5_filename: PathLike,
+                           combine: bool=True) -> None:
+        """
+        Loads a pyNastran-style h5 file into an OP2 object
 
         Parameters
         ----------
@@ -800,6 +874,14 @@ class OP2(OP2_Scalar, OP2Writer):
             load_op2_from_hdf5_file(self, h5_file, self.log, debug=debug)
         self.combine_results(combine=combine)
 
+    def read_h5(self, h5_filename: H5File,
+                nastran_format: str='msc',
+                combine: bool=True) -> None:
+        """doesn't support geometry - need a new h5 reader that goes to the OG-BDF class"""
+        assert nastran_format == 'msc', 'this function is currently intended only for msc'
+        from pyNastran.dev.op2_vectorized3.op2_interface.h5_pytables.h5_results import read_h5_result
+        read_h5_result(self, h5_filename, root_path='/')
+
     def load_hdf5_file(self, h5_file: H5File, combine: bool=True) -> None:
         """
         Loads an h5 file object into an OP2 object
@@ -819,7 +901,7 @@ class OP2(OP2_Scalar, OP2Writer):
         load_op2_from_hdf5_file(self, h5_file, self.log, debug=debug)
         self.combine_results(combine=combine)
 
-    def export_hdf5_filename(self, hdf5_filename: str) -> None:
+    def export_hdf5_filename(self, hdf5_filename: PathLike) -> None:
         """
         Converts the OP2 objects into hdf5 object
 
@@ -1475,7 +1557,7 @@ def _filter_keys(keys: list, filter_keys: bool=True) -> list:
     TODO: ignore SORT2 for now
 
     Parameters
-    -------
+    ----------
     keys : list
         all the keys to consider
 
@@ -1490,8 +1572,8 @@ def _filter_keys(keys: list, filter_keys: bool=True) -> list:
     >>> keys_out
     [(1, 1, 1, 55, 0, '', '')]
 
-    keys2 = [(1, 2, 1, 0, 0, '', ''),
-             (1, 2, 2, 0, 0, '', ''),]
+    >>> keys2 = [(1, 2, 1, 0, 0, '', ''),
+                 (1, 2, 2, 0, 0, '', ''),]
     >>> keys_out2 = _filter_keys(keys2)
     >>> keys_out2
     [(1, 2, 1, 0, 0, '', ''),
@@ -1615,6 +1697,8 @@ def read_op2(op2_filename: Optional[PathLike]=None,
     """
     if op2_filename:
         check_path(op2_filename, name='op2_filename')
+    assert isinstance(load_geometry, bool), load_geometry
+    assert isinstance(skip_undefined_matrices, bool), skip_undefined_matrices
 
     if load_geometry:
         from pyNastran.op2.op2_geom import read_op2_geom
@@ -1714,3 +1798,101 @@ def get_disp_like_dicts(model: OP2) -> list[dict]:
         model.load_vectors,
     ]
     return disp_like_dicts
+
+def _check_result_slice(result, log: SimpleLogger,
+                        failed_classes_set: set[str]):
+    class_name = result.__class__.__name__
+    words = [
+        'element', 'element_node', 'element_layer',
+        'node_gridtype', 'node_element',
+    ]
+    skip_classes = [
+        'CampbellData',
+        'FlutterResponse',
+        'GridPointWeight',
+        'RealSolidCompositeStressArray',
+        'RealSolidCompositeStrainArray',
+        'SeparationDistanceArray',
+        'TrimDerivatives', 'TrimVariables',
+        'HingeMomentDerivatives',
+        'ControlSurfacePositionHingeMoment',
+        'AeroPressure', 'AeroForce',
+    ]
+    skip_words = ['eigenvalues', #'mass', 'cddata_list',
+    ]
+    if hasattr(result, 'slice_by_element_id'):
+        nelements = result.nelements
+        eids = _get_eids(result)
+        obj = result.slice_by_element_id(eids)
+        obj_eids = _get_eids(obj)
+        assert len(obj_eids) == len(eids), (eids, obj_eids)
+        if obj.nelements != nelements:
+            log.warning(f'{class_name} lost/gained elements old={nelements} -> new={obj.nelements}')
+    elif hasattr(result, 'slice_by_node_id'):
+        if hasattr(result, 'node_gridtype'):
+            ids = result.node_gridtype[:, 0]
+            obj = result.slice_by_node_id(ids)
+            assert len(result.node_gridtype) == len(ids), result
+        else:
+            # grid point forces; node_element is (ntimes, ntotal, 2) or (ntotal, 2)
+            ids = np.unique(result.node_element[..., 0])
+            obj = result.slice_by_node_id(ids)
+            assert obj.data.shape == result.data.shape, (obj.data.shape, result.data.shape)
+    elif any([hasattr(result, word) for word in skip_words]):
+        return
+    elif class_name in skip_classes:
+        return
+    elif any([hasattr(result, word) for word in words]):
+        log.warning(f'{class_name} doesnt support slice_by_element_id/slice_by_node_id')
+        failed_classes_set.add(class_name)
+        return
+    else:  # pragma: no cover
+        raise NotImplementedError((class_name, result.get_stats()))
+    obj.get_stats()
+
+
+def _get_eids(result) -> np.ndarray:
+    # TODO: what result has element=None?
+    if getattr(result, 'element_node', None) is not None:
+        eids = np.unique(result.element_node[:, 0])
+    elif hasattr(result, 'element_layer'):
+        # complex composites have element_node=None
+        eids = np.unique(result.element_layer[:, 0])
+
+    elif hasattr(result, 'element') and result.element is None:
+        # TODO: RealPlateBilinearForceArray
+        raise NotImplementedError(result.get_stats())
+
+    elif hasattr(result, '_element_masks'):
+        # real strain/kinetic energy; element is (ntimes, ntotal) and the
+        # ids can vary by time, so use all times (not just itime=0) and
+        # drop the total (eid=100000000) and padding
+        element, is_element, unused_is_total = result._element_masks()
+        eids = np.unique(element[is_element])
+    elif hasattr(result, 'element') and result.element is not None:
+        eids = result.element
+        if eids.ndim == 2:
+            # strain energy
+            eids0 = eids[0, :]
+            #print(f'eids(itime=0) = {eids0}')
+            if isinstance(eids0[0], integer_types):
+                # real strain energy ends with a total (eid=100000000);
+                # complex strain energy doesn't
+                itotals = np.where(eids0 == 100000000)[0]
+                eids = eids0[:itotals[0]] if len(itotals) else eids0  # drop the total
+                assert 100000000 not in eids, (itotals, eids0, eids)
+            else:
+                # string; buggy
+                itotal = np.where(eids0 == '')[0][0]
+                eids = eids0[:itotal] # drop the last id
+                assert '' not in eids, (itotal, eids0, eids)
+            eids = np.unique(eids)
+        # TODO: what result needs this?
+        #       probably RealStrainEnergyArray...moving to if check
+        #
+        # TODO: do I need a unique check for other types?
+        #       RealCBeamForceArray? (it was a beam)
+        #eids = np.unique(eids)
+    else:  # pragma: no cover
+        raise NotImplementedError(result)
+    return eids

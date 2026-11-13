@@ -63,7 +63,7 @@ class Boundary:
                     raise RuntimeError(f'Boundary field 1 must be an integer or string without a space; nid_name={nid_name!r}')
                 if ' ' in nid_name:
                     raise RuntimeError(f'Boundary field 1 must be an integer or string without a space; nid_name={nid_name!r}')
-                nid = nid_name
+                nid = nid_name.lower()
 
             dof1 = int(sline[1])
             if nsline == 2:
@@ -145,11 +145,15 @@ class ShellSection:
     0.005,,CF
     0.005,,CF
     0.005,,CF
+    *Shell Section, elset=Laminate, composite
+    # thickness, theta, material_name
+    0.005, 10., Carbon0
 
     """
     def __init__(self, log: SimpleLogger,
                  material_name: str, elset: str,
                  thickness: list[float],
+                 theta: list[float],
                  orientation: int=-1,
                  offset: float=0.0):
         #self.data_lines = data_lines
@@ -157,9 +161,13 @@ class ShellSection:
         self.material_name = material_name
         self.elset = elset
         self.thickness = thickness
+        self.theta = theta
         self.orientation = orientation
         self.offset = offset
         self.log = log
+        assert isinstance(orientation, (str, int)), orientation
+        if isinstance(orientation, str):
+            assert orientation == orientation.lower(), orientation
 
     @classmethod
     def add_from_data_lines(cls, param_map: dict[str, str],
@@ -172,6 +180,7 @@ class ShellSection:
         if param_map['is_composite']:
             material_name = []
             thickness = []
+            theta = []
             orientation_name = []
             for line in data_lines:
                 #thickness (required)
@@ -180,26 +189,35 @@ class ShellSection:
                 #name of the orientation to be used for this layer (optional)
                 sline = line.split(',')
                 if len(sline) == 3:
-                    thickness_stri, junk, material_namei = sline
-                    orientation_namei = None
+                    thickness_stri, thetai_stri, material_namei = sline
+                    thetai = float(thetai_stri)
+                    orientation_namei = ''
                 else:
+                    # 0.005, , CarbonMaterial, MyGlobalCsys
                     thickness_stri, junk, material_namei, orientation_namei = sline
+                    thetai = np.nan
                     ## TODO: how does orientation work (from the flags)
                     ##       with the orientation name in this table?
                     raise RuntimeError(sline)
                 material_namei = material_namei.strip().lower()
                 thicknessi = float(thickness_stri)
+                orientation_namei = orientation_namei.lower()
+
                 thickness.append(thicknessi)
+                theta.append(thetai)
                 material_name.append(material_namei)
+
                 orientation_name.append(orientation_namei)
+            #print(f'composite: thickness={thickness} material={material_name} orientation={orientation_name}')
         else:
             orientation_name = None
             material_name = param_map['material']
-            log.debug(f'material_name = {material_name}')
+            #log.debug(f'material_name = {material_name}')
 
             #if len(data_lines) == 0:
                 #pass
             thicknessi = 0.0
+            theta = [0.]
             if len(data_lines) == 1:
                 assert len(data_lines) == 1, data_lines
                 line0 = data_lines[0].split()
@@ -209,10 +227,12 @@ class ShellSection:
                 raise RuntimeError(data_lines)
             thickness = [thicknessi]
 
-        for line in data_lines:
-            log.debug(f'shell - {line!r}')
+        #for line in data_lines:
+        #    log.debug(f'shell - {line!r}')
         return ShellSection(log,
-                            material_name, elset, thickness,
+                            material_name, elset,
+                            thickness,
+                            theta=theta,
                             orientation=orientation,
                             offset=offset)
 
@@ -220,9 +240,11 @@ class ShellSection:
         """prints a summary for the solid section"""
         msg = 'ShellSection(\n'
         #msg += '    param_map = %r,\n' % self.param_map
+        msg += f'    elset = {self.elset!r},\n'
         msg += f'    material_name = {self.material_name},\n'
         msg += f'    thickness = {self.thickness},\n'
-        msg += f'    orientation = {self.orientation},\n'
+        msg += f'    theta = {self.theta},\n'
+        msg += f'    orientation = {self.orientation!r},\n'
         msg += f'    offset = {self.offset},\n'
         msg += ')\n'
         return msg
@@ -359,8 +381,8 @@ class Material:
             assert len(args1) == 8, args1
             assert len(args2) == 2, args2
             abq_file.write(f'*Elastic,type=Engineering Constants\n')
-            abq_file.write.write(','.join(args1))
-            abq_file.write.write(','.join(args2))
+            abq_file.write(','.join(args1))
+            abq_file.write(','.join(args2))
 
         if self.density > 0.:
             abq_file.write(f'*Density\n  {self.density},\n')
@@ -371,6 +393,7 @@ class Material:
             nconstants = ''
             abq_file.write(f'*User Material{nconstants}\n  {self.user_material},\n')
         #abq_file.write('** skipping Material %s\n' % self.name)
+
 
 class Assembly:
     def __init__(self, element_types, node_sets, element_sets):
@@ -393,6 +416,7 @@ class Assembly:
             f'  element_sets = {esets}\n'
         )
         return msg
+
 
 class Part:
     """a Part object is a series of nodes & elements (of various types)"""
@@ -630,11 +654,13 @@ def write_name(name):
 
 def write_element_set_to_file(abq_file, set_name, values_array):
     """writes an element set"""
+    assert len(values_array) > 0, f'invalid elset={set_name!r} ids={values_array}'
     abq_file.write('*Elset, elset=%s\n' % write_name(set_name))
     write_set_to_file(abq_file, values_array)
 
 def write_node_set_to_file(abq_file, set_name, values_array):
     """writes a node set"""
+    assert len(values_array) > 0, f'invalid nset={set_name!r} ids={values_array}'
     abq_file.write('*Nset, nset=%s\n' % write_name(set_name))
     write_set_to_file(abq_file, values_array)
 
@@ -675,6 +701,7 @@ class Transform:
 class Surface:
     def __init__(self, name: str, surface_type: str,
                  set_names: list[str], faces: list[str]):
+        assert name == name.lower(), name
         self.name = name
         self.surface_type = surface_type
         self.set_names = set_names
@@ -709,7 +736,7 @@ class Orientation:
                  origin: np.ndarray,
                  x_axis=None, xy_plane=None,
                  axis=None, alpha=None):
-        self.name = name.lower()
+        self.name = name
         self.system = system
 
         self.origin = origin

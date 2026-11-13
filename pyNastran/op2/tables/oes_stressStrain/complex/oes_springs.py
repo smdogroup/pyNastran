@@ -1,3 +1,4 @@
+import copy
 import numpy as np
 from numpy import zeros
 
@@ -7,7 +8,8 @@ from pyNastran.op2.result_objects.utils_pandas import build_dataframe_transient_
 from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import (
     StressObject, StrainObject, OES_Object, get_scode,
     oes_complex_data_code, set_freq_case, set_complex_modes_case,
-    set_element_case)
+    set_element_case,
+    slice_eids_by_index)
 from pyNastran.f06.f06_formatting import write_imag_floats_13e, _eigenvalue_header
 
 ELEMENT_NAME_TO_ELEMENT_TYPE = {
@@ -28,6 +30,15 @@ class ComplexSpringDamperArray(OES_Object):
 
         if not is_sort1:
             raise NotImplementedError('SORT2')
+
+    def slice_by_element_id(self, eids: np.ndarray,
+                            assume_exists: bool=False, inplace: bool=False):
+        eids, ieid, neid2 = slice_eids_by_index(self.element, eids, assume_exists)
+        obj = self if inplace else copy.deepcopy(self)
+        obj.element = obj.element[ieid]
+        obj.data = obj.data[:, ieid, :]
+        obj.nelements = neid2
+        return obj
 
     @property
     def is_real(self) -> bool:
@@ -380,6 +391,21 @@ class ComplexSpringStrainArray(ComplexSpringDamperArray, StrainObject):
     def __init__(self, data_code, is_sort1, isubcase, dt):
         ComplexSpringDamperArray.__init__(self, data_code, is_sort1, isubcase, dt)
         StrainObject.__init__(self, data_code, isubcase)
+
+    def h5_table_dict(self) -> dict:
+        from tables import Int64Col, Float64Col
+        h5_table_dict = {
+            'EID': Int64Col(pos=0),
+            'SR': Float64Col(pos=1),
+            'SI': Float64Col(pos=2),
+            'DOMAIN_ID': Int64Col(pos=3),
+        }
+        return h5_table_dict
+
+    def add_to_h5_array(self, arr, ntime_nnode0: int, ntime_nnode1: int, itime: int):
+        arr["EID"][ntime_nnode0:ntime_nnode1] = self.element
+        arr["SR"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 0].real
+        arr["SI"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 0].imag
 
     @property
     def headers(self) -> list[str]:

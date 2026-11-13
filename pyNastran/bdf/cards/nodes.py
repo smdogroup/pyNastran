@@ -24,6 +24,7 @@ EPOINTs/SPOINTs classes are for multiple degrees of freedom
 
 """
 from __future__ import annotations
+import copy
 from itertools import count
 import warnings
 from typing import Optional, Any, TYPE_CHECKING
@@ -192,12 +193,23 @@ class XPoint(BaseCard):
         nid = 1
         return cls(nid)
 
-    def __init__(self, nid, comment: str=''):
-        #Node.__init__(self)
+    def __init__(self, nid: int, comment: str=''):
+        # super().__init__()
         if comment:
             self.comment = comment
         self.nid = nid
         assert isinstance(nid, integer_types), nid
+
+    def __deepcopy__(self, memo: dict[str, Any]):
+        """performs a deepcopy"""
+        cls = self.__class__
+        xpoint = cls.__new__(cls)
+        memo[id(self)] = xpoint
+
+        xpoint.nid = self.nid
+        if self.comment:
+            xpoint.comment = self.comment
+        return xpoint
 
     @classmethod
     def _export_to_hdf5(cls, h5_file, model: BDF, nids: list[int]) -> None:
@@ -214,7 +226,7 @@ class XPoint(BaseCard):
         """dummy method for EPOINT/SPOINT classes"""
         raise NotImplementedError('This method should be overwritten by the parent class')
 
-    def raw_fields(self):
+    def raw_fields(self) -> list[list[str | int]]:
         """
         Gets the fields in their unmodified form
 
@@ -232,6 +244,7 @@ class XPoint(BaseCard):
             singles, doubles = collapse_thru_packs(self.nid)
             if singles:
                 list_fields = [self.type] + singles
+                lists_fields.append(list_fields)
             if doubles:
                 for spoint_double in doubles:
                     list_fields = [self.type] + spoint_double
@@ -276,7 +289,7 @@ class SPOINT(XPoint):
     """defines the SPOINT class"""
     type = 'SPOINT'
 
-    def __init__(self, nid, comment: str=''):
+    def __init__(self, nid: int, comment: str=''):
         """
         Creates the SPOINT card
 
@@ -290,7 +303,7 @@ class SPOINT(XPoint):
         """
         XPoint.__init__(self, nid, comment)
 
-    def get_position(self):
+    def get_position(self) -> np.ndarray:
         return np.zeros(3)
 
 
@@ -298,7 +311,7 @@ class EPOINT(XPoint):
     """defines the EPOINT class"""
     type = 'EPOINT'
 
-    def __init__(self, nid, comment: str=''):
+    def __init__(self, nid: int, comment: str=''):
         """
         Creates the EPOINT card
 
@@ -313,7 +326,9 @@ class EPOINT(XPoint):
         XPoint.__init__(self, nid, comment)
 
 
-def write_xpoints(cardtype: str, points, comment: str='') -> str:
+def write_xpoints(cardtype: str,
+                  points: dict[int, XPoint] | list[int],
+                  comment: str='') -> str:
     """writes SPOINTs/EPOINTs"""
     msg = comment
     if isinstance(points, dict):
@@ -336,7 +351,8 @@ def write_xpoints(cardtype: str, points, comment: str='') -> str:
     return msg
 
 
-def compress_xpoints(point_type: str, xpoints: list[int]) -> list[list[int]]:
+def compress_xpoints(point_type: str,
+                     xpoints: list[int]) -> list[list[int]]:
     """
     Gets the SPOINTs/EPOINTs in sorted, short form.
 
@@ -386,7 +402,7 @@ class XPoints(BaseCard):
         ids = [1]
         return cls(ids)
 
-    def __init__(self, ids, comment: str=''):
+    def __init__(self, ids: list[int], comment: str=''):
         #Node.__init__(self)
         if comment:
             self.comment = comment
@@ -511,7 +527,7 @@ class SPOINTs(XPoints):
     """
     type = 'SPOINT'
 
-    def __init__(self, ids, comment: str=''):
+    def __init__(self, ids: list[int], comment: str=''):
         """
         Creates the SPOINTs card that contains many SPOINTs
 
@@ -523,7 +539,7 @@ class SPOINTs(XPoints):
             a comment for the card
 
         """
-        XPoints.__init__(self, ids, comment=comment)
+        super().__init__(ids, comment=comment)
 
     def create_spointi(self):
         """Creates individal SPOINT objects"""
@@ -552,7 +568,7 @@ class EPOINTs(XPoints):
     """
     type = 'EPOINT'
 
-    def __init__(self, ids, comment: str=''):
+    def __init__(self, ids: list[int] | set[int], comment: str=''):
         """
         Creates the EPOINTs card that contains many EPOINTs
 
@@ -564,7 +580,7 @@ class EPOINTs(XPoints):
             a comment for the card
 
         """
-        XPoints.__init__(self, ids, comment=comment)
+        super().__init__(ids, comment=comment)
 
     def create_epointi(self):
         """Creates individal EPOINT objects"""

@@ -23,6 +23,7 @@ from pyNastran.bdf.cards.base_card import BaseCard
 from pyNastran.dev.bdf_vectorized3.bdf_interface.geom_check import geom_check
 from pyNastran.dev.bdf_vectorized3.cards.base_card import (
     Element, Property, Material, make_idim, hslice_by_idim,
+    slice_element_by_property_id,
     searchsorted_filter, parse_check, save_ifile_comment)
 from pyNastran.dev.bdf_vectorized3.cards.elements.rod import (
     line_mid_mass_per_length, line_length, line_vector_length, line_centroid,
@@ -31,7 +32,7 @@ from pyNastran.dev.bdf_vectorized3.cards.elements.rod import (
 from pyNastran.dev.bdf_vectorized3.cards.elements.utils import (
     get_density_from_material, basic_mass_material_id)
 from pyNastran.dev.bdf_vectorized3.cards.write_utils import (
-    array_str, array_default_int, array_default_str, array_default_float,
+    array_str, array_float, array_default_int, array_default_str, array_default_float,
     array_default_float_nan, get_print_card_size)
 from pyNastran.dev.bdf_vectorized3.utils import hstack_msg
 from pyNastran.bdf.bdf_interface.bdf_card import BDFCard
@@ -245,6 +246,9 @@ class CBAR(Element):
         self.wa = np.zeros((0, 3), dtype='float64')
         self.wb = np.zeros((0, 3), dtype='float64')
 
+    def slice_card_by_property_id(self, property_id: np.ndarray):
+        return slice_element_by_property_id(self, property_id)
+
     def add(self, eid: int, pid: int, nids: list[int],
             x: Optional[list[float]], g0: Optional[int],
             offt: str='GGG', pa: int=0, pb: int=0,
@@ -429,6 +433,53 @@ class CBAR(Element):
         return max(self.element_id.max(), self.property_id.max(),
                    self.nodes.max(), self.g0.max())
 
+    def write_h5(self, h5file, element_group):
+        neid, nnode = self.nodes.shape
+        if neid == 0:
+            return
+        from tables import Int64Col, Float64Col
+        h5_dict = {
+            'EID': Int64Col(pos=0),  # Signed 64-bit integer
+            'PID': Int64Col(pos=1),
+            'GA': Int64Col(pos=2),
+            'GB': Int64Col(pos=3),
+            'FLAG': Int64Col(pos=4),
+            'X1': Float64Col(pos=5),
+            'X2': Float64Col(pos=6),
+            'X3': Float64Col(pos=7),
+            'GO': Int64Col(pos=8),
+            'PA': Int64Col(pos=9),
+            'PB': Int64Col(pos=10),
+            'W1A': Float64Col(pos=11),
+            'W2A': Float64Col(pos=12),
+            'W3A': Float64Col(pos=13),
+            'W1B': Float64Col(pos=14),
+            'W2B': Float64Col(pos=15),
+            'W3B': Float64Col(pos=16),
+            'DOMAIN_ID': Int64Col(pos=17),
+        }
+        table = h5file.create_table(element_group, self.type, h5_dict)
+        arr = np.empty(neid, dtype=table.dtype)
+        arr["EID"] = self.element_id
+        arr["PID"] = self.property_id
+        arr["GA"] = self.nodes[:, 0]
+        arr["GB"] = self.nodes[:, 1]
+        arr["FLAG"] = np.ones(neid)
+        arr["X1"] = self.x[:, 0]
+        arr["X2"] = self.x[:, 1]
+        arr["X3"] = self.x[:, 2]
+        arr["GO"] = self.g0
+        arr["PA"] = self.pa
+        arr["PB"] = self.pb
+        arr["W1A"] = self.wa[:, 0]
+        arr["W2A"] = self.wa[:, 1]
+        arr["W3A"] = self.wa[:, 2]
+        arr["W1B"] = self.wb[:, 0]
+        arr["W2B"] = self.wb[:, 1]
+        arr["W3B"] = self.wb[:, 2]
+        arr["DOMAIN_ID"] = np.ones(neid, dtype='int64')
+        table.append(arr)
+
     @parse_check
     def write_file(self, bdf_file: TextIOLike,
                    size: int=8, is_double: bool=False,
@@ -469,6 +520,53 @@ class CBAR(Element):
             # print(list_fields)
             bdf_file.write(print_card(list_fields))
         return
+
+    @parse_check
+    def write_file_8(self, bdf_file: TextIOLike,
+                     write_card_header: bool=False) -> None:
+        if self.max_id >= 100_000_000:
+            self.write_file(bdf_file, size=8, write_card_header=write_card_header)
+            return
+
+        no_pa_pb = np.all(self.pa == 0) and np.all(self.pb == 0)
+        no_wa_wb = np.all(self.wa == 0.) and np.all(self.wb == 0.)
+        all_g0 = np.all(self.g0 > 0)
+        all_offt_ggg = np.all(self.offt == 'GGG')
+        is_basic = no_pa_pb and no_wa_wb and all_offt_ggg
+
+        eids = np.char.rjust(array_str(self.element_id, size=8), 8)
+        pids = np.char.rjust(array_str(self.property_id, size=8), 8)
+        nodes_str = np.char.rjust(array_str(self.nodes, size=8), 8)
+
+        if is_basic and all_g0:
+            g0s = np.char.rjust(array_str(self.g0, size=8), 8)
+            eid_list = eids.tolist()
+            pid_list = pids.tolist()
+            n1_list = nodes_str[:, 0].tolist()
+            n2_list = nodes_str[:, 1].tolist()
+            g0_list = g0s.tolist()
+            lines = [f'CBAR    {eid}{pid}{n1}{n2}{g0}\n'
+                     for eid, pid, n1, n2, g0 in
+                     zip(eid_list, pid_list, n1_list, n2_list, g0_list)]
+            bdf_file.write(''.join(lines))
+        elif is_basic:
+            g0s = np.char.rjust(array_str(self.g0, size=8), 8)
+            xs = np.char.rjust(array_float(self.x, size=8, nan_check=False), 8)
+            eid_list = eids.tolist()
+            pid_list = pids.tolist()
+            n1_list = nodes_str[:, 0].tolist()
+            n2_list = nodes_str[:, 1].tolist()
+            lines = []
+            for eid, pid, n1, n2, g0, x, g0_val in zip(
+                    eid_list, pid_list, n1_list, n2_list,
+                    g0s.tolist(), xs.tolist(), self.g0):
+                if g0_val > 0:
+                    lines.append(f'CBAR    {eid}{pid}{n1}{n2}{g0}\n')
+                else:
+                    lines.append(f'CBAR    {eid}{pid}{n1}{n2}{x[0]}{x[1]}{x[2]}\n')
+            bdf_file.write(''.join(lines))
+        else:
+            self.write_file(bdf_file, size=8, write_card_header=write_card_header)
 
     @property
     def allowed_properties(self):
@@ -522,7 +620,7 @@ class CBAR(Element):
 
     def stiffness_info(self) -> np.ndarray:
         """
-        [L, rho, A, ]
+        [L, A, I1, I2, I12, J, k1, k2, E, G]
         """
         pid = self.property_id
         npid = len(pid)
@@ -530,6 +628,10 @@ class CBAR(Element):
         area = np.full(npid, np.nan, dtype='float64')
         I = np.full((npid, 3), np.nan, dtype='float64')
         J = np.full(npid, np.nan, dtype='float64')
+
+        k1 = np.full(npid, np.nan, dtype='float64')
+        k2 = np.full(npid, np.nan, dtype='float64')
+
         E = np.full(npid, np.nan, dtype='float64')
         G = np.full(npid, np.nan, dtype='float64')
         for prop in self.allowed_properties:
@@ -537,17 +639,26 @@ class CBAR(Element):
             if len(i_lookup) == 0:
                 continue
             # we're at least using some properties
-            breakdowni = prop.stiffness_info() # [area, I, J]
-            area[i_lookup] = breakdowni[i_all, 0]
+            # [area, I1, I2, I12, J, k1, k2]
+            breakdowni = prop.prop_stiffness_info()
+            assert breakdowni.shape[1] == 7, breakdowni.shape
+
+            slicei = breakdowni[i_all, :]
             #print(prop.type, i_lookup, i_all, breakdowni.shape)
-            I[i_lookup, :] = breakdowni[i_all, :][:, [1, 2, 3]]
-            J[i_lookup] = breakdowni[i_all, 4]
+            area[i_lookup] = slicei[:, 0]
+            I[i_lookup, :] = slicei[:, [1, 2, 3]]
+            J[i_lookup] = slicei[:, 4]
+            k1[i_lookup] = slicei[:, 5]
+            k2[i_lookup] = slicei[:, 6]
 
             mat1 = self.model.mat1.slice_card_by_material_id(prop.material_id)
             E[i_lookup] = mat1.E
             G[i_lookup] = mat1.G
         length = self.length()
-        breakdown = np.column_stack([length, area, I, J, E, G])
+        breakdown = np.column_stack([
+            length, area, I, J, k1, k2,
+            E, G])
+        assert breakdown.shape[1] == 10, breakdown.shape
         return breakdown
 
     def area(self) -> np.ndarray:
@@ -852,7 +963,7 @@ PBARL_MSG = '\n' + """
 
 class PBAR(Property):
     """
-    Defines the properties of a simple beam element (CBAR entry).
+    Defines the properties of a simple beam element (CBAR).
 
     +------+-----+-----+-----+----+----+----+-----+-----+
     |   1  |  2  |  3  |  4  |  5 |  6 |  7 |  8  |  9  |
@@ -1081,9 +1192,12 @@ class PBAR(Property):
         if np.any(self.j < 0.):
             raise ValueError('J=%r must be greater than or equal to 0.0' % self.j)
 
-    def stiffness_info(self) -> np.ndarray:
-        """[area, I, J]"""
-        breakdown = np.column_stack([self.A, self.I, self.J])
+    def prop_stiffness_info(self) -> np.ndarray:
+        """[area, I1, I2, I12, J, k1, k2]"""
+        breakdown = np.column_stack([
+            self.A, self.I, self.J,
+            self.k])
+        assert breakdown.shape[1] == 7, breakdown.shape
         return breakdown
 
     @property
@@ -1294,7 +1408,10 @@ class PBAR(Property):
 
     def e_g_nu(self) -> np.ndarray:
         """calculates E, G, nu"""
-        e_g_nu = e_g_nu_from_isotropic_material(self.material_id, self.allowed_materials)
+        e_g_nu = e_g_nu_from_isotropic_material(
+            self.material_id,
+            #self.allowed_materials,
+            [self.model.mat1])
         return e_g_nu
 
 
@@ -1369,11 +1486,11 @@ class PBARL(Property):
         self.nsm = np.array([], dtype='float64')
         self.dims = np.array([], dtype='float64')
 
-    # def slice_card_by_property_id(self, property_id: np.ndarray) -> PBARL:
-    #     """uses a node_ids to extract PBARLs"""
-    #     iprop = self.index(property_id)
-    #     prop = self.slice_card_by_index(iprop)
-    #     return prop
+    def slice_card_by_property_id(self, property_id: np.ndarray) -> PBARL:
+        """uses a property_id to extract PBARLs"""
+        iprop = self.index(property_id)
+        prop = self.slice_card_by_index(iprop)
+        return prop
 
     def validate(self) -> None:
         utypes = np.unique(self.Type)
@@ -1712,27 +1829,46 @@ class PBARL(Property):
             area[i] = A
         return area
 
-    def I(self):
-        """A, I1, I2, I12"""
+    def inertia(self) -> np.ndarray:
+        inertia = self.area_inertia()[:, 1:]
+        return inertia
+
+    def area_inertia(self) -> np.ndarray:
+        """A, I1, I2, I12, J"""
         nprop = len(self.property_id)
-        I = np.full((nprop, 4), np.nan, dtype='float64')
+        area_inertia = np.full((nprop, 5), np.nan, dtype='float64')
         for i, pid, beam_type, idim in zip(count(), self.property_id,
                                            self.Type, self.idim):
             idim0, idim1 = idim
             dim = self.dims[idim0:idim1].tolist()
             # from pyNastran.bdf.cards.properties.bars import A_I1_I2_I12
-            I[i] = _bar_areaL('PBARL', beam_type, dim, self)
-        return I
+            area_inertia[i, :-1] = _bar_areaL('PBARL', beam_type, dim, self)
 
-    def i1(self):
+        #A = area_inertia[:, 0]
+        i1 = area_inertia[:, 1]
+        i2 = area_inertia[:, 2]
+        #i12 = area_inertia[:, 3]
+        j = i1 + i2
+        area_inertia[:, -1] = j 
+        return area_inertia
+
+    def e_g_nu(self) -> np.ndarray:
+        """calculates E, G, nu"""
+        e_g_nu = e_g_nu_from_isotropic_material(self.material_id, self.allowed_materials)
+        return e_g_nu
+
+    def I(self) -> np.ndarray:
+        return self.area_inertia()
+
+    def i1(self) -> np.ndarray:
         i1 = self.I()[:, 1]
         return i1
 
-    def i2(self):
+    def i2(self) -> np.ndarray:
         i1 = self.I()[:, 2]
         return i1
 
-    def i12(self):
+    def i12(self) -> np.ndarray:
         i12 = self.I()[:, 3]
         return i12
 
@@ -2016,7 +2152,11 @@ class CBARAO(Element):
               ifile=None, comment=None) -> None:
         ifile = ifile if ifile is not None else np.zeros(len(element_id), dtype='int32')
         if len(self.element_id) != 0:
-            raise NotImplementedError()
+            ifile = np.hstack([self.ifile, ifile])
+            element_id = np.hstack([self.element_id, element_id])
+            scale = np.hstack([self.scale, scale])
+            nstation = np.hstack([self.nstation, nstation])
+            station = np.hstack([self.station, station]).tolist()
         save_ifile_comment(self, ifile, comment)
         self.element_id = element_id
         self.scale = scale
@@ -2219,8 +2359,13 @@ def k_from_property_id(property_id: np.ndarray,
             continue
 
         # we're at least using some properties
+        nprop = len(prop)
         if prop.type in {'PBAR', 'PBEAM'}:
             k1_k2i = prop.k
+        elif prop.type in {'PBARL'}:
+            k1_k2i = np.zeros((nprop, 2))  # euler-bernoulli
+        #elif prop.type in {'PBEAML'}:
+            #k1_k2i = np.ones((nprop, 2))  # timoshenko
         else:
             k1_k2i = prop.k()
         k1_k2[i_lookup] = k1_k2i[i_all]

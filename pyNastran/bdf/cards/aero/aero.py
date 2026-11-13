@@ -19,6 +19,7 @@ All cards are BaseCard objects.
 """
 from __future__ import annotations
 import math
+import copy
 from itertools import count
 from collections import defaultdict, namedtuple
 import warnings
@@ -26,7 +27,6 @@ import warnings
 from typing import Optional, Any, TYPE_CHECKING
 
 import numpy as np
-import scipy
 
 from pyNastran.utils.numpy_utils import integer_types, float_types
 #from pyNastran.utils import object_attributes
@@ -135,7 +135,7 @@ class AECOMP(BaseCard):
             raise RuntimeError(msg)
 
     @classmethod
-    def add_card(cls, card: Any, comment: str='') -> AECOMP:
+    def add_card(cls, card: BDFCard, comment: str='') -> AECOMP:
         """
         Adds an AECOMP card from ``BDF.add_card(...)``
 
@@ -242,7 +242,7 @@ class AECOMP(BaseCard):
         The writer method used by BDF.write_card()
 
         Parameters
-        -----------
+        ----------
         size : int; default=8
             the size of the card (8/16)
 
@@ -343,7 +343,7 @@ class AECOMPL(BaseCard):
         The writer method used by BDF.write_card()
 
         Parameters
-        -----------
+        ----------
         size : int; default=8
             the size of the card (8/16)
 
@@ -449,7 +449,7 @@ class AEFACT(BaseCard):
         The writer method used by BDF.write_card()
 
         Parameters
-        -----------
+        ----------
         size : int; default=8
             the size of the card (8/16)
 
@@ -496,7 +496,8 @@ class AELINK(BaseCard):
         Parameters
         ----------
         aelink_id : int/str
-            unique id
+            int: unique id
+            str: ALWAYS (MSC only)
         label : str
             name of the dependent AESURF card
         independent_labels : list[str, ..., str]
@@ -606,39 +607,53 @@ class AELINK(BaseCard):
             trim_ref = model.Trim(self.aelink_id, msg=msg)
 
         aesurf_names = {aesurf.label for aesurf in model.aesurf.values()}
-        aparam_names = {aeparam.label for aeparam in model.aeparams.values()}
+        aeparam_names = {aeparam.label for aeparam in model.aeparams.values()}
         aestat_names = {aestat.label for aestat in model.aestats.values()}
+
+        #aesurf_names = list(model.aesurf.keys())
+        #aesurf_names = list(model.aestat.keys())
+        #aesurf_names = list(model.aeparams.keys())
+
+        msg = ''
+        is_missing_dep_label = False
         is_aesurf = self.dependent_label in aesurf_names
-        is_aeparam = self.dependent_label in aparam_names
-        if not (is_aesurf or is_aeparam):
-            raise RuntimeError(f'dependent_label={self.dependent_label} is an AESURF and AEPARM\n{self}\n'
-                               f'aesurf={list(model.aesurf.keys())} aeparam={list(model.aeparams.keys())}')
-        elif is_aesurf:
+        is_aeparam = self.dependent_label in aeparam_names
+        if is_aesurf:
             self.dependent_label_ref = model.AESurf(self.dependent_label,
-                                                    msg='dependent_label={self.dependent_label!r}; ' + msg)
+                                                    msg=f'dependent_label={self.dependent_label!r}; ' + msg)
         elif is_aeparam:
             self.dependent_label_ref = model.AEParam(self.dependent_label, msg=msg)
         else:
-            raise RuntimeError(f'dependent_label={self.dependent_label} is not an AESURF or AEPARM\n{self}')
+            is_missing_dep_label = True
+            msg += f' - dependent_label={self.dependent_label!r} (must be an AESURF or AEPARM)\n'
+            #raise RuntimeError(f'dependent_label={self.dependent_label} is not an #AESURF or AEPARM\n{self}')
 
         self.independent_labels_ref = []
+
+        missing_indep_labels = []
         for independent_label in self.independent_labels:
             is_aesurf = independent_label in aesurf_names
-            is_aeparam = independent_label in aparam_names
+            is_aeparam = independent_label in aeparam_names
             is_aestat = independent_label in aestat_names
-            if not (is_aesurf or is_aeparam or is_aestat):
-                raise RuntimeError(f'independent_label={independent_label} is an AESURF and AEPARM\n{self}\n'
-                                   f'aesurf={list(model.aesurf.keys())} aeparam={list(model.aeparams.keys())}')
-            elif is_aesurf:
+            if is_aesurf:
                 independent_aelink = model.AESurf(independent_label, msg=msg)
-            #elif is_aeparam:
-                #independent_aelink = model.AEParam(independent_label, msg=msg)
+            elif is_aeparam:
+                independent_aelink = model.AEParam(independent_label, msg=msg)
             elif is_aestat:
                 independent_aelink = model.AEStat(independent_label, msg=msg)
             else:
-                raise RuntimeError(f'independent_label={independent_label} is an AESURF and AEPARM\n{self}\n'
-                                   f'aesurf={list(model.aesurf.keys())} aeparam={list(model.aeparams.keys())}')
+                missing_indep_labels.append(independent_label)
+                continue
             self.independent_labels_ref.append(independent_aelink)
+
+        if missing_indep_labels:
+            msg += f' - independent_labels={missing_indep_labels} (must be an AESURF, AESTAT, or AEPARM)\n'
+        if msg:
+            raise RuntimeError(f'missing:\n{msg}'
+                               f'{self}\n'
+                               f'aesurf={aesurf_names} '
+                               f'aestat={aestat_names} '
+                               f'aeparm={aeparam_names}')
 
     #def uncross_reference(self) -> None:
         #"""Removes cross-reference links"""
@@ -664,7 +679,7 @@ class AELINK(BaseCard):
         The writer method used by BDF.write_card()
 
         Parameters
-        -----------
+        ----------
         size : int; default=8
             the size of the card (8/16)
 
@@ -815,7 +830,8 @@ class AEPARM(BaseCard):
         units = ''
         return AEPARM(aeparm_id, label, units)
 
-    def __init__(self, aeparm_id: int, label: str, units: str, comment: str='') -> None:
+    def __init__(self, aeparm_id: int, label: str,
+                 units: str='', comment: str='') -> None:
         """
         Creates an AEPARM card, which defines a new trim variable.
 
@@ -857,7 +873,7 @@ class AEPARM(BaseCard):
         units = '' if units is None else units
 
         assert len(card) <= 4, f'len(AEPARM card) = {len(card):d}\ncard={card}'
-        return AEPARM(aeparm_id, label, units, comment=comment)
+        return AEPARM(aeparm_id, label, units=units, comment=comment)
 
     @classmethod
     def add_op2_data(cls, data, comment: str=''):
@@ -876,7 +892,7 @@ class AEPARM(BaseCard):
         label = data[1]
         units = data[2]
         assert len(data) == 3, 'data = %s' % data
-        return AEPARM(aeparm_id, label, units, comment=comment)
+        return AEPARM(aeparm_id, label, units=units, comment=comment)
 
     def cross_reference(self, model: BDF) -> None:
         pass
@@ -914,19 +930,19 @@ class AESURF(BaseCard):
     line(s) and from AEDW, AEFORCE and AEPRESS input data. The mass properties
     of the control surface can be specified using an AESURFS entry.
 
-    +--------+--------+-------+-------+-------+--------+--------+--------+--------+
-    |    1   |   2    |   3   |   4   |   5   |   6    |    7   |   8    |   9    |
-    +========+========+=======+=======+=======+========+========+========+========+
-    | AESURF |   ID   | LABEL | CID1  | ALID1 |  CID2  | ALID2  |  EFF   |  LDW   |
-    +--------+--------+-------+-------+-------+--------+--------+--------+--------+
-    |        |  CREFC | CREFS | PLLIM | PULIM | HMLLIM | HMULIM | TQLLIM | TQULIM |
-    +--------+--------+-------+-------+-------+--------+--------+--------+--------+
+    +--------+-------+-------+-------+-------+--------+--------+--------+--------+
+    |    1   |   2   |   3   |   4   |   5   |   6    |    7   |   8    |   9    |
+    +========+=======+=======+=======+=======+========+========+========+========+
+    | AESURF |   ID  | LABEL | CID1  | ALID1 |  CID2  | ALID2  |  EFF   |  LDW   |
+    +--------+-------+-------+-------+-------+--------+--------+--------+--------+
+    |        | CREFC | CREFS | PLLIM | PULIM | HMLLIM | HMULIM | TQLLIM | TQULIM |
+    +--------+-------+-------+-------+-------+--------+--------+--------+--------+
     """
     type = 'AESURF'
     _field_map = {
         1: 'aesid', 2: 'label', 3: 'cid1', 4: 'alid1', 5: 'cid2', 6: 'alid2',
         7: 'eff', 8: 'ldw', 9: 'crefc', 10: 'crefs', 11: 'pllim', 12: 'pulim',
-        13: 'hmllim', 14: 'hmulim', 15: 'tqllim', '16': 'tqulim',
+        13: 'hmllim', 14: 'hmulim', 15: 'tqllim', 16: 'tqulim',
     }
 
     @classmethod
@@ -1087,6 +1103,25 @@ class AESURF(BaseCard):
                       crefc, crefs, pllim, pulim, hmllim, hmulim,
                       tqllim, tqulim, comment=comment)
 
+    def _verify(self, xref: bool) -> None:
+        """
+        Verifies all methods for this object work
+
+        Parameters
+        ----------
+        xref : bool
+            has this model been cross referenced
+
+        """
+        cid1 = self.Cid1()
+        aelist1 = self.Aelist_id1()
+        assert isinstance(cid1, integer_types), f'cid1={cid1!r}'
+        assert isinstance(aelist1, integer_types), f'aelist1={aelist1!r}'
+        cid2 = self.Cid2()
+        aelist2 = self.Aelist_id2()
+        assert cid2 is None or isinstance(cid2, integer_types), f'cid2={cid2!r}'
+        assert aelist2 is None or isinstance(aelist2, integer_types), f'aelist2={aelist2!r}'
+
     def Cid1(self) -> int:
         if self.cid1_ref is not None:
             return self.cid1_ref.cid
@@ -1208,10 +1243,10 @@ class AESURF(BaseCard):
         tqllim = set_blank_if_default(self.tqllim, 0)
         tqulim = set_blank_if_default(self.tqulim, 0)
 
-        list_fields = ['AESURF', self.aesurf_id, self.label, self.Cid1(), self.Aelist_id1(),
-                       self.Cid2(), self.Aelist_id2(), eff, ldw, crefc, crefs,
-                       pllim, pulim, self.hmllim, self.hmulim, tqllim,
-                       tqulim]
+        list_fields = [
+            'AESURF', self.aesurf_id, self.label, self.Cid1(), self.Aelist_id1(),
+            self.Cid2(), self.Aelist_id2(), eff, ldw, crefc, crefs,
+            pllim, pulim, self.hmllim, self.hmulim, tqllim, tqulim]
         return list_fields
 
     def write_card(self, size: int=8, is_double: bool=False) -> str:
@@ -2074,7 +2109,7 @@ class CAERO1(BaseCard):
         p3 = p4 + np.array([self.x43, 0., 0.])
         p14: np.ndarray = p1 * (1 - span_percentage) + p4 * span_percentage
         p23: np.ndarray = p2 * (1 - span_percentage) + p3 * span_percentage
-        x14_23: float = p23[0] - p23[0]
+        x14_23: float = p14[0] - p23[0]
 
         nspan_a = max(1, int(self.nspan * span_percentage))
         nspan_b = max(1, int(self.nspan * (1 - span_percentage)))
@@ -2350,12 +2385,12 @@ class CAERO1(BaseCard):
         Get the index of ``self.box_ids`` that corresponds to the given box id.
 
         Parameters
-        -----------
+        ----------
         box_id : int
             Box id to get the index of.
 
         Returns
-        --------
+        -------
         index : tuple
             Index of ``self.box_ids`` that corresponds to the given box id.
 
@@ -2371,12 +2406,12 @@ class CAERO1(BaseCard):
         The the location of the quarter chord of the box along the centerline.
 
         Parameters
-        -----------
+        ----------
         box_id : int
             Box id.
 
         Returns
-        --------
+        -------
         xyz_quarter_chord : ndarray
             Location of box quarter chord in global.
 
@@ -2388,12 +2423,12 @@ class CAERO1(BaseCard):
         The the location of the mid chord of the box along the centerline.
 
         Parameters
-        -----------
+        ----------
         box_id : int
             Box id.
 
         Returns
-        --------
+        -------
         xyz_mid_chord : ndarray
             Location of box mid chord in global.
 
@@ -2406,7 +2441,7 @@ class CAERO1(BaseCard):
         """
         if self.lchord != 0 or self.lspan != 0:
             raise NotImplementedError()
-        ichord, ispan = self.get_box_index(box_id)
+        ispan, ichord = self.get_box_index(box_id)
 
         le_vector = self.p4 - self.p1
         delta_xyz = le_vector * ((ispan + 0.5)/self.nspan)
@@ -2571,6 +2606,76 @@ class CAERO1(BaseCard):
         int_pt = le.copy()
         int_pt[:, 0] += chord * 0.75
         return int_pt
+
+    def get_dlm_box_properties(self) -> dict:
+        """Get DLM box geometric properties for all panels in this CAERO1.
+
+        Returns a dict with arrays indexed per panel:
+        - box_ids: (npanel,) int, Nastran element IDs
+        - chords: (npanel,) float, box chord lengths
+        - spans: (npanel,) float, box span widths
+        - areas: (npanel,) float, box areas
+        - normals: (npanel, 3) float, outward panel normals
+        - receiving_points: (npanel, 3) float, 3/4-chord collocation points
+        - sending_points: (npanel, 3) float, 1/4-chord doublet points
+        """
+        points, elements = self.panel_points_elements()
+        npanel = len(elements)
+
+        # Corner node indices per element (pyNastran ordering: p1, p4, p2, p3)
+        n1 = elements[:, 0]  # inboard LE
+        n2 = elements[:, 1]  # outboard LE
+        n3 = elements[:, 2]  # outboard TE
+        n4 = elements[:, 3]  # inboard TE
+
+        p_ile = points[n1]  # inboard leading edge
+        p_ole = points[n2]  # outboard leading edge
+        p_ote = points[n3]  # outboard trailing edge
+        p_ite = points[n4]  # inboard trailing edge
+
+        # Leading and trailing edge midpoints
+        le_mid = 0.5 * (p_ile + p_ole)
+        te_mid = 0.5 * (p_ite + p_ote)
+
+        # Chord vector and length
+        chord_vec = te_mid - le_mid
+        chords = np.linalg.norm(chord_vec, axis=1)
+
+        # Span vector and width
+        span_vec_le = p_ole - p_ile
+        spans = np.linalg.norm(span_vec_le, axis=1)
+
+        # Area (cross product magnitude of diagonals / 2, or average chord * span)
+        diag1 = p_ote - p_ile
+        diag2 = p_ite - p_ole
+        cross = np.cross(diag1, diag2)
+        areas = 0.5 * np.linalg.norm(cross, axis=1)
+
+        # Normal (unit normal from cross product)
+        normals = cross / np.linalg.norm(cross, axis=1, keepdims=True)
+
+        # Receiving point: 3/4-chord, mid-span (DLM collocation point)
+        receiving_points = le_mid + 0.75 * chord_vec
+
+        # Sending point: 1/4-chord, mid-span (DLM doublet line)
+        sending_points = le_mid + 0.25 * chord_vec
+
+        # Centroids (average of 4 corners)
+        centroids = 0.25 * (p_ile + p_ole + p_ote + p_ite)
+
+        # Box IDs: sequential from this CAERO1's EID
+        box_ids = np.arange(self.eid, self.eid + npanel, dtype=np.int32)
+
+        return {
+            'box_ids': box_ids,
+            'chords': chords,
+            'spans': spans,
+            'areas': areas,
+            'normals': normals,
+            'centroids': centroids,
+            'receiving_points': receiving_points,
+            'sending_points': sending_points,
+        }
 
     def shift(self, dxyz: np.ndarray) -> None:
         """shifts the aero panel"""
@@ -4135,6 +4240,13 @@ class CAERO5(BaseCard):
     def LSpan(self) -> int:
         return aefact_id(self.lspan_ref, self.lspan)
 
+    def raw_fields(self):
+        list_fields = (
+            ['CAERO5', self.eid, self.Pid(), self.Cp(), self.nspan, self.LSpan(),
+             self.ntheory, self.nthick, None,] + list(self.p1) + [self.x12] +
+             list(self.p4) + [self.x43])
+        return list_fields
+
     def repr_fields(self):
         """
         Gets the fields in their simplified form
@@ -4148,9 +4260,10 @@ class CAERO5(BaseCard):
         lspan = self.LSpan()
         ntheory = self.ntheory
         cp = set_blank_if_default(self.Cp(), 0)
-        list_fields = (['CAERO5', self.eid, self.Pid(), cp, nspan, lspan,
-                        ntheory, self.nthick, None,] + list(self.p1) + [self.x12] +
-                       list(self.p4) + [self.x43])
+        list_fields = (
+            ['CAERO5', self.eid, self.Pid(), cp, nspan, lspan,
+             ntheory, self.nthick, None,] + list(self.p1) + [self.x12] +
+             list(self.p4) + [self.x43])
         return list_fields
 
     def write_card(self, size: int=8, is_double: bool=False) -> str:
@@ -4240,7 +4353,7 @@ class MONPNT1(BaseCard):
             self.name, self.label, self.axes,
             self.comp,
             self.xyz.copy(), cp=self.Cp(),
-            cd=self.Cp(), comment=self.comment)
+            cd=self.Cd(), comment=self.comment)
         return card
 
     @classmethod
@@ -4338,6 +4451,16 @@ class MONPNT2(BaseCard):
         nddl_item = ['dog']
         eid = 2
         return MONPNT2(name, label, table, element_types, nddl_item, eid, comment='')
+
+    def __deepcopy__(self, memo_dict: dict[int, Any]) -> MONPNT3:
+        card = MONPNT2(self.name, self.label,
+                       copy.deepcopy(self.tables),
+                       copy.deepcopy(self.element_types),
+                       copy.deepcopy(self.nddl_items),
+                       copy.deepcopy(self.eids),
+                       comment=self.comment)
+        memo_dict[id(self)] = card
+        return card
 
     def __init__(self, name: str, label: str,
                  tables: list[str],
@@ -4488,6 +4611,17 @@ class MONPNT3(BaseCard):
         return MONPNT3(name, label, axes, xyz,
                        node_set_group=grid_set, elem_set_group=elem_set,
                        cp=0, cd=None, xflag='', comment='')
+
+    def __deepcopy__(self, memo_dict: dict[int, Any]) -> MONPNT3:
+        card = MONPNT3(
+            self.name, self.label, self.axes,
+            copy.deepcopy(self.xyz),
+            self.node_set_group, self.elem_set_group,
+            cp=self.Cp(), cd=self.Cd(), xflag=self.xflag,
+            comment=self.comment)
+        memo_dict[id(self)] = card
+        return card
+
 
     def __init__(self, name: str, label: str | int, axes: str,
                  xyz: list[float],
@@ -6132,6 +6266,7 @@ class SPLINE1(Spline):
 
             del xform
             local_spline_points_array = np.array(local_spline_points)
+            import scipy
             try:
                 hull = scipy.spatial.ConvexHull(local_spline_points_array[:, :2])
                 area_hull = hull.area
@@ -7427,8 +7562,20 @@ def build_caero_paneling(model: BDF) -> tuple[str, list[str], AeroPaneling]:
         ncaeros_points, ncaero_sub_points,
         has_control_surface, box_id_to_caero_element_map, cs_box_ids,
     )
+    out_dict = {
+        'has_caero': has_caero,
+        'caero_points': caero_points,
+        'ncaeros': ncaeros,
+        'ncaeros_sub': ncaeros_sub,
+        'ncaeros_cs': ncaeros_cs,
+        'ncaeros_points': ncaeros_points,
+        'ncaero_sub_points': ncaero_sub_points,
+        'has_control_surface': has_control_surface,
+        'box_id_to_caero_element_map': box_id_to_caero_element_map,
+        'cs_box_ids': cs_box_ids,
+    }
     #print(all_control_surface_name, caero_control_surface_names)
-    return all_control_surface_name, caero_control_surface_names, out
+    return all_control_surface_name, caero_control_surface_names, out, out_dict
 
 
 CAEROs = CAERO1 | CAERO2 | CAERO3 | CAERO4 | CAERO5

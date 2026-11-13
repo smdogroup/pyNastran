@@ -2,14 +2,18 @@ from __future__ import annotations
 from typing import Optional, TYPE_CHECKING
 from io import StringIO
 
+from pyNastran.utils import PathLike
+from pyNastran.utils.numpy_utils import integer_types, float_types
 from pyNastran.bdf.field_writer import print_card_8, print_card_16
-from pyNastran.bdf.bdf_interface.write_mesh import _output_helper, _fix_sizes
+from pyNastran.bdf.bdf_interface.write_mesh import _fix_sizes
+from pyNastran.bdf.bdf_interface.write_mesh_file import _output_helper
 
 from pyNastran.dev.bdf_vectorized3.bdf_interface.bdf_attributes import BDFAttributes
 from pyNastran.dev.bdf_vectorized3.types import TextIOLike
 if TYPE_CHECKING:  # pragma: no cover
     from pyNastran.dev.bdf_vectorized3.types import TextIOLike
     from pyNastran.dev.bdf_vectorized3.bdf import BDF
+    from tables import File
 
 
 class WriteMesh(BDFAttributes):
@@ -18,7 +22,12 @@ class WriteMesh(BDFAttributes):
         #BDFAttributes.__init__(self)
         self.writer = Writer(self)
 
-    def write_bdf(self, out_filename: Optional[str | StringIO]=None,
+    def write_h5(self, out_filename: PathLike):
+        from tables import File
+        with File(out_filename, 'w') as hdf5_file:
+            self.writer.write_h5(hdf5_file)
+
+    def write_bdf(self, out_filename: Optional[PathLike | StringIO]=None,
                   encoding: Optional[str]=None,
                   size: int=8,
                   nodes_size: Optional[int]=None,
@@ -158,19 +167,83 @@ class Writer:
     def __init__(self, model: BDF):
         self.model = model
 
+    def write_h5(self, h5file: File):
+        nastran_group = h5file.create_group('/', 'NASTRAN')
+        input_group = h5file.create_group(nastran_group, 'INPUT')
+        self.write_h5_parameters(h5file, input_group)
+        self.write_h5_nodes(h5file, input_group)
+        self.write_h5_elements(h5file, input_group)
+        self.write_h5_properties(h5file, input_group)
+        self.write_h5_materials(h5file, input_group)
+        # load_group = h5file.create_group(input_group, 'LOAD')
+        # constraints_group = h5file.create_group(input_group, 'CONSTRAINTS')
+
+    def write_h5_parameters(self, h5file: File, input_group):
+        from pyNastran.bdf.bdf_interface.write_h5 import write_h5_parameters
+        write_h5_parameters(self.model.params, h5file, input_group)
+
+    def write_h5_nodes(self, h5file: File, input_group):
+        model = self.model
+        node_group = h5file.create_group(input_group, 'NODE')
+        model.grid.write_h5(h5file, node_group)
+
+        if len(model.coord) > 1:
+            coord_group = h5file.create_group(input_group, 'COORDINATE_SYSTEM')
+            model.coord.write_h5(h5file, coord_group)
+
+    def write_h5_elements(self, h5file: File, input_group):
+        element_group = h5file.create_group(input_group, 'ELEMENT')
+        model = self.model
+        elements = [
+            # model.celas1, model.celas2, model.celas3, model.celas4,
+            # model.cdamp1, model.cdamp2, model.cdamp3, model.cdamp4,
+            # model.cbush, model.cbush1d, model.cgap,
+            model.crod, # model.ctube, model.conrod,
+            model.cbar, model.cbeam,
+            # shells
+            model.cshear,
+            model.cquad, model.cquad4, model.cquad8, model.cquadr,
+            model.ctria3, model.ctria6, model.ctriar,
+            # solids
+            model.ctetra, model.cpenta, model.chexa, model.cpyram, model.chexcz,
+        ]
+        for element in elements:
+            element.write_h5(h5file, element_group)
+
+    def write_h5_properties(self, h5file: File, input_group):
+        property_group = h5file.create_group(input_group, 'PROPERTY')
+        model = self.model
+        properties = [
+            model.prod,
+            model.pshell, model.pcomp, #model.pcompg,
+            model.psolid,
+        ]
+        for prop in properties:
+            prop.write_h5(h5file, property_group)
+
+    def write_h5_materials(self, h5file: File, input_group):
+        material_group = h5file.create_group(input_group, 'MATERIAL')
+        model = self.model
+        materials = [
+            model.mat1, #model.mat8,
+        ]
+        for mat in materials:
+            mat.write_h5(h5file, material_group)
+
     def write_bulk_data(self, bdf_file: TextIOLike,
                         size: int=8, is_double: bool=False,
                         interspersed: bool=False,
                         enddata: Optional[bool]=None, close: bool=True,
+                        coords_size: Optional[int]=None,
                         nodes_size: Optional[int]=None,
                         elements_size: Optional[int]=None,
                         loads_size: Optional[int]=None,
+                        table_size: Optional[int]=None,
                         flfact_size: Optional[int]=None) -> None:
-        size, nodes_size, elements_size, loads_size, flfact_size = _fix_sizes(
-            size, nodes_size, elements_size, loads_size, flfact_size)
+        size, coords_size, nodes_size, elements_size, loads_size, table_size, flfact_size = _fix_sizes(
+            size, coords_size, nodes_size, elements_size, loads_size, table_size, flfact_size)
 
         model = self.model
-
         if model.run_testing_checks:
             model.quality()
             #model.spcadd.get_reduced_spcs()
@@ -243,7 +316,7 @@ class Writer:
         self._write_optimization(bdf_file, size, is_double)
         self._write_tables(bdf_file, size, is_double)
         self._write_sets(bdf_file, size, is_double)
-        #self._write_superelements(bdf_file, size, is_double)
+        self._write_superelements(bdf_file, size, is_double)
         self._write_contact(bdf_file, size, is_double)
         #self._write_parametric(bdf_file, size, is_double)
         self._write_rejects(bdf_file, size, is_double)
@@ -746,16 +819,19 @@ class Writer:
 
     def _write_superelements(self, bdf_file: TextIOLike,
                              size: int=8, is_double: bool=False) -> None:
-        """
-        Writes the Superelement cards
-
-        Parameters
-        ----------
-        size : int
-            large field (16) or small field (8)
-
-        """
-        pass
+        """Writes the Superelement cards"""
+        model = self.model
+        se_cards = [
+            model.setree, model.senqset, model.sebulk,
+            model.sebndry, model.seconct, model.seelt,
+            model.seloc, model.sempln, model.selabel,
+            model.seexcld, model.csuper, model.csupext,
+            model.seload,
+        ]
+        if any(card.n > 0 for card in se_cards):
+            bdf_file.write('$SUPERELEMENTS\n')
+            for card in se_cards:
+                card.write_file(bdf_file, size=size, is_double=is_double, write_card_header=False)
 
     def _write_tables(self, bdf_file: TextIOLike,
                       size: int=8, is_double: bool=False) -> None:
@@ -772,10 +848,10 @@ class Writer:
             for (unused_id, table) in sorted(model.tables_sdamping.items()):
                 bdf_file.write(table.write_card(size, is_double))
 
-        #if model.random_tables:
-            #bdf_file.write('$RANDOM TABLES\n')
-            #for (unused_id, table) in sorted(model.random_tables.items()):
-                #bdf_file.write(table.write_card(size, is_double))
+        if model.random_tables:
+            bdf_file.write('$RANDOM TABLES\n')
+            for (unused_id, table) in sorted(model.random_tables.items()):
+                bdf_file.write(table.write_card(size, is_double))
 
     def _write_thermal(self, bdf_file: TextIOLike,
                        size: int=8, is_double: bool=False) -> None:
@@ -852,10 +928,12 @@ class Writer:
                            size: int=8, is_double: bool=False) -> None:
         """Writes the static aero cards"""
         model = self.model
-        if model.aeros or len(model.trim) or len(model.diverg) or len(model.csschd):
+        if model.aeros or len(model.trim) or len(model.trim2) or len(model.uxvec) or len(model.aeforce) or len(model.diverg) or len(model.csschd):
             bdf_file.write('$STATIC AERO\n')
             model.trim.write_file(bdf_file, size=size, is_double=is_double)
-            #model.trim2.write_file(bdf_file, size=size, is_double=is_double)
+            model.trim2.write_file(bdf_file, size=size, is_double=is_double)
+            model.uxvec.write_file(bdf_file, size=size, is_double=is_double)
+            model.aeforce.write_file(bdf_file, size=size, is_double=is_double)
             model.csschd.write_file(bdf_file, size=size, is_double=is_double)
             model.diverg.write_file(bdf_file, size=size, is_double=is_double)
 
@@ -944,11 +1022,13 @@ class Writer:
             model.deform.write_file(bdf_file, size=size, is_double=is_double)
 
             # axisymmetric loads
-            #bdf_file.write(model.ploadx1.write(size=size))
+            model.ploadx1.write_file(bdf_file, size=size, is_double=is_double)
 
             # static thermal loads
             model.tempd.write_file(bdf_file, size=size, is_double=is_double)  # default temp
             model.temp.write_file(bdf_file, size=size, is_double=is_double)
+            model.tempp1.write_file(bdf_file, size=size, is_double=is_double)
+            model.temprb.write_file(bdf_file, size=size, is_double=is_double)
 
             # dynamic thermal loads
             #bdf_file.write(model.dtemp.write(size=size))  # has nodes
@@ -986,6 +1066,11 @@ class Writer:
             # random loads
             model.randps.write_file(bdf_file, size=size, is_double=is_double)
             model.acsrce.write_file(bdf_file, size=size, is_double=is_double)
+            model.randt1.write_file(bdf_file, size=size, is_double=is_double)
+
+            # cyclic loads
+            model.loadcyn.write_file(bdf_file, size=size, is_double=is_double)
+            model.loadcyh.write_file(bdf_file, size=size, is_double=is_double)
 
             #for (key, load_combinations) in sorted(self.load_combinations.items()):
                 #for load_combination in load_combinations:

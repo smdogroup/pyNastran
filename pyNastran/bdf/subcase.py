@@ -1,18 +1,16 @@
 """Subcase creation/extraction class"""
 from __future__ import annotations
-import getpass
-from typing import Any, TYPE_CHECKING
+# import getpass
+from typing import Any
 import numpy as np
 
+from cpylog import SimpleLogger
 from pyNastran.utils.numpy_utils import integer_types
 #from pyNastran.utils import deprecated # object_attributes,
 
 from pyNastran.bdf.bdf_interface.subcase.utils import (
     write_stress_type, write_set, expand_thru_case_control)
-USER_NAME = getpass.getuser()
-
-if TYPE_CHECKING:  # pragma: no cover
-    from cpylog import SimpleLogger
+# USER_NAME = getpass.getuser()
 
 
 INT_CARDS = (
@@ -92,8 +90,8 @@ class Subcase:
         2x (tested with timeit).
 
         Default method is a bit slow for a list of lists and can take a
-        long time to read a bdf with many subcases this method removes
-        some of the overhead if the subcase is the default subcase, it
+        long time to read a bdf with many subcases. This method removes
+        some of the overhead if the subcase is the default subcase. It
         is shallow copied instead this greatly improves bdf read speed,
         since it avoids deepcopying large sets defined in the default
         subcase for every subcase that is defined.
@@ -146,11 +144,15 @@ class Subcase:
     #     """
     #     return deprecated(old_name, new_name, deprecated_version, levels=[0, 1, 2])
 
-    def add_op2_data(self, data_code: dict[str, Any], msg: str, log: SimpleLogger) -> None:
+    def add_op2_data(self, data_code: dict[str, Any], msg: str,
+                     log: SimpleLogger) -> None:
         """
-        >>> self.subcase.add_op2_data(self.data_code, 'VECTOR')
+        >>> subcase = Subcase()
+        >>> data_code = {'table_name': b'OUGV1', 'table_code': 3}
+        >>> subcase.add_op2_data(data_code, 'VECTOR')
         """
         assert log is not None, log
+        # assert self.log is not None, self.log
         #subtable_name = data_code['subtable_name']
         table_name = data_code['table_name']
         if not isinstance(table_name, str):
@@ -193,7 +195,7 @@ class Subcase:
                 elif thermal == 1:
                     self.add('ANALYSIS', 'HEAT', [], 'KEY-type')
                 else:
-                    self._write_op2_error_msg(log, self.log, msg, data_code)
+                    self._write_op2_error_msg(log, msg, data_code)
             elif table_code == 7:
                 self.add('VECTOR', 'ALL', options, 'STRESS-type')
             elif table_code == 10:
@@ -205,7 +207,7 @@ class Subcase:
                 assert thermal == 0, thermal
                 self.add('DISPLACEMENT', 'ALL', options, 'STRESS-type')
             else:
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
 
         elif table_name == 'OVG1':
             if table_code in [11, 10]:
@@ -213,7 +215,7 @@ class Subcase:
                 assert thermal == 0, data_code
                 self.add('VELOCITY', 'ALL', options, 'STRESS-type')
             else:
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
 
         elif table_name == 'OAG1':
             if table_code == 11:
@@ -221,7 +223,7 @@ class Subcase:
                 assert thermal == 0, data_code
                 self.add('ACCELERATION', 'ALL', options, 'STRESS-type')
             else:
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
 
         # OAG-random
         elif table_name in ['OAGPSD1', 'OAGPSD2']:
@@ -242,20 +244,20 @@ class Subcase:
             if thermal == 1:
                 self.add('ANALYSIS', 'HEAT', options, 'KEY-type')
             else:
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
 
         elif table_name in ['ROUGV1', 'ROUGV2']:
             thermal = data_code['thermal']
             if thermal == 0:
                 self.add('DISPLACEMENT', 'ALL', options, 'STRESS-type')
             else:
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
         elif table_name in ['ROQGM1']:
             thermal = data_code['thermal']
             if thermal == 0:
                 self.add('MPCFORCES', 'ALL', options, 'STRESS-type')
             else:
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
         elif table_name in ['RAREATC', 'RARCONS']:
             self.add('SPCFORCES', 'ALL', options, 'STRESS-type')
 
@@ -263,7 +265,7 @@ class Subcase:
             if table_code == 7:
                 self.add('ANALYSIS', 'HEAT', [], 'KEY-type')
             else:
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
         elif table_name == 'OUPV1':
             if table_code == 1:
                 self.add('SDISPLACEMENT', 'ALL', options, 'STRESS-type')
@@ -272,13 +274,13 @@ class Subcase:
             elif table_code == 11:
                 self.add('SACCELERATION', 'ALL', options, 'STRESS-type')
             else:
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
 
         elif table_name == 'OPHSA':
             if table_code == 14:
                 self.add('SVECTOR', 'ALL', options, 'STRESS-type')
             else:
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
         elif table_name in ['OUXY1', 'OUXY2']:
             if table_code == 15:
                 self.add('SDISPLACEMENT', 'ALL', options, 'STRESS-type')
@@ -287,24 +289,24 @@ class Subcase:
             elif table_code == 17:
                 self.add('SACCELERATION', 'ALL', options, 'STRESS-type')
             else:
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
 
         elif table_name in ['OQG1', 'OQG2', 'OQGV1']:
             if table_code == 3:
                 self.add('SPCFORCES', 'ALL', options, 'STRESS-type')
             else:
-                self._write_op2_error_msg(log, self.log, msg, data_code)
-        elif table_name in ['OEF1X', 'OEF1', 'DOEF1', 'RAFCONS', 'RAFEATC']:
+                self._write_op2_error_msg(log, msg, data_code)
+        elif table_name in ['OEF1X', 'OEF1XMC', 'OEF1', 'DOEF1', 'RAFCONS', 'RAFEATC']:
             if table_code in [4]:
                 self.add('FORCE', 'ALL', options, 'STRESS-type')
             else:
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
         elif table_name in ['OEF2']:
             options.append('SORT2')
             if table_code == 4:
                 self.add('FORCE', 'ALL', options, 'STRESS-type')
             else:
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
 
         elif table_name in ['OEFATO1', 'OEFATO2']:
             options.append('PSDF')
@@ -368,20 +370,20 @@ class Subcase:
             if table_code in [25]:
                 self.add('FORCE', 'ALL', options, 'STRESS-type')
             else:  # pragma: no cover
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
         elif table_name in ['OQMG1', 'OQMG2']:
             if table_code in [3, 39]:
                 self.add('MPCFORCES', 'ALL', options, 'STRESS-type')
             else:  # pragma: no cover
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
         elif table_name in ['OGPFB1', 'RAGCONS', 'RAGEATC']:
             if table_code == 19:
                 self.add('GPFORCE', 'ALL', options, 'STRESS-type')
             else:  # pragma: no cover
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
 
         # stress
-        elif table_name in ['OES1', 'OES1X', 'OES1X1', 'OES1C', 'OESCP',
+        elif table_name in ['OES1', 'OES1X', 'OES1XMC', 'OES1X1', 'OES1C', 'OESCP',
                             'OESNL2', 'OESNLXD', 'OESNLXR', 'OESNLBR', 'OESTRCP',
                             'OESVM1', 'OESVM1C', 'OESNL1X',
                             'OESNLXR2', 'RASCONS', 'RASEATC', 'OESNLBR2', 'OES1A']:
@@ -390,56 +392,56 @@ class Subcase:
             if table_code == 5:
                 self.add('STRESS', 'ALL', options, 'STRESS-type')
             else:  # pragma: no cover
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
         elif table_name in ['OES2', 'OES2C', 'OESVM2', ]:
             options.append('SORT2')
             if table_code == 5:
                 self.add('STRESS', 'ALL', options, 'STRESS-type')
             else:  # pragma: no cover
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
         elif table_name in ['OESXRM1C']:
             if table_code == 805:
                 self.add('STRESS', 'ALL', options, 'STRESS-type')
             else:  # pragma: no cover
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
         elif table_name in ['OESXNO1C']:
             if table_code == 905:
                 self.add('STRESS', 'ALL', options, 'STRESS-type')
             else:  # pragma: no cover
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
 
         elif table_name in ['OSTR2', 'OSTR2C']:
             options.append('SORT2')
             if table_code == 5:
                 self.add('STRAIN', 'ALL', options, 'STRESS-type')
             else:  # pragma: no cover
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
 
         elif table_name in ['OESRT', 'OESRTN']:
             #assert data_code['is_stress_flag'] == True, data_code
             if table_code in [25, 56, 89]:
                 self.add('STRESS', 'ALL', options, 'STRESS-type')
             else:  # pragma: no cover
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
         elif table_name in ['OCRUG']:
             if table_code in [1]:
                 self.add('DISP', 'ALL', options, 'STRESS-type')
             else:  # pragma: no cover
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
 
         # strain
-        elif table_name in ['OSTR1X', 'OSTR1C', 'OSTR1', 'RAECONS', 'RAEEATC']:
+        elif table_name in ['OSTR1X', 'OSTR1XMC', 'OSTR1C', 'OSTR1', 'RAECONS', 'RAEEATC']:
             assert data_code['is_strain_flag'] is True, data_code
             if table_code == 5:
                 self.add('STRAIN', 'ALL', options, 'STRESS-type')
             else:  # pragma: no cover
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
         elif table_name in ['OSTRVM1', 'OSTRVM1C', 'OSTRVM2']:
             #assert data_code['is_stress_flag'] == True, data_code
             if table_code == 5:
                 self.add('STRAIN', 'ALL', options, 'STRESS-type')
             else:  # pragma: no cover
-                self._write_op2_error_msg(log, self.log, msg, data_code)
+                self._write_op2_error_msg(log, msg, data_code)
 
         # special tables
         elif table_name in ['RADCONS', 'RADEFFM', 'RADEATC', 'RAPEATC', 'RAQEATC', 'RADCONS',
@@ -456,23 +458,24 @@ class Subcase:
         elif table_name in ['DOES1']:
             self.add('STRESS', 'ALL', options, 'STRESS-type')
         else:  # pragma: no cover
-            self._write_op2_error_msg(log, self.log, msg, data_code)
+            self._write_op2_error_msg(log, msg, data_code)
         #print(self)
 
-    def _write_op2_error_msg(self, log, log_error, msg, data_code):
+    def _write_op2_error_msg(self, log: SimpleLogger,
+                             msg: str,
+                             data_code: dict[str, str | bytes | int | float],
+                             ) -> None:
         if log is not None:
-            log.error(msg)
-            log.error(data_code)
-        elif log_error is not None:
-            log_error.error(msg)
-            log_error.error(data_code)
+            if msg:
+                log.error(msg)
+            log.error(str(data_code))
         else:  # pragma: no cover
             # log_error is None
             print('Error calling subcase.add_op2_data...')
-            print(msg)
+            if msg:
+                print(msg)
             print(data_code)
             raise RuntimeError(data_code)
-        log.error(str(data_code))
         #if USER_NAME == 'sdoyle': # or 'id' in msg:
             #raise RuntimeError(data_code)
 
@@ -1248,7 +1251,8 @@ def _simplify_set(key: str, value: Any, options: list[Any],
     key: str
         'SET 1'
     value : list[str]
-        [' 1.*MAT1', '2.*MAT2', '3.*MAT3', '4.*MAT4', '5.*MAT5', '6.*MAT6', ' 7.*MAT7', '8.*MAT8', '9.*MAT9']
+        [' 1.*MAT1', '2.*MAT2', '3.*MAT3', '4.*MAT4', '5.*MAT5',
+         '6.*MAT6', ' 7.*MAT7', '8.*MAT8', '9.*MAT9']
     options : int
         the SET id
     """

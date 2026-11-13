@@ -3,18 +3,18 @@ defines:
  - ScalarTableObject
 
 """
+import copy
 from struct import Struct, pack
 import warnings
 
 import numpy as np
-from numpy import zeros, searchsorted, unique, where, float32
-from numpy import allclose, asarray, vstack
 
 from pyNastran.op2.result_objects.op2_objects import ScalarObject, set_as_sort1
 from pyNastran.op2.result_objects.utils_pandas import build_dataframe_transient_header
-from pyNastran.op2.result_objects.table_object import append_sort1_sort2
+from pyNastran.op2.result_objects.table_object import append_sort1_sort2, slice_nids_by_index
 from pyNastran.f06.f06_formatting import write_floats_13e, write_float_12e
-from pyNastran.op2.op2_interface.write_utils import set_table3_field
+from pyNastran.op2.op2_interface.write_utils import (
+    set_table3_field, get_title_subtitle_label)
 from pyNastran.op2.writer.utils import fix_table3_types
 
 float_types = (float, np.float32)
@@ -43,11 +43,13 @@ class ScalarTableArray(ScalarObject):  # displacement style table
         self._eq_header(table)
         assert self.is_sort1 == table.is_sort1
         if not np.array_equal(self.node_gridtype, table.node_gridtype):
-            assert self.node_gridtype.shape == table.node_gridtype.shape, 'shape=%s table.shape=%s' % (self.node_gridtype.shape, table.node_gridtype.shape)
+            assert self.node_gridtype.shape == table.node_gridtype.shape, 'shape=%s table.shape=%s' % (
+                self.node_gridtype.shape, table.node_gridtype.shape)
             msg = 'table_name=%r class_name=%s\n' % (self.table_name, self.__class__.__name__)
             msg += '%s\n' % str(self.code_information())
             msg += 'nid_gridtype:\n'
-            msg += 'gridtype.shape=%s table.gridtype.shape=%s\n' % (str(self.node_gridtype.shape), str(table.node_gridtype.shape))
+            msg += 'gridtype.shape=%s table.gridtype.shape=%s\n' % (
+                str(self.node_gridtype.shape), str(table.node_gridtype.shape))
             for (nid, grid_type), (nid2, grid_type2) in zip(self.node_gridtype, table.node_gridtype):
                 msg += '(%s, %s)    (%s, %s)\n' % (nid, grid_type, nid2, grid_type2)
             print(msg)
@@ -147,6 +149,16 @@ class ScalarTableArray(ScalarObject):  # displacement style table
         msg += self.get_data_code()
         return msg
 
+    def slice_by_node_id(self, nids: np.ndarray,
+                         assume_exists: bool=False, inplace: bool=False):
+        nodes = self.node_gridtype[:, 0]
+        nids, inid, nnid2 = slice_nids_by_index(nodes, nids, assume_exists)
+        obj = self if inplace else copy.deepcopy(self)
+        obj.node_gridtype = obj.node_gridtype[inid, :]
+        obj.data = obj.data[:, inid, :]
+        obj.nnodes = len(inid)
+        return obj
+
     @property
     def headers(self):
         return ['t1']
@@ -210,7 +222,7 @@ class ScalarTableArray(ScalarObject):  # displacement style table
         import pandas as pd
         headers = self.get_headers()
         node_gridtype = [self.node_gridtype[:, 0], self.gridtype_str]
-        ugridtype_str = unique(self.gridtype_str)
+        ugridtype_str = np.unique(self.gridtype_str)
 
         if self.nonlinear_factor not in (None, np.nan):
             #Time             0.0       10.0
@@ -305,10 +317,10 @@ class ScalarTableArray(ScalarObject):  # displacement style table
         self.set_as_sort1()
         gridtypes = self.node_gridtype[:, 1]
         nnodes = len(gridtypes)
-        self.gridtype_str = np.chararray(nnodes, unicode=True)
-        ugridtypes = unique(gridtypes)
+        self.gridtype_str = np.zeros(nnodes, dtype='U1')
+        ugridtypes = np.unique(gridtypes)
         for ugridtype in ugridtypes:
-            i = where(gridtypes == ugridtype)
+            i = np.where(gridtypes == ugridtype)
             self.gridtype_str[i] = self.recast_gridtype_as_string(ugridtype)
         #del self.itotal, self.itime
 
@@ -384,9 +396,9 @@ class RealScalarTableArray(ScalarTableArray):  # temperature style table
         num_wide = self.num_wide
         acoustic_flag = 0
         thermal = self.thermal
-        title = b'%-128s' % self.title.encode('ascii')
-        subtitle = b'%-128s' % self.subtitle.encode('ascii')
-        label = b'%-128s' % self.label.encode('ascii')
+        title, subtitle, label = get_title_subtitle_label(
+            self.title, self.subtitle, self.label,
+            self.superelement_adaptivity_index)
         ftable3 = b'i' * 50 + b'128s 128s 128s'
         oCode = 0
 
@@ -457,7 +469,9 @@ class RealScalarTableArray(ScalarTableArray):  # temperature style table
                   date, is_mag_phase=False, endian='>'):
         """writes an OP2"""
         import inspect
-        assert self.table_name in {'OPG1', 'OUGV1', 'TOUGV1', 'OUG1', 'OTEMP1'}, self.table_name  # 'OUGV1', 'OQMG1', 'OQG1'
+
+        # 'OUGV1', 'OQMG1', 'OQG1'
+        assert self.table_name in {'OPG1', 'OUGV1', 'TOUGV1', 'OUG1', 'OTEMP1'}, self.table_name
 
         frame = inspect.currentframe()
         call_frame = inspect.getouterframes(frame, 2)
@@ -591,7 +605,7 @@ class RealScalarTableArray(ScalarTableArray):  # temperature style table
         for itime in range(self.ntimes):
             dt = self._times[itime]
             t1 = self.data[itime, :, 0]
-            if isinstance(dt, (float, float32)):
+            if isinstance(dt, (float, np.float32)):
                 header[1] = ' %s = %10.4E\n' % (self.data_code['name'], dt)
             else:
                 header[1] = ' %s = %10i\n' % (self.data_code['name'], dt)

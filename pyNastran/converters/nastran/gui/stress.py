@@ -15,9 +15,9 @@ from pyNastran.op2.op2_interface.op2_classes import (
     RealBarStressArray, # ComplexBarStressArray,
     #RealSolidStressArray, RealSolidStressArrayNx, ComplexSolidStressArray,
 )
-from pyNastran.op2.tables.oes_stressStrain.real.oes_solids import RealSolidArray
-from pyNastran.op2.tables.oes_stressStrain.real.oes_solids_nx import RealSolidArrayNx
-from pyNastran.op2.tables.oes_stressStrain.complex.oes_solids import ComplexSolidArray
+# from pyNastran.op2.tables.oes_stressStrain.real.oes_solids import RealSolidArray
+# from pyNastran.op2.tables.oes_stressStrain.real.oes_solids_nx import RealSolidArrayNx
+# from pyNastran.op2.tables.oes_stressStrain.complex.oes_solids import ComplexSolidArray
 
 from pyNastran.converters.nastran.gui.result_objects.simple_table_results import SimpleTableResults
 from pyNastran.converters.nastran.gui.result_objects.layered_table_results import (
@@ -26,7 +26,9 @@ from pyNastran.converters.nastran.gui.result_objects.layered_table_results impor
 from pyNastran.converters.nastran.gui.result_objects.plate_stress_results import (
     PlateStrainStressResults2, get_real_plate_cases, plate_cases_to_iresult, _get_plates)
 from pyNastran.converters.nastran.gui.result_objects.solid_stress_results import (
-    SolidStrainStressResults2, get_real_solid_cases, solid_cases_to_iresult, _get_solids)
+    SolidStrainStressResults2, get_real_solid_cases, solid_cases_to_iresult,
+    # _get_solids,
+)
 from pyNastran.converters.nastran.gui.result_objects.composite_stress_results import (
     CompositeStrainStressResults2, get_composite_methods, _composite_method_map)
 from pyNastran.converters.nastran.gui.types import CasesDict, NastranKey, KeysMap, KeyMap
@@ -808,7 +810,6 @@ def get_plate_stress_strains2(cases: CasesDict,
                               keys_map: KeysMap,
                               eid_to_nid_map: dict[int, list[int]],
                               log: SimpleLogger,
-                              use_new_sidebar_objects: bool,
                               use_new_terms: bool,
                               is_stress: bool,
                               prefix: str='') -> int:
@@ -821,9 +822,6 @@ def get_plate_stress_strains2(cases: CasesDict,
         (isubcase, analysis_code, sort_method, count, ogs,
          superelement_adaptivity_index, pval_step)
     """
-    if not use_new_sidebar_objects:  # pragma: no cover
-        return icase
-
     plate_cases, subcase_id = get_real_plate_cases(
         element_id, model, key, is_stress, prefix,
         require_results=False)
@@ -1037,11 +1035,7 @@ def get_composite_plate_stress_strains2(#log: SimpleLogger,
                                         form_dict, header_dict,
                                         keys_map: KeysMap,
                                         log: SimpleLogger,
-                                        use_new_sidebar_objects: bool,
                                         is_stress: bool=True) -> int:
-    if not use_new_sidebar_objects:  # pragma: no cover
-        return icase
-
     case_map, keys_map2, cases2 = _stack_composite_results(
         model, log, is_stress, key=key)
     subcase_id = key[0]
@@ -1220,12 +1214,11 @@ def get_composite_plate_stress_strains(cases: CasesDict,
                 layer_name = f' Layer {ilayer+1}'
                 form_layeri = form_layers[layer_name]
                 #cases[icase] = (res, (subcase_id, header))
-                #if use_new_sidebar_objects:
-                    #cases[icase] = (res2, (subcase_id, (itime, ilayer, imethod, header)))
-                    #form_layeri.append((f'{method} ({layer_name})', icase, []))
-                    #form_name2 = f'{element_type} Composite Plate2 {word}: {method} ({layer_name})'
-                    #form_names.append(form_name2)
-                    #icase += 1
+                #cases[icase] = (res2, (subcase_id, (itime, ilayer, imethod, header)))
+                #form_layeri.append((f'{method} ({layer_name})', icase, []))
+                #form_name2 = f'{element_type} Composite Plate2 {word}: {method} ({layer_name})'
+                #form_names.append(form_name2)
+                #icase += 1
 
                 cases[icase] = (res, (subcase_id, (itime, ilayer, imethod, header)))
                 form_layeri.append((f'{method} ({layer_name})', icase, []))
@@ -1246,7 +1239,6 @@ def get_solid_stress_strains2(cases: CasesDict,
                               form_dict, header_dict,
                               keys_map: KeysMap,
                               log: SimpleLogger,
-                              use_new_sidebar_objects: bool,
                               use_new_terms: bool,
                               is_stress: bool,
                               prefix: str='') -> int:
@@ -1260,9 +1252,6 @@ def get_solid_stress_strains2(cases: CasesDict,
          superelement_adaptivity_index, pval_step)
 
     """
-    if not use_new_sidebar_objects:  # pragma: no cover
-        return icase
-
     solid_cases, subcase_id = get_real_solid_cases(
         element_id, model,
         key, is_stress, prefix,
@@ -1272,7 +1261,8 @@ def get_solid_stress_strains2(cases: CasesDict,
         return icase
 
     solid_case = solid_cases[0]
-    iresult_to_title_annotation_map, word, max_sheari = solid_cases_to_iresult(solid_cases, is_stress)
+    iresult_to_title_annotation_map, word, max_sheari = solid_cases_to_iresult(
+        solid_cases, is_stress)
 
     if not use_new_terms:
         del iresult_to_title_annotation_map[max_sheari]
@@ -1333,13 +1323,15 @@ def get_solid_stress_strains2(cases: CasesDict,
 #     if is_stress:
 #         results = model.op2_results.stress
 #         solids = [
-#             results.ctetra_stress, results.cpenta_stress, results.chexa_stress, # results.cpyram_stress,
+#             results.ctetra_stress, results.cpenta_stress, results.chexa_stress,
+#             results.cpyram_stress,
 #         ]
 #         word = 'Stress (centroid)'
 #     else:
 #         results = model.op2_results.strain
 #         solids = [
-#             results.ctetra_strain, results.cpenta_strain, results.chexa_strain, # results.cpyram_strain,
+#             results.ctetra_strain, results.cpenta_strain, results.chexa_strain,
+#             results.cpyram_strain,
 #         ]
 #         word = 'Strain (centroid)'
 #

@@ -11,8 +11,6 @@ from __future__ import annotations
 from itertools import count
 from typing import TYPE_CHECKING
 
-from matplotlib import pyplot as plt
-
 from pyNastran.bdf.cards.aero.zaero_cards.spline import cross_reference_set
 from pyNastran.bdf.cards.aero.zaero_cards.utils import split_filename_dollar
 from pyNastran.utils.numpy_utils import integer_types
@@ -28,9 +26,9 @@ from pyNastran.bdf.cards.aero.zaero_cards.ase import (
 from pyNastran.bdf.cards.aero.zaero_cards.cards import MLDCOMD
 
 if TYPE_CHECKING:  # pragma: no cover
+    from matplotlib import pyplot as plt
     from pyNastran.bdf.bdf import BDF
     from pyNastran.bdf.bdf_interface.bdf_card import BDFCard
-
 
 
 class MLOADS(BaseCard):
@@ -182,6 +180,8 @@ class MLOADS(BaseCard):
         mldcomd = self.mldcomd_ref
         ntables = len(mldcomd.extinps_ref)
         assert ntables > 0, ntables
+
+        from matplotlib import pyplot as plt
         axes = fig.subplots(nrows=ntables)
         if ntables == 1:
             axes = [axes]
@@ -339,7 +339,7 @@ class EXTOUT(BaseCard):
     @classmethod
     def add_card(cls, card: BDFCard, comment: str=''):
         """
-        Adds a TRIM card from ``BDF.add_card(...)``
+        Adds a EXTOUT card from ``BDF.add_card(...)``
 
         Parameters
         ----------
@@ -845,11 +845,11 @@ def get_external_obj(obj: EXTINP | EXTOUT, model: BDF,
                 assert obj.itf_component == 1, f'component={obj.itf_component}\n{str(obj)}\nparent:\n{str(parent)}'
             elif itf_id in zaero.sisotf:
                 itf_ref = zaero.sisotf[itf_id]
-            else:
+            else:  # pragma: no cover
                 raise RuntimeError(msg)
         elif itf_id in zaero.cjunct:
             itf_ref = zaero.cjunct[itf_id]
-        else:
+        else:  # pragma: no cover
             raise RuntimeError(msg)
     else:
         assert parent.type in ['ASECONT', 'MLDCOMD'], parent
@@ -859,7 +859,7 @@ def get_external_obj(obj: EXTINP | EXTOUT, model: BDF,
         #     itf_ref = zaero.sisotf[itf_id]
         if itf_id in zaero.cjunct:
             itf_ref = zaero.cjunct[itf_id]
-        else:
+        else:  # pragma: no cover
             raise RuntimeError(msg)
     return itf_ref
 

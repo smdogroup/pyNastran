@@ -146,6 +146,10 @@ class ShellElement(Element):
     def __init__(self):
         Element.__init__(self)
 
+    def update_zoffset_to_oml(self, total_thickness: float) -> None:
+        if self.zoffset > 0:
+            self.zoffset = total_thickness / 2.
+
     def Theta_mcid(self) -> int:
         if self.theta_mcid_ref is None:
             return self.theta_mcid
@@ -296,7 +300,15 @@ class TriShell(ShellElement):
         return self.pid_ref.Thickness(tflag=self.tflag, tscales=tscales)
         #return self.pid_ref.Thickness()
 
-    def AreaCentroidNormal(self) -> tuple[float, float, float]:
+    def AreaCentroid(self) -> tuple[float, np.ndarray]:
+        n1, n2, n3 = self.get_node_positions(nodes=self.nodes_ref[:3])
+        a = n1 - n2
+        b = n1 - n3
+        area = 0.5 * np.linalg.norm(np.cross(a, b))
+        centroid = (n1 + n2 + n3) / 3
+        return area, centroid
+
+    def AreaCentroidNormal(self) -> tuple[float, np.ndarray, np.ndarray]:
         """
         Returns area,centroid, normal as it's more efficient to do them
         together
@@ -470,6 +482,13 @@ class TriShell(ShellElement):
         dxyz = np.mean([dxyz21, dxyz32, dxyz13]) / 2.
 
         return dxyz, centroid, normal, xyz1, xyz2
+
+    def Area_no_xref(self, model):
+        (n1, n2, n3) = self.get_node_positions_no_xref(model, nodes=self.nodes[:3])
+        a = n1 - n2
+        b = n1 - n3
+        area = 0.5 * np.linalg.norm(np.cross(a, b))
+        return area
 
 
 class CTRIA3(TriShell):
@@ -1340,7 +1359,7 @@ class CTRIA6(TriShell):
         """Returns the thickness, :math:`t`"""
         return self.pid_ref.Thickness()
 
-    def AreaCentroidNormal(self):
+    def AreaCentroidNormal(self) -> tuple[float, np.ndarray, np.ndarray]:
         """
         Returns area, centroid, normal as it's more efficient to do them
         together
@@ -1721,7 +1740,7 @@ class CTRIAR(TriShell):
 
     def raw_fields(self):
         list_fields = (['CTRIAR', self.eid, self.Pid()] + self.node_ids +
-                       [self.theta_mcid, self.zoffset, self.tflag,
+                       [self.theta_mcid, self.zoffset, None, None, self.tflag,
                         self.T1, self.T2, self.T3])
         return list_fields
 
@@ -1813,12 +1832,12 @@ class QuadShell(ShellElement):
             raise RuntimeError(msg)
         return n
 
-    def AreaCentroidNormal(self) -> tuple[float, float, float]:
+    def AreaCentroidNormal(self) -> tuple[float, np.ndarray, np.ndarray]:
         (area, centroid) = self.AreaCentroid()
         normal = self.Normal()
         return area, centroid, normal
 
-    def AreaCentroid(self) -> tuple[float, float]:
+    def AreaCentroid(self) -> tuple[float, np.ndarray]:
         r"""
         ::
           1-----2
@@ -3840,7 +3859,7 @@ class CPLSTS8(CPLSTx8):
                  theta=0.0, tflag=0,
                  T1=1.0, T2=1.0, T3=1.0, T4=1.0,
                  T5=1.0, T6=1.0, T7=1.0, T8=1.0, comment=''):
-        TriShell.__init__(self)
+        QuadShell.__init__(self)
         if comment:
             self.comment = comment
         self.eid = eid
@@ -5104,9 +5123,28 @@ class SNORM(BaseCard):
 
 
 def transform_shell_material_coordinate_system(cids: list[int],
-                                               iaxes, theta_mcid, normal, p1, p2,
-                                               idtype='int32', fdtype='float64'):
-    """calculate the material transformation matrix"""
+                                               iaxes: np.ndarray,
+                                               theta_mcid: np.ndarray,
+                                               normal: np.ndarray,
+                                               p1: np.ndarray,
+                                               p2: np.ndarray,
+                                               idtype: str='int32',
+                                               fdtype: str='float64'):
+    """
+    Calculate the material transformation matrix
+
+    cids  = []
+    iaxes  = []
+    theta_mcid = [1, 2.0]
+    normal = np.array([
+        [0., 0., 1.],
+        [0., 0., 1.],
+    ])
+    p1 = []
+    p2 = []
+    transform_shell_material_coordinate_system(
+        cids, iaxes, theta_mcid, normal, p1, p2)
+    """
     is_mcid = np.array([isinstance(val, integer_types) for val in theta_mcid], dtype='bool')
     nelements = len(theta_mcid)
     imcid = np.where(is_mcid)[0]
@@ -5182,7 +5220,7 @@ def transform_shell_material_coordinate_system(cids: list[int],
     return telem
 
 
-def _material_coordinate_system(element,
+def _material_coordinate_system(element: CQUAD4 | CTRIA3 | CTRIA6 | CQUAD8 | CQUADR,
                                 normal: np.ndarray,
                                 xyz1: np.ndarray,
                                 xyz2: np.ndarray) -> tuple[np.ndarray,

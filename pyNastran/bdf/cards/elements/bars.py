@@ -127,16 +127,15 @@ class LineElement(Element):  # CBAR, CBEAM, CBEAM3, CBEND
         mpa = self.MassPerLength()
         if mpa == 0.0:
             return 0.
-        L = self.Length()
-        mass = L * mpa
+        length = self.Length()
+        mass = length * mpa
 
         #try:
-            #mass = (self.Rho() * self.Area() + self.Nsm()) * L
+            #mass = (self.Rho() * self.Area() + self.Nsm()) * length
         #except TypeError:
             #msg = 'TypeError on eid=%s pid=%s:\n' % (self.eid, self.Pid())
-            #msg += 'rho = %s\narea = %s\nnsm = %s\nL = %s' % (self.Rho(),
-            #                                                  self.Area(),
-            #                                                  self.Nsm(), L)
+            #msg += 'rho = %s\narea = %s\nnsm = %s\nL = %s' % (
+            #    self.Rho(), self.Area(), self.Nsm(), length)
             #raise TypeError(msg)
 
         return mass
@@ -155,8 +154,8 @@ class LineElement(Element):  # CBAR, CBEAM, CBEAM3, CBEND
         .. math:: L = \sqrt{  (n_{x2}-n_{x1})^2+(n_{y2}-n_{y1})^2+(n_{z2}-n_{z1})^2  }
 
         """
-        L = np.linalg.norm(self.nodes_ref[1].get_position() - self.nodes_ref[0].get_position())
-        return L
+        length = np.linalg.norm(self.nodes_ref[1].get_position() - self.nodes_ref[0].get_position())
+        return length
 
     def get_edge_ids(self) -> list[tuple[int, ...]]:
         """
@@ -187,7 +186,8 @@ class BAROR(BaseCard):
         x = None
         return BAROR(pid, is_g0, g0, x, offt='GGG', comment='')
 
-    def __init__(self, pid: int, is_g0: bool, g0: int, x: Optional[list[float]],
+    def __init__(self, pid: int,
+                 is_g0: bool, g0: int, x: Optional[list[float]],
                  offt: str='GGG', comment: str=''):
         BaseCard.__init__(self)
         if comment:
@@ -230,7 +230,9 @@ class BAROR(BaseCard):
         """
         Gets the fields of the card in their full form
         """
-        list_fields = ['BAROR', None, None] + self.x.tolist() + [self.offt]
+        #     |   1   | 2 |  3  | 4 | 5 |   6   |  7  |   8   |  9   |
+        #     | BAROR |   | PID |   |   | G0/X1 |  X2 |  X3   | OFFT |
+        list_fields = ['BAROR', None, self.pid, None, None] + self.x.tolist() + [self.offt]
         return list_fields
 
     def write_card(self, size: int=8, is_double: bool=False) -> str:
@@ -682,26 +684,26 @@ class CBAR(LineElement):
         if xref:  # True
             assert self.pid_ref.type in ['PBAR', 'PBARL', 'PBRSECT'], '%s%s' % (self, self.pid_ref)
             mid = self.Mid()
-            A = self.Area()
+            area = self.Area()
             nsm = self.Nsm()
             mpl = self.MassPerLength()
-            L = self.Length()
+            length = self.Length()
             mass = self.Mass()
             assert isinstance(mid, int), 'mid=%r' % mid
             assert isinstance(nsm, float), 'nsm=%r' % nsm
-            assert isinstance(A, float), 'eid=%s A=%r' % (eid, A)
-            assert isinstance(L, float), 'eid=%s L=%r' % (eid, L)
+            assert isinstance(area, float), 'eid=%s A=%r' % (eid, area)
+            assert isinstance(length, float), 'eid=%s L=%r' % (eid, length)
             assert isinstance(mpl, float), 'eid=%s mass_per_length=%r' % (eid, mpl)
             assert isinstance(mass, float), 'eid=%s mass=%r' % (eid, mass)
-            assert L > 0.0, 'eid=%s L=%s' % (eid, L)
+            assert length > 0.0, 'eid=%s L=%s' % (eid, length)
 
-    def Mid(self):
+    def Mid(self) -> int:
         if self.pid_ref is None:
             msg = 'Element eid=%i has not been cross referenced.\n%s' % (self.eid, str(self))
             raise RuntimeError(msg)
         return self.pid_ref.Mid()
 
-    def Area(self):
+    def Area(self) -> float:
         if self.pid_ref is None:
             msg = 'Element eid=%i has not been cross referenced.\n%s' % (self.eid, str(self))
             raise RuntimeError(msg)
@@ -709,7 +711,7 @@ class CBAR(LineElement):
         assert isinstance(A, float)
         return A
 
-    def J(self):
+    def J(self) -> float:
         if self.pid_ref is None:
             msg = 'Element eid=%i has not been cross referenced.\n%s' % (self.eid, str(self))
             raise RuntimeError(msg)
@@ -720,13 +722,13 @@ class CBAR(LineElement):
             raise TypeError(msg)
         return j
 
-    def Length(self):
+    def Length(self) -> float:
         # TODO: consider w1a and w1b in the length formulation
         L = np.linalg.norm(self.gb_ref.get_position() - self.ga_ref.get_position())
         assert isinstance(L, float)
         return L
 
-    def Nsm(self):
+    def Nsm(self) -> float:
         if self.pid_ref is None:
             msg = 'Element eid=%i has not been cross referenced.\n%s' % (self.eid, str(self))
             raise RuntimeError(msg)
@@ -734,25 +736,25 @@ class CBAR(LineElement):
         assert isinstance(nsm, float)
         return nsm
 
-    def I1(self):
+    def I1(self) -> float:
         if self.pid_ref is None:
             msg = 'Element eid=%i has not been cross referenced.\n%s' % (self.eid, str(self))
             raise RuntimeError(msg)
         return self.pid_ref.I1()
 
-    def I2(self):
+    def I2(self) -> float:
         if self.pid_ref is None:
             msg = 'Element eid=%i has not been cross referenced.\n%s' % (self.eid, str(self))
             raise RuntimeError(msg)
         return self.pid_ref.I2()
 
-    def Centroid(self):
+    def Centroid(self) -> np.ndarray:
         if self.pid_ref is None:
             msg = 'Element eid=%i has not been cross referenced.\n%s' % (self.eid, str(self))
             raise RuntimeError(msg)
         return (self.ga_ref.get_position() + self.gb_ref.get_position()) / 2.
 
-    def center_of_mass(self):
+    def center_of_mass(self) -> np.ndarray:
         return self.Centroid()
 
     def cross_reference(self, model: BDF) -> None:
@@ -2098,7 +2100,7 @@ def get_bar_vector(model: BDF, elem: CBAR | CBEAM,
     return v, cd1, cd1_ref, cd2, cd2_ref
 
 
-def rotate_v_wa_wb(model: BDF, elem,
+def rotate_v_wa_wb(model: BDF, elem: CBAR | CBEAM,
                    xyz1: np.ndarray, xyz2: np.ndarray,
                    node1: GRID, node2: GRID,
                    ihat_offset: np.ndarray, i_offset: np.ndarray,
@@ -2208,7 +2210,7 @@ def rotate_v_wa_wb(model: BDF, elem,
         wa = wa @ xform_offset
         #ia = n1 + wa
     else:
-        msg = 'offt_end_a=%r is not supported; offt=%s' % (offt_end_a, elem.offt)
+        msg = f'offt_end_a={offt_end_a!r} is not supported; offt={elem.offt}'
         log.error(msg)
         return v, None, None, xform_offset
 
@@ -2228,7 +2230,7 @@ def rotate_v_wa_wb(model: BDF, elem,
         wb = wb @ xform_offset
         #ib = n2 + wb
     else:
-        msg = 'offt_end_b=%r is not supported; offt=%s' % (offt_end_b, elem.offt)
+        msg = f'offt_end_b={offt_end_b!r} is not supported; offt={elem.offt}'
         model.log.error(msg)
         return v, wa, None, xform_offset
 

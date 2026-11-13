@@ -27,7 +27,7 @@ from pyNastran.bdf.cards.aero.static_loads import AEROS
 from pyNastran.utils.numpy_utils import integer_types, integer_string_types
 from pyNastran.bdf.cards.params import MDLPRM, PARAM
 from pyNastran.dev.bdf_vectorized3.bdf import DTI_UNITS
-from pyNastran.bdf.cards.contact import BCTPARA, BCTPARM
+from pyNastran.bdf.cards.contact.nx_contact import BCTPARA, BCTPARM
 from pyNastran.bdf.cards.bdf_tables import (
     TABLED1, TABLED2, TABLED3, TABLED4,
     TABLEM1, TABLEM2, TABLEM3, TABLEM4,
@@ -741,8 +741,8 @@ class Add0dElements(BDFAttributes):
         return elem
 
     def add_pbush(self, pid: int, k: list[float], b: list[float], ge: list[float],
-                  rcv: Optional[list[float]]=None, mass: Optional[float]=None,
-                  alpha: float=0., tref: float=0., coincident_length=None,
+                  rcv: Optional[list[float]]=None, mass: float=0.0,
+                  alpha: float=0.0, tref: float=0.0, coincident_length=None,
                   comment: str='') -> int:
         """
         Creates a PBUSH card, which defines a property for a PBUSH
@@ -764,7 +764,7 @@ class Add0dElements(BDFAttributes):
         rcv : list[float]; default=None -> (None, None, None, None)
             [sa, st, ea, et] = rcv
             length(rcv) = 4
-        mass : float; default=None
+        mass : float; default=0.0
             lumped mass of the CBUSH
             This is an MSC only parameter.
         comment : str; default=''
@@ -1792,7 +1792,7 @@ class Add2dElements(BDFAttributes):
         return elem
 
     def add_cquad4(self, eid: int, pid: int, nids: list[int],
-                   theta_mcid: int | float=0.0, zoffset: float=None,
+                   theta_mcid: int | float=0.0, zoffset: float=0.0,
                    tflag: int=0, T1=None, T2=None, T3=None, T4=None,
                    comment: str='') -> int:
         """
@@ -3602,19 +3602,14 @@ class AddAero(BDFAttributes):
         assert isinstance(sym_xy, str), sym_xy
         assert isinstance(dmij, str), dmij
         assert isinstance(dmiji, str), dmiji
+        # self.aepress.add(mach, sym_xz, sym_xy, ux_id, dmij=dmij, dmiji=dmiji)
         fields = ['AEPRESS', mach, sym_xz, sym_xy, ux_id, dmij, dmiji]
         self.reject_card_lines('AEPRESS', print_card_(fields).split('\n'), show_log=False)
 
     def add_aeforce(self, mach: float, sym_xz: str, sym_xy: str, ux_id: int,
-                    mesh: str, force: int, dmik: str, perq: str) -> None:
-        """adds an AEPRESS card"""
-        assert isinstance(mesh, str), mesh
-        assert isinstance(sym_xz, str), sym_xz
-        assert isinstance(sym_xy, str), sym_xy
-        assert isinstance(dmik, str), dmik
-        assert isinstance(perq, str), perq
-        fields = ['AEFORCE', mach, sym_xz, sym_xy, ux_id, mesh, force, dmik, perq]
-        self.reject_card_lines('AEPRESS', print_card_(fields).split('\n'), show_log=False)
+                    mesh: str, force: int, dmik: str, perq: str='') -> None:
+        """adds an AEFORCE card"""
+        self.aeforce.add(mach, sym_xz, sym_xy, ux_id, mesh, force=force, dmik=dmik, perq=perq)
 
 
 class AddOptimization(BDFAttributes):
@@ -3697,10 +3692,10 @@ class AddOptimization(BDFAttributes):
         return topvar
 
     def add_dresp1(self, dresp_id: int, label: str,
-                   response_type: str, property_type: str, region: str,
+                   response_type: str, property_type: str,
                    atta: Optional[int | float | str],
                    attb: Optional[int | float | str],
-                   atti: list[int | float | str],
+                   atti: list[int | float | str], region: int=0,
                    validate: bool=True, comment: str='') -> int:
         """
         Creates a DRESP1 card.
@@ -3783,9 +3778,9 @@ class AddOptimization(BDFAttributes):
             atta, attb, atti, validate=validate, comment=comment)
         return dresp
 
-    def add_dresp2(self, dresp_id: int, label: str, dequation: int, region: int,
+    def add_dresp2(self, dresp_id: int, label: str, dequation: int,
                    params: dict[tuple[int, str], list[int]],
-                   method: str='MIN',
+                   region: int=0, method: str='MIN',
                    c1: float=1., c2: float=0.005, c3: float=10.,
                    validate: bool=True, comment: str='') -> int:
         """
@@ -3810,8 +3805,6 @@ class AddOptimization(BDFAttributes):
             Name of the response
         dequation : int
             DEQATN id
-        region : str
-            Region identifier for constraint screening
         params : dict[(index, card_type)] = values
             the storage table for the response function
             index : int
@@ -3821,6 +3814,8 @@ class AddOptimization(BDFAttributes):
                 DESVAR, DVPREL1, DRESP2, etc.
             values : list[int]
                 the values for this response
+        region : int; default=0
+            Region identifier for constraint screening
         method : str; default=MIN
             flag used for FUNC=BETA/MATCH
             FUNC = BETA
@@ -3843,19 +3838,20 @@ class AddOptimization(BDFAttributes):
         """
         assert len(label) <= 8, label
         dresp = self.dresp2.add(
-            dresp_id, label, dequation, region, params,
+            dresp_id, label, dequation, params, region=region,
             method=method, c1=c1, c2=c2, c3=c3, comment=comment,
             validate=validate)
         return dresp
 
-    def add_dresp3(self, dresp_id, label, group, Type, region, params,
-                   validate=True, comment: str='') -> DRESP3:
+    def add_dresp3(self, dresp_id: int, label: str, group: str, Type: str,
+                   params, region: int=0,
+                   validate: bool=True, comment: str='') -> DRESP3:
         """Creates a DRESP3 card"""
         assert len(label) <= 8, label
         # dresp = DRESP3(dresp_id, label, group, Type, region, params,
         #                validate=validate, comment=comment)
-        self.dresp3.add(dresp_id, label, group, Type, region, params,
-                        validate=validate, comment=comment)
+        self.dresp3.add(dresp_id, label, group, Type, params,
+                        region=region, validate=validate, comment=comment)
         return dresp
 
     def add_dvcrel1(self, dvcrel_id: int, element_type: str, eid: int, cp_name: str,
@@ -4922,10 +4918,26 @@ class AddThermal(BDFAttributes):
         temp = self.temp.add(load_id, temperature_dict, comment=comment)
         return temp
 
-    # def add_tempp1(self) -> TEMPP1:
-    #     temp = TEMPP1()
-    #     self._add_thermal_load_object(temp)
-    #     return temp
+    def add_tempp1(self, sid: int, eid: int,
+                   tbar: float, tprime: float, t_stress: list[float],
+                   comment: str='') -> int:
+        """Creates a TEMPP1 card for beam element temperature loads."""
+        return self.tempp1.add(sid, eid, tbar, tprime, t_stress, comment=comment)
+
+    def add_temprb(self, sid: int, eids: list[int],
+                   ta: float, tb: float,
+                   tp1a: float=0.0, tp1b: float=0.0,
+                   tp2a: float=0.0, tp2b: float=0.0,
+                   tca: float=0.0, tda: float=0.0,
+                   tea: float=0.0, tfa: float=0.0,
+                   tcb: float=0.0, tdb: float=0.0,
+                   teb: float=0.0, tfb: float=0.0,
+                   comment: str='') -> int:
+        """Creates a TEMPRB card for beam element temperature loads with
+        linearly-varying axial temperature and two-plane gradients."""
+        return self.temprb.add(sid, eids, ta, tb, tp1a, tp1b, tp2a, tp2b,
+                               tca, tda, tea, tfa, tcb, tdb, teb, tfb,
+                               comment=comment)
 
     def add_tempd(self, sid: int, temperature: float, comment: str='') -> int:
         """
@@ -5434,7 +5446,7 @@ class AddAcoustic(BDFAttributes):
 
     def add_pacabs(self, pid, cutfr, b, k, m,
                    synth=True, tid_resistance=None, tid_reactance=None,
-                   tid_weight=None, comment: str='') -> PACBAR:
+                   tid_weight=None, comment: str='') -> PACABS:
         """
         Creates a PACABS card
 
@@ -5868,7 +5880,7 @@ class AddCards(AddCoords, Add0dElements, Add1dElements, Add2dElements, Add3dElem
             pid_eid = [pid_eid]
         if isinstance(value, float):
             value = [value]
-        assert isinstance(pid_eid, list), pid_eid
+        assert isinstance(pid_eid, (list, np.ndarray)), pid_eid
         assert isinstance(value, list), value
         assert len(pid_eid) == len(value), 'len(pid_eid)=%s len(value)=%s' % (len(pid_eid), len(value))
 
@@ -5905,6 +5917,8 @@ class AddCards(AddCoords, Add0dElements, Add1dElements, Add2dElements, Add3dElem
 
         """
         assert isinstance(value, (float, str)), f'value={value} type={type(value)}'
+        # assert isinstance(ids, (list, np.ndarray)), ids
+        assert isinstance(value, float), value
         nsm = self.nsm1.add(sid, nsm_type, value, ids, comment=comment)
         return nsm
 
@@ -5937,7 +5951,7 @@ class AddCards(AddCoords, Add0dElements, Add1dElements, Add2dElements, Add3dElem
             pid_eid = [pid_eid]
         if isinstance(value, float):
             value = [value]
-        assert isinstance(pid_eid, list), pid_eid
+        assert isinstance(pid_eid, (list, np.ndarray)), pid_eid
         assert isinstance(value, list), value
         assert len(pid_eid) == len(value), 'len(pid_eid)=%s len(value)=%s' % (len(pid_eid), len(value))
 
@@ -5972,6 +5986,8 @@ class AddCards(AddCoords, Add0dElements, Add1dElements, Add2dElements, Add3dElem
             a comment for the card
 
         """
+        # assert isinstance(ids, (list, np.ndarray)), ids
+        assert isinstance(value, float), value
         nsm = self.nsml1.add(sid, nsm_type, value, ids, comment=comment)
         return nsm
 
@@ -7310,8 +7326,9 @@ class AddCards(AddCoords, Add0dElements, Add1dElements, Add2dElements, Add3dElem
         self._add_methods.add_method_object(method)
         return method
 
-    def add_eigc(self, sid, method, grid, component, epsilon, neigenvalues,
-                 norm='MAX',  # common
+    def add_eigc(self, sid, method, epsilon, neigenvalues,
+                 norm: str='MAX',  # common
+                 grid: int=0, component: int=0,  # norm=POINT only
                  mblkszs=None, iblkszs=None, ksteps=None, NJIs=None,
                  alphaAjs=None, omegaAjs=None,
                  alphaBjs=None, omegaBjs=None,
@@ -7319,7 +7336,9 @@ class AddCards(AddCoords, Add0dElements, Add1dElements, Add2dElements, Add3dElem
                  shift_r1=None, shift_i1=None, isrr_flag=None,
                  nd1=None, comment: str='') -> EIGC:
         """Creates an EIGC card"""
-        method = EIGC(sid, method, grid, component, epsilon, neigenvalues, norm=norm,
+        method = EIGC(sid, method, epsilon, neigenvalues,
+                      norm=norm,
+                      grid=grid, component=component,
                       mblkszs=mblkszs, iblkszs=iblkszs, ksteps=ksteps, NJIs=NJIs,
 
                       alphaAjs=alphaAjs, omegaAjs=omegaAjs,

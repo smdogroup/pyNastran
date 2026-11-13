@@ -56,13 +56,25 @@ class FakeGUI(FakeGUIMethods, NastranIO):
         """loads a model"""
         load_geometry_name = f'load_{self._formati}_geometry'
         if self._formati in self.format_class_map:
-            cls = self.format_class_map[self._formati](self)
-            getattr(cls, load_geometry_name)(input_filename)
+            cls = self.format_class_map[self._formati]
+            self.log.warning(self._formati)
+            self.log.warning(cls)
+            if cls is None:
+                # nastran_aero
+                self.log.warning('nastran_aero')
+                # load_geometry_name = f'load_nastran_geometry'
+                getattr(self, load_geometry_name)(input_filename)
+            else:
+                self.log.warning('B')
+                cls_obj = cls(self)
+                getattr(cls_obj, load_geometry_name)(input_filename)
         elif hasattr(self, load_geometry_name):
+            self.log.warning('C')
             # self.load_nastran_geometry(bdf_filename, None)
             getattr(self, load_geometry_name)(input_filename)
             cls = self
         else:
+            self.log.warning('D')
             msg = f"load_geometry_name={load_geometry_name} doesn't exist"
             raise NotImplementedError(msg)
         self._cls = cls
@@ -87,14 +99,15 @@ def run_docopt(argv=None):
     """
     The main function for the command line ``test_pynastran_gui`` script.
     """
+    options = '[--log LOG] [--test] [--noquality]'
     msg = (
         "Usage:\n"
         # INPUT format may be explicitly or implicitly defined with or
         # without an output file
-        '  test_pynastrangui [-f FORMAT]           INPUT_FILENAME  OUTPUT_FILENAME [--log LOG] [--test]\n'
-        '  test_pynastrangui [-f FORMAT]           INPUT_FILENAME  [--log LOG] [--test]\n'
-        '  test_pynastrangui  -f FORMAT  [-r] [-d] INPUT_DIRECTORY [--log LOG] [--test]\n'
-        '  test_pynastrangui  -f FORMAT  [-r] [-d]                 [--log LOG] [--test]\n'
+        f'  test_pynastrangui [-f FORMAT]           INPUT_FILENAME  OUTPUT_FILENAME {options}\n'
+        f'  test_pynastrangui [-f FORMAT]           INPUT_FILENAME  {options}\n'
+        f'  test_pynastrangui  -f FORMAT  [-r] [-d] INPUT_DIRECTORY {options}\n'
+        f'  test_pynastrangui  -f FORMAT  [-r] [-d]                 {options}\n'
 
         '  test_pynastrangui -h | --help\n'
         '  test_pynastrangui -v | --version\n'
@@ -112,6 +125,7 @@ def run_docopt(argv=None):
         '  -d, --dir            directory to run tests on\n'
         "  -r, --regenerate     Resets the tests\n"
         '  --log LOG            debug, info, warning, error; default=debug\n'
+        '  --noquality          nastran specific thing to skip quality\n'
         '\n'
 
         'Debug:\n'
@@ -146,7 +160,7 @@ def run_docopt(argv=None):
             input_filenames = [
                 get_files_of_type(
                     dirname, extension=extension,
-                    max_size=100., limit_file='no_dig.txt')
+                    max_size_mb=100., limit_file='no_dig.txt')
                 for extension in extensions
             ]
             input_filenames = list(itertools.chain.from_iterable(input_filenames))
@@ -161,7 +175,7 @@ def run_docopt(argv=None):
         if not os.path.isfile(input_filename):
             raise RuntimeError(f'input_filename={input_filename!r} is not a file')
         input_filenames = [input_filename]
-        output_filenames = ['']
+        output_filenames = []
         if output_filename is not None:
             output_filenames.append(output_filename)
 
@@ -180,13 +194,15 @@ def run_docopt(argv=None):
         assert log_method in ['debug', 'info', 'warning', 'error'], 'log_method={log_method!r}'
     else:
         log_method = 'debug'
-    return formati, input_filenames, output_filenames, failed_cases_filename, log_method, data['--test']
+    test = data['--test']
+    quality = not data['--noquality']
+    return formati, input_filenames, output_filenames, failed_cases_filename, log_method, test, quality
 
 
 def main():
     """runs the gui"""
     (formati, input_filenames, output_filenames,
-     failed_cases_filename, log_method, test) = run_docopt()
+     failed_cases_filename, log_method, test, quality) = run_docopt()
     log = get_logger(log=None, level=log_method, encoding='utf-8')
     npass = 0
     nfailed = 0
@@ -195,6 +211,9 @@ def main():
 
     print('test =', test)
     test_gui = FakeGUI(formati)
+    nastran_settings = test_gui.settings.nastran_settings
+    assert isinstance(nastran_settings.is_element_quality, bool)
+    nastran_settings.is_element_quality = quality
     test_gui.log = log
     stop_on_failure = ntotal == 1
     time0 = time.time()

@@ -235,6 +235,7 @@ class PlateStrainStressResults2(VectorResultsCommon):
                        eid_to_nid_map: dict[int, list[int]],
                        #is_variable_data_format: bool=False,
                        #prefix='stress',
+                       node_id: Optional[np.ndarray]=None,
                        require_results: bool=True):
         """the intention of this method is to not use the gui"""
         subcase_key0 = (subcase_id, -1)
@@ -247,11 +248,13 @@ class PlateStrainStressResults2(VectorResultsCommon):
             prefix='',
             require_results=require_results)
 
-        # get the xyzs
-        out = model.get_xyz_in_coord_array(
-            cid=0, fdtype='float64', idtype='int64')
-        nid_cp_cd, xyz_cid, unused_xyz_cp, unused_icd_transform, unused_icp_transform = out
-        node_id = nid_cp_cd[:, 0]
+        if node_id is None:
+            # get the xyzs
+            out = model.get_xyz_in_coord_array(
+                cid=0, fdtype='float64', idtype='int64')
+            nid_cp_cd, unused_xyz_cid, unused_xyz_cp, unused_icd_transform, unused_icp_transform = out
+            node_id = nid_cp_cd[:, 0]
+            del nid_cp_cd
         #------------------------------------------
         out = plate_cases_to_iresult(plate_cases, is_stress)
         iresult_to_title_annotation_map, is_fiber_distance, word, max_sheari = out
@@ -587,7 +590,7 @@ class PlateStrainStressResults2(VectorResultsCommon):
         elif iresult == 'max_shear':
             omax = node_data[itime, :, ilayer, 5]
             omin = node_data[itime, :, ilayer, 6]
-            data = max_shear(omax, omin)
+            data = max_shear(omax, omin, self.is_stress)
         else:  # pragma: no cover
             raise RuntimeError(iresult)
         assert data.ndim == 2, data.shape
@@ -644,7 +647,7 @@ class PlateStrainStressResults2(VectorResultsCommon):
             # not checked for strain
             omax = centroid_data[itime, :, ilayer, 5]
             omin = centroid_data[itime, :, ilayer, 6]
-            data = max_shear(omax, omin)
+            data = max_shear(omax, omin, self.is_stress)
         else:
             raise RuntimeError(iresult)
         return data

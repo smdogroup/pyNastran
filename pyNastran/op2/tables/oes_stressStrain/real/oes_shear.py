@@ -1,17 +1,24 @@
+import copy
 from struct import Struct, pack
 import inspect
 
 import numpy as np
-from numpy import zeros, allclose
 
 from pyNastran.op2.result_objects.op2_objects import get_times_dtype
 from pyNastran.op2.result_objects.utils_pandas import build_dataframe_transient_header, build_pandas_transient_elements
 from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import (
     StressObject, StrainObject, OES_Object,
+    slice_eids_by_index,
     oes_real_data_code, set_element_case,
     set_static_case, set_modal_case, set_transient_case, set_post_buckling_case)
 from pyNastran.f06.f06_formatting import _eigenvalue_header #, get_key0
 from pyNastran.op2.op2_interface.write_utils import to_column_bytes, view_dtype, view_idtype_as_fdtype
+from pyNastran.op2.writer.utils import fdtype_from_data
+
+
+ELEMENT_NAME_TO_ELEMENT_TYPE = {
+    'CSHEAR': 4,
+}
 
 
 class RealShearArray(OES_Object):
@@ -24,6 +31,14 @@ class RealShearArray(OES_Object):
             #self.add_new_eid = self.add_new_eid_sort1
         #else:
             #raise NotImplementedError('SORT2')
+
+    def slice_by_element_id(self, eids: np.ndarray, assume_exists: bool=False, inplace: bool=False):
+        eids, ieid, neid2 = slice_eids_by_index(self.element, eids, assume_exists)
+        obj = self if inplace else copy.deepcopy(self)
+        obj.element = obj.element[ieid]
+        obj.data = obj.data[:, ieid, :]
+        obj.nelements = len(ieid)
+        return obj
 
     @property
     def is_real(self) -> bool:
@@ -136,9 +151,6 @@ class RealShearArray(OES_Object):
         data_code['stress_bits'] = stress_bits
         data_code['s_code'] = s_code
 
-        ELEMENT_NAME_TO_ELEMENT_TYPE = {
-            'CSHEAR': 4,
-        }
         element_type = ELEMENT_NAME_TO_ELEMENT_TYPE[element_name]
         data_code['element_name'] = element_name
         data_code['element_type'] = element_type
@@ -350,14 +362,7 @@ class RealShearArray(OES_Object):
             raise NotImplementedError('SORT2')
         struct1 = Struct(endian + b'i 3f')
 
-        fdtype = self.data.dtype
-        if self.size == fdtype.itemsize:
-            pass
-        else:
-            # print(f'downcasting {self.class_name}...')
-            #idtype = np.int32(1)
-            fdtype = np.float32(1.0)
-
+        fdtype = fdtype_from_data(self.data, self.size)
         # [eid, max_shear, avg_shear, margin]
         data_out = np.empty((nelements, 4), dtype=fdtype)
         data_out[:, 0] = view_idtype_as_fdtype(eids_device, fdtype)

@@ -93,8 +93,8 @@ class EPT:
             (3501, 35, 58): ['NSML', self.read_fake],  # record 6
             (3501, 35, 994): ['NSML', self.read_nsml],
             (1502, 15, 36): ['PAABSF', self.read_paabaf],  # record 8
-            (8300, 83, 382): ['PACABS', self.read_fake],  # record 9
-            (8500, 85, 384): ['PACBAR', self.read_fake],  # record 10
+            (8300, 83, 382): ['PACABS', self.read_pacabs],  # record 9
+            (8500, 85, 384): ['PACBAR', self.read_pacbar],  # record 10
             (5403, 55, 349): ['PBCOMP', self.read_pbcomp],  # record 13
             (13301, 133, 509): ['PBMSECT', self.read_fake],  # record 17
             (2902, 29, 420): ['PCONVM', self.read_pconvm],  # record 26
@@ -415,6 +415,7 @@ class EPT:
             7: 'SB',
             8: 'NB',
         }
+        # sout_int_to_str = {}
 
         eight_minus1 = Struct(mapfmt(op2._endian + b'8i', size))
         ndata = len(data)
@@ -553,6 +554,65 @@ class EPT:
                            s=s, a=a, b=b, k=k, rhoc=rhoc)
             n += ntotal
         op2.card_count['PAABSF'] = nentries
+        return n
+
+    def read_pacabs(self, data: bytes, n: int) -> int:
+        """
+        key = (8300, 83, 382)
+        TODO: not validated
+
+        ndata = 40:
+                     5i                    4f
+          ints    = (11, 1, 101, 102, 103, 1.0, 500.0, 4.757, 7821.16, 0)
+          floats  = (11, 1, 101, 102, 103, 1.0, 500.0, 4.757, 7821.16, 0.0)
+
+        """
+        op2: OP2Geom = self.op2
+        # op2.show_data(data[n:], types='ifs')
+        size = self.size
+        ntotal = 10 * size  # 9*4
+        struct1 = Struct(mapfmt(op2._endian + b'5i 4f i', size))
+        nentries = (len(data) - n) // ntotal
+        assert (len(data) - n) % ntotal == 0, len(data)-12
+        for unused_i in range(nentries):
+            edata = data[n:n+ntotal]
+            out = struct1.unpack(edata)
+            # pid, cutfr, b, k, m, synth, tid_resistance, tid_reactance, tid_weight = out
+            # assert synth in [b'YES ', b'NO  '], synth
+            # ints = (11, 1, 101, 102, 103, 1.0, 500.0, 4.757, 7821.16, 0)
+            pid, synth, tid_resistance, tid_reactance, tid_weight, b, k, m, cutfr, zero = out
+            is_synth = (synth == 1)
+            prop = op2.add_pacabs(
+                pid, cutfr, b, k, m,
+                synth=is_synth,
+                tid_resistance=tid_resistance,
+                tid_reactance=tid_reactance,
+                tid_weight=tid_weight)
+            str(prop)
+            n += ntotal
+        op2.card_count['PACABS'] = nentries
+        return n
+
+    def read_pacbar(self, data: bytes, n: int) -> int:
+        """
+        key = (8500, 85, 384)
+        TODO: not validated
+        """
+        op2: OP2Geom = self.op2
+        # op2.show_data(data[n:], types='if')
+        size = self.size
+
+        ntotal = 5 * size  # 6*4
+        struct1 = Struct(mapfmt(op2._endian + b'i 4f', size))
+        nentries = (len(data) - n) // ntotal
+        assert (len(data) - n) % ntotal == 0
+        for unused_i in range(nentries):
+            edata = data[n:n+ntotal]
+            out = struct1.unpack(edata)
+            pid, mback, mseptm, freson, kreson = out
+            prop = op2.add_pacbar(pid, mback, mseptm, freson, kreson)
+            n += ntotal
+        op2.card_count['PACBAR'] = nentries
         return n
 
     def read_paxsymh(self, data: bytes, n: int) -> int:
@@ -1962,7 +2022,7 @@ class EPT:
         for unused_i in range(nentries):
             edata = data[n:n+ntotal]
             out = struct1.unpack(edata)
-            (pid, k, c, m, unused_alpha, sa, se,
+            (pid, k, c, mass, unused_alpha, sa, se,
              typea, cvt, cvc, expvt, expvc, idtsu, idtcu, idtsud, idcsud,
              types, idts, idcs, idtdus, idcdus,
              typed, idtd, idcd, idtdvd, idcdvd,
@@ -1975,8 +2035,7 @@ class EPT:
             #+pb2, damper, table, 206
             #pid=204 k=100000.0 c=1000.0 m=0.0 sa=nan se=nan
 
-
-            msg = f'PBUSH1D pid={pid} k={k} c={c} m={m} sa={sa} se={se}'
+            msg = f'PBUSH1D pid={pid} k={k} c={c} mass={mass} sa={sa} se={se}'
             optional_vars = {}
             typea_str = type_map[typea]
             types_str = type_map[types]
@@ -2022,7 +2081,7 @@ class EPT:
             if op2.is_debug_file:
                 op2.binary_debug.write(msg)
 
-            pbush1d = op2.add_pbush1d(pid, k=k, c=c, m=m, sa=sa, se=se,
+            pbush1d = op2.add_pbush1d(pid, k=k, c=c, mass=mass, sa=sa, se=se,
                                       optional_vars=optional_vars,)
             str(pbush1d)
             n += ntotal

@@ -43,7 +43,7 @@ from pyNastran.utils.numpy_utils import integer_types, integer_string_types
 from pyNastran.bdf.cards.base_card import (
     BaseCard, _node_ids, expand_thru, write_card
 )
-from pyNastran.bdf.cards.collpase_card import collapse_thru, condense, build_thru_packs
+from pyNastran.bdf.cards.collpase_card import collapse_thru, collapse_thru_packs, condense, build_thru_packs
 from pyNastran.bdf.field_writer_8 import print_card_8
 from pyNastran.bdf.field_writer_16 import print_card_16
 from pyNastran.bdf.bdf_interface.assign_type import (
@@ -127,6 +127,7 @@ class ABCQSet(Set):
         #:  Identifiers of grids points. (Integer > 0)
         if isinstance(ids, int):
             ids = [ids]
+
         self.ids = ids
         self.components = components
         assert isinstance(ids, list), ids
@@ -183,6 +184,15 @@ class ABCQSet(Set):
         msg = ', which is required by %s' % self.type
         nids = _node_ids(self, self.ids, allow_empty_nodes=True, msg=msg)
         return nids
+
+    def get_nid_comp_dict(self) -> dict[int, str]:
+        nid_comp_dict = {}
+        for (nid, comp) in zip(self.node_ids, self.components):
+            if nid in nid_comp_dict:
+                nid_comp_dict[nid] = comp
+            else:
+                nid_comp_dict[nid] += comp
+        return nid_comp_dict
 
     def raw_fields(self):
         """gets the "raw" card without any processing as a list for printing"""
@@ -500,8 +510,7 @@ class ABCQSet1(Set):
         #:  Identifiers of grids points. (Integer > 0)
         self.ids = expand_thru(ids)
         self.ids_ref = None
-
-        self.use_thru = True
+        self.use_thru = False
 
     @classmethod
     def add_card(cls, card: BDFCard, comment: str=''):
@@ -542,7 +551,7 @@ class ABCQSet1(Set):
             the BDF object
 
         """
-        msg = ', which is required by %s' % self.type
+        msg = f', which is required by {self.type}'
         self.ids_ref = model.EmptyNodes(self.node_ids, msg=msg)
 
     def uncross_reference(self) -> None:
@@ -553,6 +562,12 @@ class ABCQSet1(Set):
     #@property
     #def node_ids(self):
         #return self.get_ids()
+
+    def get_nid_comp_dict(self) -> dict[int, str]:
+        nid_comp_dict = {}
+        for nid in self.node_ids:
+            nid_comp_dict[nid] = self.components
+        return nid_comp_dict
 
     @property
     def node_ids(self):
@@ -571,8 +586,9 @@ class ABCQSet1(Set):
         return list_fields
 
     def __repr__(self):
-        list_fields = self.raw_fields()
-        return self.comment + print_card_8(list_fields)
+        return self.comment + write_xset1_card(self.type, self.components, self.node_ids)
+        # list_fields = self.raw_fields()
+        # return self.comment + print_card_8(list_fields)
 
 
 class SuperABCQSet1(Set):
@@ -741,14 +757,13 @@ class OMIT(ABCQSet):
     def _init_from_empty(cls):
         ids = [1, 2]
         components = ['123', '456']
-        return BSET(ids, components)
+        return OMIT(ids, components)
 
     def __init__(self, ids: list[int], components: list[str],
                  comment: str=''):
         """
-        Creates an BSET card, which defines the degree of freedoms that
-        will be fixed during a generalized dynamic reduction or component
-        model synthesis calculation.
+        Defines degrees-of-freedom to be excluded (o-set) from the
+        analysis set (a-set).
 
         Parameters
         ----------
@@ -767,7 +782,8 @@ class OMIT(ABCQSet):
 
 class OMIT1(ABCQSet1):
     """
-    Defines degrees-of-freedom to be excluded (o-set) from the analysis set (a-set).
+    Defines degrees-of-freedom to be excluded (o-set) from the
+    analysis set (a-set).
 
     +-------+-----+-----+------+-----+-----+-----+-----+-----+
     |   1   |  2  |  3  |   4  |  5  |  6  |  7  |  8  |  9  |
@@ -877,7 +893,7 @@ class CSET1(ABCQSet1):
         components = '123'
         return CSET1(ids, components)
 
-    def __init__(self, ids, components, comment: str=''):
+    def __init__(self, ids: list[int], components: str, comment: str=''):
         """
         Creates an CSET1 card, which defines the degree of freedoms that
         will be free during a generalized dynamic reduction or component
@@ -954,12 +970,26 @@ class CSET1(ABCQSet1):
 
     def raw_fields(self):
         """gets the "raw" card without any processing as a list for printing"""
-        list_fields = ['CSET1', self.components] + collapse_thru(self.node_ids)
+        list_fields = ['CSET1', self.components] + self.node_ids
         return list_fields
 
     def __repr__(self):
+        return self.comment + write_xset1_card(self.type, self.components, self.node_ids)
         list_fields = self.raw_fields()
         return self.comment + print_card_8(list_fields)
+
+
+def write_xset1_card(card_type: str, components: str, node_ids: list[int]) -> str:
+    singles, doubles = collapse_thru_packs(node_ids)
+    cards = []
+    if singles:
+        list_fields = [card_type, components] + singles
+        cards.append(print_card_8(list_fields))
+    for double in doubles:
+        (first_val, thru, last_val) = double
+        list_fields = [card_type, components, first_val, thru, last_val]
+        cards.append(print_card_8(list_fields))
+    return ''.join(cards)
 
 
 class QSET1(ABCQSet1):
@@ -1000,21 +1030,27 @@ class SET1(Set):
     Defines a list of structural grid points or element identification
     numbers.
 
-    +------+--------+--------+-----+------+-----+-----+------+-----+
-    |  1   |    2   |    3   |  4  |   5  |  6  |  7  |   8  |  9  |
-    +======+========+========+=====+======+=====+=====+======+=====+
-    | SET1 |  SID   |   ID1  | ID2 | ID3  | ID4 | ID5 | ID6  | ID7 |
-    +------+--------+--------+-----+------+-----+-----+------+-----+
-    |      |  ID8   |  etc.  |     |      |     |     |      |     |
-    +------+--------+--------+-----+------+-----+-----+------+-----+
-    | SET1 |   3    |   31   | 62  |  93  | 124 | 16  |  17  | 18  |
-    +------+--------+--------+-----+------+-----+-----+------+-----+
-    |      |   19   |        |     |      |     |     |      |     |
-    +------+--------+--------+-----+------+-----+-----+------+-----+
-    | SET1 |   6    |   29   | 32  | THRU | 50  | 61  | THRU | 70  |
-    +------+--------+--------+-----+------+-----+-----+------+-----+
-    |      |   17   |   57   |     |      |     |     |      |     |
-    +------+--------+--------+-----+------+-----+-----+------+-----+
+    +------+--------+--------+------+------+-----+-----+------+-----+
+    |  1   |    2   |    3   |   4  |   5  |  6  |  7  |   8  |  9  |
+    +======+========+========+======+======+=====+=====+======+=====+
+    | SET1 |  SID   |   ID1  |  ID2 | ID3  | ID4 | ID5 | ID6  | ID7 |
+    +------+--------+--------+------+------+-----+-----+------+-----+
+    |      |  ID8   |  etc.  |      |      |     |     |      |     |
+    +------+--------+--------+------+------+-----+-----+------+-----+
+    | SET1 |   3    |   31   |  62  |  93  | 124 | 16  |  17  | 18  |
+    +------+--------+--------+------+------+-----+-----+------+-----+
+    |      |   19   |        |      |      |     |     |      |     |
+    +------+--------+--------+------+------+-----+-----+------+-----+
+    | SET1 |   6    |   29   |  32  | THRU | 50  | 61  | THRU | 70  |
+    +------+--------+--------+------+------+-----+-----+------+-----+
+    |      |   17   |   57   |      |      |     |     |      |     |
+    +------+--------+--------+------+------+-----+-----+------+-----+
+    | SET1 |    6   |   32   | THRU |  50  |  60 |  70 |  73  |  78 | 
+    +------+--------+--------+------+------+-----+-----+------+-----+
+    |      |   80   |  THRU  |  86  |      |     |     |      |     |
+    +------+--------+--------+------+------+-----+-----+------+-----+
+    
+    embeddd blanks are allowed
     """
     type = 'SET1'
 
@@ -1075,16 +1111,19 @@ class SET1(Set):
 
         """
         sid = integer(card, 1, 'sid')
-        ids = fields(integer_or_string, card, 'ID', i=2, j=len(card))
+        ids = fields(integer_string_or_blank, card, 'ID', i=2, j=len(card))
         is_skin = False
         i = 0
-        if len(ids) > 0:
-            if isinstance(ids[0], str) and ids[0] == 'SKIN':
-                is_skin = True
-                i += 1
-        else:
-            assert len(card) > 2, card
-        return SET1(sid, ids[i:], is_skin=is_skin, comment=comment)
+        ids2 = ids
+        if isinstance(ids[0], str) and ids[0] == 'SKIN':
+            is_skin = True
+            i += 1
+            ids2 = ids[i:]
+
+        if None in ids2:
+            ids2 = [idi for idi in ids if idi is not None]
+        assert len(ids2) > 0, card
+        return SET1(sid, ids2, is_skin=is_skin, comment=comment)
 
     #def __eq__(self, set1):
         #assert self.type == set1.type, 'type=%s set1.type=%s' % (self.type, set1.type)
@@ -1948,10 +1987,10 @@ class USET(Set):
 
     @classmethod
     def _init_from_empty(cls):
-        #name = 'SNAME'
+        name = 'SNAME'
         ids = [1, 2]
         components = ['123', '456']
-        return QSET(ids, components)
+        return USET(name, ids, components)
 
     def __init__(self, name, ids, components, comment: str=''):
         """

@@ -4,11 +4,13 @@ from collections import defaultdict
 from itertools import count
 import numpy as np
 
+from pyNastran.bdf.cards.properties.mass import NSM
 from pyNastran.utils.numpy_utils import integer_types, float_types
 #from pyNastran.bdf import MAX_INT
 from pyNastran.bdf.cards.base_card import expand_thru
 from pyNastran.bdf.cards.collpase_card import collapse_thru
-from pyNastran.dev.bdf_vectorized3.cards.base_card import VectorizedBaseCard, hslice_by_idim, make_idim
+from pyNastran.dev.bdf_vectorized3.cards.base_card import (
+    VectorizedBaseCard, hslice_by_idim, make_idim)
 from pyNastran.bdf.bdf_interface.assign_type import (
     integer, integer_or_blank, double, double_or_blank,
     components_or_blank, parse_components,)
@@ -20,13 +22,15 @@ from pyNastran.dev.bdf_vectorized3.cards.base_card import (
 from pyNastran.dev.bdf_vectorized3.bdf_interface.geom_check import geom_check
 from pyNastran.dev.bdf_vectorized3.cards.write_utils import (
     #array_default_str,
-    array_str, array_default_int,
+    array_str, array_default_int, array_float,
     get_print_card_size)
 
 if TYPE_CHECKING:  # pragma: no cover
     from pyNastran.bdf.bdf_interface.bdf_card import BDFCard
     from pyNastran.dev.bdf_vectorized3.types import TextIOLike
     #from pyNastran.dev.bdf_vectorized3.bdf import BDF
+    from .elements.nsm import NSM, NSM1, NSML, NSML1
+    DUPLICATED_CARDS = NSM | NSM1 | NSML | NSML1
 
 
 class SPC(VectorizedBaseCard):
@@ -257,6 +261,26 @@ class SPC(VectorizedBaseCard):
         return max(self.spc_id.max(), self.node_id.max())
 
     @parse_check
+    def write_file_8(self, bdf_file: TextIOLike,
+                     write_card_header: bool=False) -> None:
+        if self.max_id >= 100_000_000:
+            self.write_file(bdf_file, size=8, write_card_header=write_card_header)
+            return
+        sids = np.char.rjust(array_str(self.spc_id, size=8), 8).tolist()
+        nids = np.char.rjust(array_str(self.node_id, size=8), 8).tolist()
+        comps = np.char.rjust(array_default_int(self.components, default=0, size=8), 8).tolist()
+
+        no_enforced = self.enforced.max() == 0. and self.enforced.min() == 0.
+        if no_enforced:
+            lines = [f'SPC     {sid}{nid}{comp}\n'
+                     for sid, nid, comp in zip(sids, nids, comps)]
+        else:
+            enfs = np.char.rjust(array_float(self.enforced, size=8, is_double=False), 8).tolist()
+            lines = [f'SPC     {sid}{nid}{comp}{enf}\n'
+                     for sid, nid, comp, enf in zip(sids, nids, comps, enfs)]
+        bdf_file.write(''.join(lines))
+
+    @parse_check
     def write_file(self, bdf_file: TextIOLike,
                    size: int=8, is_double: bool=False,
                    write_card_header: bool=False) -> None:
@@ -414,14 +438,18 @@ class SPC1(VectorizedBaseCard):
         ncards = len(node_id)
         if ifile is None:
             ifile = np.zeros(ncards, dtype='int32')
-        if len(self.spc_id):
-            asdf
         #save_ifile_comment(self, ifile, comment)
+        if len(self.spc_id):
+            spc_id = np.hstack([self.spc_id, spc_id])
+            node_id = np.hstack([self.node_id, node_id])
+            components = np.hstack([self.components, components])
+            nnodes = np.hstack([self.nnodes, nnodes])
+
         self.spc_id = spc_id
         self.node_id = node_id
         self.components = components
         self.nnodes = nnodes
-        self.n = nspcs
+        self.n = len(spc_id)
 
     def equivalence_nodes(self, nid_old_to_new: dict[int, int]) -> None:
         """helper for bdf_equivalence_nodes"""
@@ -462,6 +490,7 @@ class SPC1(VectorizedBaseCard):
                    missing,
                    node=(nid, self.node_id),)
 
+
 class MPC(VectorizedBaseCard):
     """
     Multipoint Constraint
@@ -484,6 +513,7 @@ class MPC(VectorizedBaseCard):
     @VectorizedBaseCard.clear_check
     def clear(self) -> None:
         self.mpc_id = np.array([], dtype='int32')
+        self.nnode = np.array([], dtype='int32')
 
     def add(self, mpc_id: int,
             nodes: list[int], components: list[str], coefficients: list[float],
@@ -569,7 +599,12 @@ class MPC(VectorizedBaseCard):
         if ifile is None:
             ifile = np.zeros(ncards, dtype='int32')
         if len(self.mpc_id) != 0:
-            raise RuntimeError(f'stacking of {self.type} is not supported')
+            ifile = np.hstack([self.ifile, ifile])
+            mpc_id = np.hstack([self.mpc_id, mpc_id])
+            nnode = np.hstack([self.nnode, nnode])
+            node_id = np.hstack([self.node_id, node_id])
+            components = np.hstack([self.components, components])
+            coefficients = np.hstack([self.coefficients, coefficients])
         save_ifile_comment(self, ifile, comment)
         self.mpc_id = mpc_id
         self.nnode = nnode
@@ -735,6 +770,13 @@ class ADD(VectorizedBaseCard):
         idim = self.idim
         obj.sids = hslice_by_idim(i, idim, self.sids)
 
+    def slice_card_by_id(self, ids: np.ndarray | int,
+                         assume_sorted: bool=True,
+                         sort_ids: bool=False):
+        card = slice_duplicate_card_by_id(
+            self, ids, assume_sorted=assume_sorted, sort_ids=sort_ids)
+        return card
+
 
 class SPCADD(ADD):
     """
@@ -763,11 +805,11 @@ class SPCADD(ADD):
         self.sids = spc_ids
 
     @property
-    def nspcs(self):
+    def nspcs(self) -> int:
         return self.nsids
     @nspcs.setter
-    def nspcs(self):
-        return self.nsids
+    def nspcs(self, nspcs: int) -> None:
+        self.nsids = nspcs
 
     def set_used(self, used_dict: dict[str, list[np.ndarray]]) -> None:
         used_dict['spc_id'].append(self.spc_id)
@@ -885,11 +927,11 @@ class MPCADD(ADD):
         self.sids = spc_ids
 
     @property
-    def nmpcs(self):
+    def nmpcs(self) -> int:
         return self.nsids
     @nmpcs.setter
-    def nmpcs(self):
-        return self.nsids
+    def nmpcs(self, nmpcs: int) -> None:
+        self.nsids = nmpcs
 
     def set_used(self, used_dict: dict[str, list[np.ndarray]]) -> None:
         used_dict['mpc_id'].append(self.mpc_id)
@@ -1159,6 +1201,26 @@ class BNDGRID(CommonSet):
         #thru = card.field(3).strip()
         #if thru == 'THRU':
             #self.add_set_card(card, comment='')
+
+
+def slice_duplicate_card_by_id(
+        self: DUPLICATED_CARDS | MPCADD | SPCADD | MPCADD,
+        ids: np.ndarray | int,
+        assume_sorted: bool = True,
+        sort_ids: bool = False):
+    if self.type in {'NSMADD', 'NSM', 'NSM1', 'NSML', 'NSML1'}:
+        sid = self.nsm_id
+    elif self.type in {'SPCADD', 'SPC', 'SPC1', 'SPCD'}:
+        sid = self.spc_id
+    elif self.type in {'MPCADD', 'MPC'}:
+        sid = self.mpc_id
+    elif self.type in {'DCONADD'}:
+        sid = self.dconadd_id
+    else:  # pragma: no cover
+        raise NotImplementedError(f"Unknown card type: {self.type}")
+    ids = np.atleast_1d(np.asarray(ids, dtype=sid.dtype))
+    i = np.where(np.isin(sid, ids))[0]
+    return self.slice_card_by_index(i)
 
 
 def spc_cards_to_nid_dof(spc_id: int,

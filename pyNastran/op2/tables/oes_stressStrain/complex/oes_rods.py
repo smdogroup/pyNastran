@@ -1,3 +1,4 @@
+import copy
 import numpy as np
 from numpy import zeros, allclose
 
@@ -7,7 +8,8 @@ from pyNastran.op2.result_objects.utils_pandas import build_dataframe_transient_
 from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import (
     StressObject, StrainObject, OES_Object,
     oes_complex_data_code, get_scode, set_element_case,
-    set_freq_case, set_complex_modes_case)
+    set_freq_case, set_complex_modes_case,
+    slice_eids_by_index)
 from pyNastran.f06.f06_formatting import write_imag_floats_13e, _eigenvalue_header # get_key0,
 
 
@@ -22,6 +24,50 @@ class ComplexRodArray(OES_Object):
         OES_Object.__init__(self, data_code, isubcase, apply_data_code=False)
         #self.code = [self.format_code, self.sort_code, self.s_code]
         self.nelements = 0  # result specific
+
+    def slice_by_element_id(self, eids: np.ndarray,
+                            assume_exists: bool=False, inplace: bool=False):
+        eids, ieid, neid2 = slice_eids_by_index(self.element, eids, assume_exists)
+        obj = self if inplace else copy.deepcopy(self)
+        obj.element = obj.element[ieid]
+        obj.data = obj.data[:, ieid, :]
+        obj.nelements = neid2
+        return obj
+
+    def h5_table_dict(self) -> dict:
+        from tables import Int64Col, Float64Col
+        if self.element_type == 3:  # CTUBE
+            h5_table_dict = {
+                'EID': Int64Col(pos=0),
+                'ASR': Float64Col(pos=1),
+                'ASI': Float64Col(pos=2),
+                'TSR': Float64Col(pos=3),
+                'TSI': Float64Col(pos=4),
+                'DOMAIN_ID': Int64Col(pos=5),
+            }
+        else:
+            h5_table_dict = {
+                'EID': Int64Col(pos=0),
+                'AR': Float64Col(pos=1),
+                'AI': Float64Col(pos=2),
+                'TR': Float64Col(pos=3),
+                'TI': Float64Col(pos=4),
+                'DOMAIN_ID': Int64Col(pos=5),
+            }
+        return h5_table_dict
+
+    def add_to_h5_array(self, arr, ntime_neid0: int, ntime_neid1: int, itime: int):
+        arr["EID"][ntime_neid0:ntime_neid1] = self.element
+        if self.element_type == 3:  # CTUBE
+            arr["ASR"][ntime_neid0:ntime_neid1] = self.data[itime, :, 0].real
+            arr["ASI"][ntime_neid0:ntime_neid1] = self.data[itime, :, 0].imag
+            arr["TSR"][ntime_neid0:ntime_neid1] = self.data[itime, :, 1].real
+            arr["TSI"][ntime_neid0:ntime_neid1] = self.data[itime, :, 1].imag
+        else:
+            arr["AR"][ntime_neid0:ntime_neid1] = self.data[itime, :, 0].real
+            arr["AI"][ntime_neid0:ntime_neid1] = self.data[itime, :, 0].imag
+            arr["TR"][ntime_neid0:ntime_neid1] = self.data[itime, :, 1].real
+            arr["TI"][ntime_neid0:ntime_neid1] = self.data[itime, :, 1].imag
 
     @property
     def is_real(self) -> bool:

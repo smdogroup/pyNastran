@@ -85,7 +85,6 @@ class CaseControlDeck:
         self.debug = False
 
         self.allow_tabs = allow_tabs
-        assert allow_tabs is False
 
         self.sol_200_map = {
             'STATICS': 101,
@@ -106,7 +105,7 @@ class CaseControlDeck:
             'FLUT': 145,
 
             'DIVERGE': 144,
-            'DIVERG': 145,
+            'DIVERG': 144,
 
             # 'HEAT' : ,
             # 'STRUCTURE' : ,

@@ -1,3 +1,4 @@
+import copy
 from itertools import count
 import numpy as np
 from numpy import zeros, searchsorted
@@ -5,7 +6,8 @@ from numpy import zeros, searchsorted
 from pyNastran.op2.result_objects.op2_objects import get_times_dtype
 from pyNastran.op2.result_objects.utils_pandas import build_dataframe_transient_header, build_pandas_transient_elements
 from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import (
-    StressObject, StrainObject, OES_Object)
+    StressObject, StrainObject, OES_Object, slice_eids_by_index,)
+
 from pyNastran.f06.f06_formatting import write_floats_13e, _eigenvalue_header
 
 
@@ -35,6 +37,10 @@ class RealBar10NodesArray(OES_Object):
     def _get_msgs(self):
         raise NotImplementedError('%s needs to implement _get_msgs' % self.__class__.__name__)
 
+    @property
+    def nnodes_per_element(self) -> int:
+        return 1  # TODO: probably wrong
+
     def build(self):
         """sizes the vectorized attributes of the RealBar10NodesArray"""
         #print("self.ielement =", self.ielement)
@@ -46,7 +52,7 @@ class RealBar10NodesArray(OES_Object):
         #self.names = []
         if self.element_type == 100:
             nnodes_per_element = 1
-        else:
+        else:  # pragma: no cover
             raise NotImplementedError(self.element_type)
 
         self.nnodes = nnodes_per_element
@@ -179,6 +185,24 @@ class RealBar10NodesArray(OES_Object):
         self.data[self.itime, self.itotal, :] = [sd, sxc, sxd, sxe, sxf, axial, smax, smin, MS]
         self.itotal += 1
         self.ielement += 1
+
+    def slice_by_element_id(self, eids: np.ndarray,
+                            assume_exists: bool=False, inplace: bool=False):
+        # 2 rows per element (the ids are repeated)
+        eids, ieid, neid2 = slice_eids_by_index(np.unique(self.element), eids, assume_exists)
+        irow = np.where(np.isin(self.element, eids))[0]
+        obj = self if inplace else copy.deepcopy(self)
+        obj.element = obj.element[irow]
+        obj.data = obj.data[:, irow, :]
+        obj.nelements = neid2
+        return obj
+
+    def finalize(self):
+        """Calls any OP2 objects that need to do any post matrix calcs"""
+        # after build(), nelements is a row count (rows per element and/or
+        # summed over the times); nelements is the *actual* number of elements
+        self.nelements = len(np.unique(self.element))
+        self.set_as_sort1()
 
     def get_stats(self, short: bool=False) -> list[str]:
         if not self.is_built:

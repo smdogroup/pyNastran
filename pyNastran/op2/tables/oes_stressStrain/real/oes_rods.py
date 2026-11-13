@@ -1,18 +1,25 @@
+import copy
 from typing import TextIO, Optional
 import numpy as np
 
 from pyNastran.utils.numpy_utils import integer_float_types
+from pyNastran.utils.mathematics import get_abs_max
+
 from pyNastran.op2.result_objects.op2_objects import (
     get_times_dtype, combination_inplace)
 from pyNastran.op2.result_objects.utils_pandas import build_dataframe_transient_header, build_pandas_transient_elements
+from pyNastran.op2.stress_reduction import von_mises_2d, max_shear
 from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import (
-    StressObject, StrainObject, OES_Object, oes_real_data_code,
+    StressObject, StrainObject, OES_Object, 
+    slice_eids_by_index,
+    oes_real_data_code,
     set_element_case, set_static_case, set_modal_case,
     set_transient_case, set_post_buckling_case)
 from pyNastran.op2.op2_interface.write_utils import view_dtype, view_idtype_as_fdtype
 from pyNastran.f06.f06_formatting import (
     write_floats_13e, write_floats_13e_long,
     _eigenvalue_header) #, get_key0
+from pyNastran.op2.writer.utils import fdtype_from_data
 
 ELEMENT_NAME_TO_ELEMENT_TYPE = {
     'CROD' : 1,
@@ -32,6 +39,52 @@ class RealRodArray(OES_Object):
         self.itotal = 0
         self.ielement = 0
         self.element = None
+
+    def slice_by_element_id(self, eids: np.ndarray,
+                            assume_exists: bool=False, inplace: bool=False):
+        eids, ieid, neid2 = slice_eids_by_index(self.element, eids, assume_exists)
+        obj = self if inplace else copy.deepcopy(self)
+        obj.element = obj.element[ieid]
+        obj.data = obj.data[:, ieid, :]
+        obj.nelements = len(ieid)
+        return obj
+
+    def get_neid(self) -> int:
+        neid = self.element.shape[0]
+        return neid
+
+    def h5_table_dict(self) -> dict:
+        from tables import Int64Col, Float64Col
+        if self.element_type == 3:  # CTUBE
+            h5_table_dict = {
+                'EID': Int64Col(pos=0),
+                'AS': Float64Col(pos=1),
+                'MSA': Float64Col(pos=2),
+                'TS': Float64Col(pos=3),
+                'MST': Float64Col(pos=4),
+                'DOMAIN_ID': Int64Col(pos=5),
+            }
+        else:
+            h5_table_dict = {
+                'EID': Int64Col(pos=0),
+                'A': Float64Col(pos=1),
+                'MSA': Float64Col(pos=2),
+                'T': Float64Col(pos=3),
+                'MST': Float64Col(pos=4),
+                'DOMAIN_ID': Int64Col(pos=5),
+            }
+        return h5_table_dict
+
+    def add_to_h5_array(self, arr, ntime_neid0: int, ntime_neid1: int, itime: int):
+        arr["EID"][ntime_neid0:ntime_neid1] = self.element
+        if self.element_type == 3:  # CTUBE
+            arr["AS"][ntime_neid0:ntime_neid1] = self.data[itime, :, 0]
+            arr["TS"][ntime_neid0:ntime_neid1] = self.data[itime, :, 2]
+        else:
+            arr["A"][ntime_neid0:ntime_neid1] = self.data[itime, :, 0]
+            arr["T"][ntime_neid0:ntime_neid1] = self.data[itime, :, 2]
+        arr["MSA"][ntime_neid0:ntime_neid1] = self.data[itime, :, 1]
+        arr["MST"][ntime_neid0:ntime_neid1] = self.data[itime, :, 3]
 
     @classmethod
     def _add_case(cls,
@@ -181,11 +234,75 @@ class RealRodArray(OES_Object):
             self.element = element
             self.data = data
 
+    def envelope(self,
+                 eids: np.ndarray,
+                 result_name: str) -> np.ndarray:
+        is_min = (result_name == 'min')
+        func_name = 'min' if is_min else 'max'
+        max_min_func = getattr(np, func_name)
+
+        # print(''.join(self.get_stats()))
+        element = self.element
+        # print(f'element = {element}')
+        ielement = np.searchsorted(element, eids)
+        assert np.array_equal(element[ielement], eids)
+
+        #[axial, torsion, SMa, SMt]
+        stress_strain_dict_map = {
+            'axial': 0,
+            'torsion': 1,
+            # 'max_shear': 1,
+        }
+        ntime, neid, _ = self.data.shape
+        if result_name == 'von_mises':
+            data = self.von_mises()
+        elif result_name == 'max_shear':
+            data = self.max_shear()
+        elif result_name == 'abs_max':
+            # TODO: wrong, but ok...
+            data = np.abs(self.abs_principal())
+            assert data.shape == (ntime, neid), data.shape
+        elif result_name in stress_strain_dict_map:
+            iresult = stress_strain_dict_map[result_name]
+            data = self.data[:, :, iresult]
+        else:  # pragma: No cover
+            raise NotImplementedError(result_name)
+
+        assert data.ndim == 2, data.shape
+        # ntime, nelement = data.shape
+
+        # data.shape = (ntime, neid)
+        eid_data = max_min_func(data, axis=0)
+        assert eid_data.shape == (neid, ), eid_data.shape
+        return eid_data[ielement]
+
+    def von_mises(self) -> np.ndarray:
+        #[axial, SMa, torsion, SMt]
+        oxx = self.data[:, :, 0]
+        txy = self.data[:, :, 2]
+        oyy = oxx * 0.
+        von_mises = von_mises_2d(oxx, oyy, txy, self.is_stress)
+        return von_mises
+
+    def abs_principal(self) -> np.ndarray:
+        #[axial, SMa, torsion, SMt]
+        oxx = self.data[:, :, 0]
+        txy = np.abs(self.data[:, :, 2])
+        omax = oxx + txy
+        omin = oxx - txy
+        abs_max = get_abs_max(omin, omax, dtype=omax.dtype)
+        return abs_max
+
+    def max_shear(self) -> np.ndarray:
+        #[axial, SMa, torsion, SMt]
+        max_shear = np.abs(self.data[:, :, 2])
+        return max_shear
+
     def linear_combination(self, factor: integer_float_types,
                            data: Optional[np.ndarray]=None,
                            update: bool=True) -> None:
-        #[axial, torsion, SMa, SMt]
-        ires = [0, 1] # axial, torsion
+        #[axial, SMa, torsion, SMt]
+        ires = [0, 2]  # axial, torsion
         combination_inplace(self.data, data, factor, ires=ires)
         if update:
             self.update_data_components()
@@ -459,14 +576,7 @@ class RealRodArray(OES_Object):
             raise NotImplementedError('SORT2')
         #struct1 = Struct(endian + b'i4f')
 
-        fdtype = self.data.dtype
-        if self.size == fdtype.itemsize:
-            pass
-        else:
-            # print(f'downcasting {self.class_name}...')
-            #idtype = np.int32(1)
-            fdtype = np.float32(1.0)
-
+        fdtype = fdtype_from_data(self.data, self.size)
         # [eid, axial, SMa, torsion, SMt]
         data_out = np.empty((nelements, 5), dtype=fdtype)
         data_out[:, 0] = view_idtype_as_fdtype(eids_device, fdtype)

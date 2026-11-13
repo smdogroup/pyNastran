@@ -17,7 +17,7 @@ from pyNastran.bdf.cards.elements.bars import set_blank_if_default
 
 from pyNastran.dev.bdf_vectorized3.bdf_interface.geom_check import geom_check
 from pyNastran.dev.bdf_vectorized3.cards.base_card import (
-    Element,
+    Element, slice_element_by_property_id,
     parse_check, save_ifile_comment,
     #hslice_by_idim, make_idim,
     searchsorted_filter)
@@ -38,8 +38,14 @@ from .shell_utils import (
     shell_thickness,
 )
 from .shell_quality import tri_quality_nodes, quad_quality_nodes
+from .shell_mass import (
+    consistent_mass_ctria3, consistent_mass_ctria6,
+    consistent_mass_cquad4, consistent_mass_cquad8,
+)
 from pyNastran.dev.bdf_vectorized3.utils import hstack_msg
 
+if TYPE_CHECKING:  # pragma: no cover
+    from pyNastran.dev.bdf_vectorized3.bdf import BDF
 NUMPY_INTS = {'int32', 'int64'}
 NUMPY_FLOATS = {'float32', 'float64'}
 
@@ -61,7 +67,10 @@ class ShellElement(Element):
         self.tflag = np.array([], dtype='int32')
         self.T = np.array([], dtype='int32')
 
-    def set_used(self, used_dict: [str, list[np.ndarray]]) -> None:
+    def slice_card_by_property_id(self, property_id: np.ndarray):
+        return slice_element_by_property_id(self, property_id)
+
+    def set_used(self, used_dict: dict[str, list[np.ndarray]]) -> None:
         used_dict['property_id'].append(self.property_id)
         nodes = np.unique(self.nodes.flatten())
         nodes = nodes[nodes > 0]
@@ -444,7 +453,7 @@ class ShellElement(Element):
         self.n = ncards
         self.check_types()
 
-    def geom_check(self, missing: dict[str, np.ndarray]):
+    def geom_check(self, missing: dict[str, np.ndarray]) -> None:
         nid = self.model.grid.node_id
         pids = hstack_msg([prop.property_id for prop in self.allowed_properties],
                           msg=f'no shell properties for {self.type}')
@@ -677,6 +686,39 @@ class CTRIA3(ShellElement):
         ]
         return headers
 
+    def write_h5(self, h5file, element_group):
+        neid, nnode = self.nodes.shape
+        nnode_midside = self.base_nodes.shape[1]
+        if neid == 0:
+            return
+        from tables import Int64Col, Float64Col
+        h5_dict = {
+            'EID': Int64Col(pos=0),  # Signed 64-bit integer
+            'PID': Int64Col(pos=1),  # Signed 64-bit integer
+            'G': Int64Col(shape=(nnode,), pos=2),  # double (double-precision)
+            'THETA': Float64Col(pos=3),
+            'ZOFFS': Float64Col(pos=4),
+            'TFLAG': Int64Col(pos=5),
+            'T': Float64Col(shape=(nnode_midside,), pos=6),
+            'MCID': Int64Col(pos=7),
+            'DOMAIN_ID': Int64Col(pos=8),
+        }
+        table = h5file.create_table(element_group, self.type, h5_dict)
+        T = self.T.copy()
+        inan = np.isnan(T)
+        T[inan] = -1.0
+        arr = np.empty(neid, dtype=table.dtype)
+        arr["EID"] = self.element_id
+        arr["PID"] = self.property_id
+        arr["G"] = self.nodes
+        arr["THETA"] = self.theta
+        arr["ZOFFS"] = self.zoffset
+        arr["TFLAG"] = self.tflag
+        arr["T"] = T
+        arr["MCID"] = self.mcid
+        arr["DOMAIN_ID"] = np.ones(neid, dtype='int64')
+        table.append(arr)
+
     @parse_check
     def write_file_8(self, bdf_file: TextIOLike,
                      write_card_header: bool=False) -> None:
@@ -685,43 +727,57 @@ class CTRIA3(ShellElement):
         headers = self.card_headers()
         if write_card_header:
             bdf_file.write(print_card_8_comment(headers))
-        element_id = array_str(self.element_id, size=size)
-        property_id = array_str(self.property_id, size=size)
-        nodes_ = array_str(self.nodes, size=size)
-        zoffsets = array_default_float(self.zoffset, default=0., size=size, is_double=False)
+
+        remove_tflag = (
+            np.all(self.tflag == 0) and
+            np.all(np.isnan(self.T))
+        )
         theta_mcids = combine_int_float_array(
             self.mcid, self.theta,
             int_default=-1, float_default=0.0,
             size=size, is_double=False)
+        no_theta_mcid = np.all(theta_mcids == '')
+        no_zoffset = np.all(self.zoffset == 0.)
 
-        for eid, pid, nodes, theta_mcid, zoffset, tflag, T in zip_longest(element_id, property_id, nodes_, theta_mcids,
-                                                                           zoffsets, self.tflag, self.T):
-            row1 = [eid, pid] + nodes.tolist()
-            T1, T2, T3 = T
-            #if np.isnan(theta):
-                #theta_mcid = '%8d' % mcid
-            #else:
-                #theta_mcid = print_field_8(theta)
+        element_id = np.char.rjust(array_str(self.element_id, size=size), 8)
+        property_id = np.char.rjust(array_str(self.property_id, size=size), 8)
+        nodes_str = np.char.rjust(array_str(self.nodes, size=size), 8)
 
-            row2_data0 = [theta_mcid, zoffset,  # actually part of line 1
-                         tflag, T1, T2, T3]
-            if row2_data0 == ['', '',
-                              0, 1.0, 1.0, 1.0]:
-                msg = 'CTRIA3  %8s%8s%8s%8s%8s\n' % tuple(row1)
-            else:
-                #zoffset = set_blank_if_default(zoffset, 0.0)
-                tflag = set_blank_if_default(tflag, 0)
-                #theta_mcid = self._get_theta_mcid_repr()
+        if remove_tflag and no_theta_mcid and no_zoffset:
+            eid_list = element_id.tolist()
+            pid_list = property_id.tolist()
+            n1_list = nodes_str[:, 0].tolist()
+            n2_list = nodes_str[:, 1].tolist()
+            n3_list = nodes_str[:, 2].tolist()
+            lines = [f'CTRIA3  {eid}{pid}{n1}{n2}{n3}\n'
+                     for eid, pid, n1, n2, n3 in
+                     zip(eid_list, pid_list, n1_list, n2_list, n3_list)]
+            bdf_file.write(''.join(lines))
+        else:
+            zoffsets = array_default_float(self.zoffset, default=0., size=size, is_double=False)
+            nodes_ = array_str(self.nodes, size=size)
+            element_id_raw = array_str(self.element_id, size=size)
+            property_id_raw = array_str(self.property_id, size=size)
+            for eid, pid, nodes, theta_mcid, zoffset, tflag, T in zip_longest(
+                    element_id_raw, property_id_raw, nodes_, theta_mcids,
+                    zoffsets, self.tflag, self.T):
+                row1 = [eid, pid] + nodes.tolist()
+                T1, T2, T3 = T
 
-                T1 = set_blank_if_default(T1, 1.0)
-                T2 = set_blank_if_default(T2, 1.0)
-                T3 = set_blank_if_default(T3, 1.0)
+                row2_data0 = [theta_mcid, zoffset, tflag, T1, T2, T3]
+                if row2_data0 == ['', '', 0, 1.0, 1.0, 1.0]:
+                    msg = 'CTRIA3  %8s%8s%8s%8s%8s\n' % tuple(row1)
+                else:
+                    tflag = set_blank_if_default(tflag, 0)
+                    T1 = set_blank_if_default(T1, 1.0)
+                    T2 = set_blank_if_default(T2, 1.0)
+                    T3 = set_blank_if_default(T3, 1.0)
 
-                row2_data = [theta_mcid, zoffset, tflag, T1, T2, T3]
-                row2 = [print_field_8(field) for field in row2_data]
-                msg = ('CTRIA3  %8s%8s%8s%8s%8s%8s%8s\n'
-                       '                %8s%8s%8s%8s\n' % tuple(row1 + row2)).rstrip(' \n') + '\n'
-            bdf_file.write(msg)
+                    row2_data = [theta_mcid, zoffset, tflag, T1, T2, T3]
+                    row2 = [print_field_8(field) for field in row2_data]
+                    msg = ('CTRIA3  %8s%8s%8s%8s%8s%8s%8s\n'
+                           '                %8s%8s%8s%8s\n' % tuple(row1 + row2)).rstrip(' \n') + '\n'
+                bdf_file.write(msg)
         return
 
     @parse_check
@@ -773,21 +829,33 @@ class CTRIA3(ShellElement):
         return tri_area(self.model.grid, self.nodes)
 
     def centroid(self) -> np.ndarray:
-        """centroid ignores density"""
+        """centroid ignores density and zoffset"""
         centroid = tri_centroid(self.model.grid, self.nodes)
         return centroid
 
     def center_of_mass(self) -> np.ndarray:
-        """center_of_mass considers density"""
-        return self.centroid()
+        """center_of_mass considers density and zoffset"""
+        return shell_center_of_mass(self)
 
     def normal(self) -> np.ndarray:
         normal = self.area_centroid_normal()[2]
         return normal
 
     def area_centroid_normal(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        normal = tri_area_centroid_normal(self.model.grid, self.nodes)
-        return normal
+        area, centroid, normal = tri_area_centroid_normal(self.model.grid, self.nodes)
+        return area, centroid, normal
+
+    def consistent_mass_matrix(self) -> np.ndarray:
+        """Consistent mass matrix (translational DOFs only).
+
+        Returns (nelements, 9, 9).
+        """
+        xyz = self.model.grid.xyz_cid0()
+        nid = self.model.grid.node_id
+        inode = np.searchsorted(nid, self.nodes)
+        all_xyz = xyz[inode]
+        mpa = self.mass_per_area()
+        return consistent_mass_ctria3(all_xyz, mpa)
 
     def edges(self) -> np.ndarray:
         n1 = self.nodes[:, 0]
@@ -803,6 +871,7 @@ class CTRIA3(ShellElement):
     @property
     def base_nodes(self) -> np.ndarray:
         return self.nodes
+
     @property
     def midside_nodes(self):
         return None
@@ -1018,6 +1087,38 @@ class CTRIAR(ShellElement):
         itflag = (self.tflag == 0)
         self.T[itflag] *= xyz_scale
 
+    def write_h5(self, h5file, element_group):
+        neid, nnode = self.nodes.shape
+        nnode_midside = self.base_nodes.shape[1]
+        if neid == 0:
+            return
+        from tables import Int64Col, Float64Col
+        h5_dict = {
+            'EID': Int64Col(pos=0),  # Signed 64-bit integer
+            'PID': Int64Col(pos=1),  # Signed 64-bit integer
+            'G': Int64Col(shape=(nnode,), pos=2),  # double (double-precision)
+            'THETA': Float64Col(pos=3),
+            'ZOFFS': Float64Col(pos=4),
+            'TFLAG': Int64Col(pos=5),
+            'T': Float64Col(shape=(nnode_midside,), pos=6),
+            'MCID': Int64Col(pos=7),
+            'DOMAIN_ID': Int64Col(pos=8),
+        }
+        table = h5file.create_table(element_group, self.type, h5_dict)
+        T = self.T.copy()
+        inan = np.isnan(T)
+        T[inan] = -1.0
+        arr = np.empty(neid, dtype=table.dtype)
+        arr["EID"] = self.element_id
+        arr["PID"] = self.property_id
+        arr["G"] = self.nodes
+        arr["THETA"] = self.theta
+        arr["ZOFFS"] = self.zoffset
+        arr["TFLAG"] = self.tflag
+        arr["T"] = T
+        arr["MCID"] = self.mcid
+        arr["DOMAIN_ID"] = np.ones(neid, dtype='int64')
+        table.append(arr)
 
     def write_file_8(self, bdf_file: TextIOLike,
                    write_card_header: bool=False) -> None:
@@ -1073,25 +1174,38 @@ class CTRIAR(ShellElement):
         return tri_area(self.model.grid, self.nodes)
 
     def centroid(self) -> np.ndarray:
-        """centroid ignores density"""
+        """centroid ignores density and zoffset"""
         centroid = tri_centroid(self.model.grid, self.nodes)
         return centroid
 
     def center_of_mass(self) -> np.ndarray:
-        """center_of_mass considers density"""
-        return self.centroid()
+        """center_of_mass considers density and zoffset"""
+        return shell_center_of_mass(self)
 
     def normal(self) -> np.ndarray:
         normal = self.area_centroid_normal()[2]
         return normal
 
     def area_centroid_normal(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        normal = tri_area_centroid_normal(self.model.grid, self.nodes)
-        return normal
+        area, centroid, normal = tri_area_centroid_normal(self.model.grid, self.nodes)
+        return area, centroid, normal
+
+    def consistent_mass_matrix(self) -> np.ndarray:
+        """Consistent mass matrix (translational DOFs only).
+
+        Returns (nelements, 9, 9).
+        """
+        xyz = self.model.grid.xyz_cid0()
+        nid = self.model.grid.node_id
+        inode = np.searchsorted(nid, self.nodes)
+        all_xyz = xyz[inode]
+        mpa = self.mass_per_area()
+        return consistent_mass_ctria3(all_xyz, mpa)
 
     @property
     def base_nodes(self) -> np.ndarray:
         return self.nodes
+
     @property
     def midside_nodes(self):
         return None
@@ -1343,6 +1457,39 @@ class CQUAD4(ShellElement):
         super().check_types()
         assert self.T.dtype.name in NUMPY_FLOATS, self.T.dtype.name
 
+    def write_h5(self, h5file, element_group):
+        neid, nnode = self.nodes.shape
+        nnode_midside = self.base_nodes.shape[1]
+        if neid == 0:
+            return
+        from tables import Int64Col, Float64Col
+        h5_dict = {
+            'EID': Int64Col(pos=0),  # Signed 64-bit integer
+            'PID': Int64Col(pos=1),  # Signed 64-bit integer
+            'G': Int64Col(shape=(nnode,), pos=2),  # double (double-precision)
+            'THETA': Float64Col(pos=3),
+            'ZOFFS': Float64Col(pos=4),
+            'TFLAG': Int64Col(pos=5),
+            'T': Float64Col(shape=(nnode_midside,), pos=6),
+            'MCID': Int64Col(pos=7),
+            'DOMAIN_ID': Int64Col(pos=8),
+        }
+        table = h5file.create_table(element_group, self.type, h5_dict)
+        T = self.T.copy()
+        inan = np.isnan(T)
+        T[inan] = -1.0
+        arr = np.empty(neid, dtype=table.dtype)
+        arr["EID"] = self.element_id
+        arr["PID"] = self.property_id
+        arr["G"] = self.nodes
+        arr["THETA"] = self.theta
+        arr["ZOFFS"] = self.zoffset
+        arr["TFLAG"] = self.tflag
+        arr["T"] = T
+        arr["MCID"] = self.mcid
+        arr["DOMAIN_ID"] = np.ones(neid, dtype='int64')
+        table.append(arr)
+
     def _setup_write(self, size: int=8) -> tuple[np.ndarray, np.ndarray, np.ndarray,
                                                  np.ndarray, np.ndarray, np.ndarray]:
         self.check_types()
@@ -1378,31 +1525,60 @@ class CQUAD4(ShellElement):
         if write_card_header:
             bdf_file.write(print_card_8_comment(headers))
         element_id, property_id, remove_tflag, no_zoffset, theta_mcids, no_theta_mcid = self._setup_write(size=8)
-        #nodes_ = array_str(self.nodes, size=8)
+        element_id = np.char.rjust(element_id, 8)
+        property_id = np.char.rjust(property_id, 8)
+        nodes_str = np.char.rjust(array_str(self.nodes, size=8), 8)
         if remove_tflag:
             if no_zoffset and no_theta_mcid:
-                for eid, pid, nodes in zip_longest(element_id, property_id, self.nodes):
-                    data = [eid, pid] + nodes.tolist()
-                    msg = 'CQUAD4  %8s%8s%8d%8d%8d%8d\n' % tuple(data)
-                    bdf_file.write(msg)
+                eid_list = element_id.tolist()
+                pid_list = property_id.tolist()
+                n1_list = nodes_str[:, 0].tolist()
+                n2_list = nodes_str[:, 1].tolist()
+                n3_list = nodes_str[:, 2].tolist()
+                n4_list = nodes_str[:, 3].tolist()
+                lines = [f'CQUAD4  {eid}{pid}{n1}{n2}{n3}{n4}\n'
+                         for eid, pid, n1, n2, n3, n4 in
+                         zip(eid_list, pid_list, n1_list, n2_list, n3_list, n4_list)]
+                bdf_file.write(''.join(lines))
             elif no_zoffset:
-                for eid, pid, nodes, theta_mcid in zip(element_id, property_id, self.nodes, theta_mcids):
-                    data = [eid, pid, nodes[0], nodes[1], nodes[2], nodes[3], theta_mcid]
-                    msg = ('CQUAD4  %8s%8s%8d%8d%8d%8d%8s'  % tuple(data)).rstrip(' ') + '\n'
-                    bdf_file.write(msg)
+                eid_list = element_id.tolist()
+                pid_list = property_id.tolist()
+                n1_list = nodes_str[:, 0].tolist()
+                n2_list = nodes_str[:, 1].tolist()
+                n3_list = nodes_str[:, 2].tolist()
+                n4_list = nodes_str[:, 3].tolist()
+                tm_list = np.char.rjust(theta_mcids, 8).tolist()
+                lines = [f'CQUAD4  {eid}{pid}{n1}{n2}{n3}{n4}{tm}\n'
+                         for eid, pid, n1, n2, n3, n4, tm in
+                         zip(eid_list, pid_list, n1_list, n2_list, n3_list, n4_list, tm_list)]
+                bdf_file.write(''.join(lines))
             elif no_theta_mcid:
-                zoffsets = array_float_nan(self.zoffset, size=8, is_double=False)
-                for eid, pid, nodes, zoffset in zip(element_id, property_id, self.nodes, zoffsets):
-                    data = [eid, pid, nodes[0], nodes[1], nodes[2], nodes[3], '', zoffset]
-                    msg = ('CQUAD4  %8s%8s%8d%8d%8d%8d%8s%8s'  % tuple(data)).rstrip(' ') + '\n'
-                    bdf_file.write(msg)
+                zoffsets = np.char.rjust(array_float_nan(self.zoffset, size=8, is_double=False), 8)
+                eid_list = element_id.tolist()
+                pid_list = property_id.tolist()
+                n1_list = nodes_str[:, 0].tolist()
+                n2_list = nodes_str[:, 1].tolist()
+                n3_list = nodes_str[:, 2].tolist()
+                n4_list = nodes_str[:, 3].tolist()
+                zo_list = zoffsets.tolist()
+                lines = [f'CQUAD4  {eid}{pid}{n1}{n2}{n3}{n4}        {zo}\n'
+                         for eid, pid, n1, n2, n3, n4, zo in
+                         zip(eid_list, pid_list, n1_list, n2_list, n3_list, n4_list, zo_list)]
+                bdf_file.write(''.join(lines))
             else:
-                zoffsets = array_float_nan(self.zoffset, size=8, is_double=False)
-                for eid, pid, nodes, theta_mcid, zoffset in zip(element_id, property_id, self.nodes,
-                                                                theta_mcids, zoffsets):
-                    data = [eid, pid, nodes[0], nodes[1], nodes[2], nodes[3], theta_mcid, zoffset]
-                    msg = ('CQUAD4  %8s%8s%8d%8d%8d%8d%8s%8s'  % tuple(data)).rstrip(' ') + '\n'
-                    bdf_file.write(msg)
+                zoffsets = np.char.rjust(array_float_nan(self.zoffset, size=8, is_double=False), 8)
+                eid_list = element_id.tolist()
+                pid_list = property_id.tolist()
+                n1_list = nodes_str[:, 0].tolist()
+                n2_list = nodes_str[:, 1].tolist()
+                n3_list = nodes_str[:, 2].tolist()
+                n4_list = nodes_str[:, 3].tolist()
+                tm_list = np.char.rjust(theta_mcids, 8).tolist()
+                zo_list = zoffsets.tolist()
+                lines = [f'CQUAD4  {eid}{pid}{n1}{n2}{n3}{n4}{tm}{zo}\n'
+                         for eid, pid, n1, n2, n3, n4, tm, zo in
+                         zip(eid_list, pid_list, n1_list, n2_list, n3_list, n4_list, tm_list, zo_list)]
+                bdf_file.write(''.join(lines))
         else:
             zoffsets = array_float_nan(self.zoffset, size=8, is_double=False)
             for eid, pid, nodes, theta_mcid, zoffset, tflag, T in zip(element_id, property_id, self.nodes,
@@ -1414,10 +1590,7 @@ class CQUAD4(ShellElement):
                 if row2_data == ['', '0.', 0, 1.0, 1.0, 1.0, 1.0]:
                     data = [eid, pid] + nodes.tolist()
                     msg = ('CQUAD4  %8s%8s%8d%8d%8d%8d\n' % tuple(data))
-                    #return self.comment + msg
                 else:
-                    #theta_mcid = self._get_theta_mcid_repr()
-                    #zoffset = set_blank_if_default(zoffset, 0.0)
                     tflag = set_blank_if_default(tflag, 0)
                     T1 = set_blank_if_default(T1, 1.0)
                     T2 = set_blank_if_default(T2, 1.0)
@@ -1430,7 +1603,6 @@ class CQUAD4(ShellElement):
                     data = [eid, pid] + nodes.tolist() + row2
                     msg = ('CQUAD4  %8s%8s%8d%8d%8d%8d%8s%8s\n'
                            '                %8s%8s%8s%8s%8s\n' % tuple(data)).rstrip('\n ') + '\n'
-                    #return self.comment + msg.rstrip('\n ') + '\n'
                 bdf_file.write(msg)
         return
 
@@ -1461,7 +1633,7 @@ class CQUAD4(ShellElement):
             else:
                 for eid, pid, nodes, theta_mcid, zoffset in zip(element_id, property_id, self.nodes, theta_mcids, self.zoffset):
                     zoffset_str = '' if np.isnan(zoffset) else print_field_16(zoffset)
-                    data = ['CQUAD4', eid, pid, nodes[0], nodes[1], nodes[2], nodes[3], mcid, zoffset_str]
+                    data = ['CQUAD4', eid, pid, nodes[0], nodes[1], nodes[2], nodes[3], theta_mcid, zoffset_str]
                     bdf_file.write(print_card(data))
         else:
             for eid, pid, nodes, theta_mcid, zoffset, tflag, T in zip(element_id, property_id, self.nodes, theta_mcids,
@@ -1513,17 +1685,21 @@ class CQUAD4(ShellElement):
         return area
 
     def centroid(self) -> np.ndarray:
-        """centroid ignores density"""
+        """centroid ignores density and zoffset"""
         centroid = quad_centroid(self.model.grid, self.nodes)
         return centroid
 
     def center_of_mass(self) -> np.ndarray:
-        """center_of_mass considers density"""
-        return self.centroid()
+        """center_of_mass considers density and zoffset"""
+        return shell_center_of_mass(self)
 
     def normal(self) -> np.ndarray:
         normal = self.area_centroid_normal()[2]
         return normal
+
+    def area_centroid_normal(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        area, centroid, normal = quad_area_centroid_normal(self.model.grid, self.nodes)
+        return area, centroid, normal
 
     def edges(self) -> np.ndarray:
         n1 = self.nodes[:, 0]
@@ -1538,13 +1714,22 @@ class CQUAD4(ShellElement):
         edges.sort(axis=1)
         return edges
 
-    def area_centroid_normal(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        normal = quad_area_centroid_normal(self.model.grid, self.nodes)
-        return normal
+    def consistent_mass_matrix(self) -> np.ndarray:
+        """Consistent mass matrix (translational DOFs only).
+
+        Returns (nelements, 12, 12).
+        """
+        xyz = self.model.grid.xyz_cid0()
+        nid = self.model.grid.node_id
+        inode = np.searchsorted(nid, self.nodes)
+        all_xyz = xyz[inode]
+        mpa = self.mass_per_area()
+        return consistent_mass_cquad4(all_xyz, mpa)
 
     @property
     def base_nodes(self) -> np.ndarray:
         return self.nodes
+
     @property
     def midside_nodes(self):
         return None
@@ -1755,6 +1940,39 @@ class CQUADR(ShellElement):
         return max(self.element_id.max(), self.property_id.max(),
                    self.nodes.max(), self.mcid.max())
 
+    def write_h5(self, h5file, element_group):
+        neid, nnode = self.nodes.shape
+        nnode_midside = self.base_nodes.shape[1]
+        if neid == 0:
+            return
+        from tables import Int64Col, Float64Col
+        h5_dict = {
+            'EID': Int64Col(pos=0),  # Signed 64-bit integer
+            'PID': Int64Col(pos=1),  # Signed 64-bit integer
+            'G': Int64Col(shape=(nnode,), pos=2),  # double (double-precision)
+            'THETA': Float64Col(pos=3),
+            'ZOFFS': Float64Col(pos=4),
+            'TFLAG': Int64Col(pos=5),
+            'T': Float64Col(shape=(nnode_midside,), pos=6),
+            'MCID': Int64Col(pos=7),
+            'DOMAIN_ID': Int64Col(pos=8),
+        }
+        table = h5file.create_table(element_group, self.type, h5_dict)
+        T = self.T.copy()
+        inan = np.isnan(T)
+        T[inan] = -1.0
+        arr = np.empty(neid, dtype=table.dtype)
+        arr["EID"] = self.element_id
+        arr["PID"] = self.property_id
+        arr["G"] = self.nodes
+        arr["THETA"] = self.theta
+        arr["ZOFFS"] = self.zoffset
+        arr["TFLAG"] = self.tflag
+        arr["T"] = T
+        arr["MCID"] = self.mcid
+        arr["DOMAIN_ID"] = np.ones(neid, dtype='int64')
+        table.append(arr)
+
     @parse_check
     def write_file(self, bdf_file: TextIOLike,
                    size: int=8, is_double: bool=False,
@@ -1802,23 +2020,38 @@ class CQUADR(ShellElement):
         return area
 
     def centroid(self) -> np.ndarray:
-        """centroid ignores density"""
+        """centroid ignores density and zoffset"""
         centroid = quad_centroid(self.model.grid, self.nodes)
         return centroid
 
     def center_of_mass(self) -> np.ndarray:
-        return self.centroid()
+        """center_of_mass considers density and zoffset"""
+        return shell_center_of_mass(self)
 
     def normal(self) -> np.ndarray:
         normal = self.area_centroid_normal()[2]
         return normal
+
     def area_centroid_normal(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        normal = quad_area_centroid_normal(self.model.grid, self.nodes)
-        return normal
+        area, centroid, normal = quad_area_centroid_normal(self.model.grid, self.nodes)
+        return area, centroid, normal
+
+    def consistent_mass_matrix(self) -> np.ndarray:
+        """Consistent mass matrix (translational DOFs only).
+
+        Returns (nelements, 12, 12).
+        """
+        xyz = self.model.grid.xyz_cid0()
+        nid = self.model.grid.node_id
+        inode = np.searchsorted(nid, self.nodes)
+        all_xyz = xyz[inode]
+        mpa = self.mass_per_area()
+        return consistent_mass_cquad4(all_xyz, mpa)
 
     @property
     def base_nodes(self) -> np.ndarray:
         return self.nodes
+
     @property
     def midside_nodes(self):
         return None
@@ -2002,8 +2235,6 @@ class CTRIA6(ShellElement):
               zoffset=None, theta=None, mcid=None,
               tflag=None, T=None,
               ifile=None, comment=None):
-        if len(self.element_id) != 0:
-            raise NotImplementedError()
         assert element_id.min() >= 0, element_id
         assert property_id.min() >= 0, property_id
         assert nodes.min() >= 0, nodes
@@ -2022,6 +2253,17 @@ class CTRIA6(ShellElement):
         if T is None:
             T = np.full((ncards, 4), np.nan, dtype='float64')
 
+        if len(self.element_id) != 0:
+            ifile = np.hstack([self.ifile, ifile])
+            element_id = np.hstack([self.element_id, element_id])
+            property_id = np.hstack([self.property_id, property_id])
+            nodes = np.vstack([self.nodes, nodes])
+            zoffset = np.hstack([self.zoffset, zoffset])
+            theta = np.hstack([self.theta, theta])
+            mcid = np.hstack([self.mcid, mcid])
+            tflag = np.hstack([self.tflag, tflag])
+            T = np.vstack([self.T, T])
+
         save_ifile_comment(self, ifile, comment)
         self.element_id = element_id
         self.property_id = property_id
@@ -2032,7 +2274,7 @@ class CTRIA6(ShellElement):
         self.mcid = mcid
         self.tflag = tflag
         self.T = T
-        self.n = ncards
+        self.n = len(element_id)
 
     def __apply_slice__(self, element: CTRIA6, i: np.ndarray) -> None:  # ignore[override]
         #assert element.type == 'CTRIA6'
@@ -2058,6 +2300,39 @@ class CTRIA6(ShellElement):
         # T is a thickness if tflag == 0 (unless T=nan)
         itflag = (self.tflag == 0)
         self.T[itflag] *= xyz_scale
+
+    def write_h5(self, h5file, element_group):
+        neid, nnode = self.nodes.shape
+        nnode_midside = self.base_nodes.shape[1]
+        if neid == 0:
+            return
+        from tables import Int64Col, Float64Col
+        h5_dict = {
+            'EID': Int64Col(pos=0),  # Signed 64-bit integer
+            'PID': Int64Col(pos=1),  # Signed 64-bit integer
+            'G': Int64Col(shape=(nnode,), pos=2),  # double (double-precision)
+            'THETA': Float64Col(pos=3),
+            'ZOFFS': Float64Col(pos=4),
+            'TFLAG': Int64Col(pos=5),
+            'T': Float64Col(shape=(nnode_midside,), pos=6),
+            'MCID': Int64Col(pos=7),
+            'DOMAIN_ID': Int64Col(pos=8),
+        }
+        table = h5file.create_table(element_group, self.type, h5_dict)
+        T = self.T.copy()
+        inan = np.isnan(T)
+        T[inan] = -1.0
+        arr = np.empty(neid, dtype=table.dtype)
+        arr["EID"] = self.element_id
+        arr["PID"] = self.property_id
+        arr["G"] = self.nodes
+        arr["THETA"] = self.theta
+        arr["ZOFFS"] = self.zoffset
+        arr["TFLAG"] = self.tflag
+        arr["T"] = T
+        arr["MCID"] = self.mcid
+        arr["DOMAIN_ID"] = np.ones(neid, dtype='int64')
+        table.append(arr)
 
     @parse_check
     def write_file(self, bdf_file: TextIOLike,
@@ -2106,25 +2381,38 @@ class CTRIA6(ShellElement):
         return tri_area(self.model.grid, self.base_nodes)
 
     def centroid(self) -> np.ndarray:
-        """centroid ignores density"""
+        """centroid ignores density and center of mass"""
         centroid = tri_centroid(self.model.grid, self.base_nodes)
         return centroid
 
     def center_of_mass(self) -> np.ndarray:
-        """center_of_mass considers density"""
-        return self.centroid()
+        """center_of_mass considers density and zoffset"""
+        return shell_center_of_mass(self)
 
     def normal(self) -> np.ndarray:
         normal = self.area_centroid_normal()[2]
         return normal
 
     def area_centroid_normal(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        normal = tri_area_centroid_normal(self.model.grid, self.base_nodes)
-        return normal
+        area, centroid, normal = tri_area_centroid_normal(self.model.grid, self.base_nodes)
+        return area, centroid, normal
+
+    def consistent_mass_matrix(self) -> np.ndarray:
+        """Consistent mass matrix (translational DOFs only).
+
+        Returns (nelements, 18, 18).
+        """
+        xyz = self.model.grid.xyz_cid0()
+        nid = self.model.grid.node_id
+        inode = np.searchsorted(nid, self.nodes)
+        all_xyz = xyz[inode]
+        mpa = self.mass_per_area()
+        return consistent_mass_ctria6(all_xyz, mpa)
 
     @property
     def base_nodes(self):
         return self.nodes[:, :3]
+
     @property
     def midside_nodes(self):
         return self.nodes[:, 3:]
@@ -2345,8 +2633,6 @@ class CQUAD8(ShellElement):
     def _save(self, element_id, property_id, nodes,
               zoffset=None, theta=None, mcid=None,
               tflag=None, T=None, ifile=None, comment=None):
-        if len(self.element_id) != 0:
-            raise NotImplementedError()
         assert element_id.min() >= 0, element_id
         assert property_id.min() >= 0, property_id
         assert nodes.min() >= 0, nodes
@@ -2365,6 +2651,17 @@ class CQUAD8(ShellElement):
         if T is None:
             T = np.full((ncards, 4), np.nan, dtype='float64')
 
+        if len(self.element_id) != 0:
+            ifile = np.hstack([self.ifile, ifile])
+            element_id = np.hstack([self.element_id, element_id])
+            property_id = np.hstack([self.property_id, property_id])
+            nodes = np.vstack([self.nodes, nodes])
+            zoffset = np.hstack([self.zoffset, zoffset])
+            theta = np.hstack([self.theta, theta])
+            mcid = np.hstack([self.mcid, mcid])
+            tflag = np.hstack([self.tflag, tflag])
+            T = np.vstack([self.T, T])
+
         save_ifile_comment(self, ifile, comment)
         self.element_id = element_id
         self.property_id = property_id
@@ -2375,7 +2672,7 @@ class CQUAD8(ShellElement):
         self.mcid = mcid
         self.tflag = tflag
         self.T = T
-        self.n = ncards
+        self.n = len(element_id)
 
     def __apply_slice__(self, element: CQUAD8, i: np.ndarray) -> None:  # ignore[override]
         element.ifile = self.ifile[i]
@@ -2412,6 +2709,39 @@ class CQUAD8(ShellElement):
     def max_id(self) -> int:
         return max(self.element_id.max(), self.property_id.max(),
                    self.nodes.max(), self.mcid.max())
+
+    def write_h5(self, h5file, element_group):
+        neid, nnode = self.nodes.shape
+        nnode_midside = self.base_nodes.shape[1]
+        if neid == 0:
+            return
+        from tables import Int64Col, Float64Col
+        h5_dict = {
+            'EID': Int64Col(pos=0),  # Signed 64-bit integer
+            'PID': Int64Col(pos=1),  # Signed 64-bit integer
+            'G': Int64Col(shape=(nnode,), pos=2),  # double (double-precision)
+            'THETA': Float64Col(pos=3),
+            'ZOFFS': Float64Col(pos=4),
+            'TFLAG': Int64Col(pos=5),
+            'T': Float64Col(shape=(nnode_midside,), pos=6),
+            'MCID': Int64Col(pos=7),
+            'DOMAIN_ID': Int64Col(pos=8),
+        }
+        table = h5file.create_table(element_group, self.type, h5_dict)
+        T = self.T.copy()
+        inan = np.isnan(T)
+        T[inan] = -1.0
+        arr = np.empty(neid, dtype=table.dtype)
+        arr["EID"] = self.element_id
+        arr["PID"] = self.property_id
+        arr["G"] = self.nodes
+        arr["THETA"] = self.theta
+        arr["ZOFFS"] = self.zoffset
+        arr["TFLAG"] = self.tflag
+        arr["T"] = T
+        arr["MCID"] = self.mcid
+        arr["DOMAIN_ID"] = np.ones(neid, dtype='int64')
+        table.append(arr)
 
     @parse_check
     def write_file(self, bdf_file: TextIOLike,
@@ -2463,25 +2793,38 @@ class CQUAD8(ShellElement):
         return area
 
     def centroid(self) -> np.ndarray:
-        """centroid ignores density"""
+        """centroid ignores density and zoffset"""
         centroid = quad_centroid(self.model.grid, self.base_nodes)
         return centroid
 
     def center_of_mass(self) -> np.ndarray:
-        """center_of_mass considers density"""
-        return self.centroid()
+        """center_of_mass considers density and zoffset"""
+        return shell_center_of_mass(self)
 
     def normal(self) -> np.ndarray:
         normal = self.area_centroid_normal()[2]
         return normal
 
     def area_centroid_normal(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        normal = quad_area_centroid_normal(self.model.grid, self.base_nodes)
-        return normal
+        area, centroid, normal = quad_area_centroid_normal(self.model.grid, self.base_nodes)
+        return area, centroid, normal
+
+    def consistent_mass_matrix(self) -> np.ndarray:
+        """Consistent mass matrix (translational DOFs only).
+
+        Returns (nelements, 24, 24).
+        """
+        xyz = self.model.grid.xyz_cid0()
+        nid = self.model.grid.node_id
+        inode = np.searchsorted(nid, self.nodes)
+        all_xyz = xyz[inode]
+        mpa = self.mass_per_area()
+        return consistent_mass_cquad8(all_xyz, mpa)
 
     @property
     def base_nodes(self):
         return self.nodes[:, :4]
+
     @property
     def midside_nodes(self):
         return self.nodes[:, 4:]
@@ -2640,6 +2983,39 @@ class CQUAD(ShellElement):
         used_dict['node_id'].append(self.nodes.ravel())
         used_dict['coord_id'].append(self.mcid[self.mcid >= 0])
 
+    def write_h5(self, h5file, element_group):
+        neid, nnode = self.nodes.shape
+        nnode_midside = self.base_nodes.shape[1]
+        if neid == 0:
+            return
+        from tables import Int64Col, Float64Col
+        h5_dict = {
+            'EID': Int64Col(pos=0),  # Signed 64-bit integer
+            'PID': Int64Col(pos=1),  # Signed 64-bit integer
+            'G': Int64Col(shape=(nnode,), pos=2),  # double (double-precision)
+            'THETA': Float64Col(pos=3),
+            'ZOFFS': Float64Col(pos=4),
+            'TFLAG': Int64Col(pos=5),
+            'T': Float64Col(shape=(nnode_midside,), pos=6),
+            'MCID': Int64Col(pos=7),
+            'DOMAIN_ID': Int64Col(pos=8),
+        }
+        table = h5file.create_table(element_group, self.type, h5_dict)
+        T = self.T.copy()
+        inan = np.isnan(T)
+        T[inan] = -1.0
+        arr = np.empty(neid, dtype=table.dtype)
+        arr["EID"] = self.element_id
+        arr["PID"] = self.property_id
+        arr["G"] = self.nodes
+        arr["THETA"] = self.theta
+        arr["ZOFFS"] = self.zoffset
+        arr["TFLAG"] = self.tflag
+        arr["T"] = T
+        arr["MCID"] = self.mcid
+        arr["DOMAIN_ID"] = np.ones(neid, dtype='int64')
+        table.append(arr)
+
     @parse_check
     def write_file(self, bdf_file: TextIOLike,
                    size: int=8, is_double: bool=False,
@@ -2676,17 +3052,26 @@ class CQUAD(ShellElement):
         return area
 
     def centroid(self) -> np.ndarray:
-        """centroid ignores density"""
+        """centroid ignores density and zoffset"""
         centroid = quad_centroid(self.model.grid, self.base_nodes)
         return centroid
 
+    def normal(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        normal = quad_area_centroid_normal(self.model.grid, self.base_nodes)[2]
+        return normal
+
+    def area_centroid_normal(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        area, centroid, normal = quad_area_centroid_normal(self.model.grid, self.base_nodes)
+        return area, centroid, normal
+
     def center_of_mass(self) -> np.ndarray:
-        """center_of_mass considers density"""
+        """center_of_mass considers density (no zoffset for the CQUAD)"""
         return self.centroid()
 
     @property
     def base_nodes(self):
         return self.nodes[:, :4]
+
     @property
     def midside_nodes(self):
         return self.nodes[:, 4:]
@@ -2889,13 +3274,13 @@ def _save_quad(element: CQUAD4 | CQUADR,
     if zoffset is None:
         zoffset = np.full(ncards, np.nan, dtype='float64')
     if theta is None:
-        theta = np.full(nelements, 0., dtype='float64')
+        theta = np.full(ncards, 0., dtype='float64')
     if mcid is None:
-        mcid = np.full(nelements, -1, dtype='int32')
+        mcid = np.full(ncards, -1, dtype='int32')
     if tflag is None:
-        tflag = np.zeros(nelements, dtype='int32')
+        tflag = np.zeros(ncards, dtype='int32')
     if T is None:
-        T = np.full((nelements, 4), np.nan, dtype='float64')
+        T = np.full((ncards, 4), np.nan, dtype='float64')
 
     assert zoffset is not None
     element.ifile = ifile
@@ -2920,3 +3305,13 @@ def combine_int_float_array(int_array,
     mcids[itheta] = thetas[itheta]
     theta_mcids = mcids
     return theta_mcids
+
+def shell_center_of_mass(self) -> np.ndarray:
+    """center_of_mass considers density and zoffset"""
+    centroid, normal = self.area_centroid_normal()[1:]
+    is_finite = np.isfinite(self.zoffset)
+    if np.any(is_finite):
+        zoffset = self.zoffset.copy()
+        zoffset[~is_finite] = 0.
+        return centroid + zoffset[:, np.newaxis] * normal
+    return centroid

@@ -1,5 +1,6 @@
 import unittest
 import numpy as np
+from cpylog import SimpleLogger
 from pyNastran.bdf.bdf import BDF, BDFCard
 from pyNastran.bdf.cards.bdf_tables import (
     TABLED1, TABLED2, TABLED3, TABLED4,
@@ -10,8 +11,68 @@ from pyNastran.bdf.cards.test.utils import save_load_deck
 
 class TestTables(unittest.TestCase):
 
+    def test_tabled1_interp(self):
+        table_id = 42
+        table = TABLED1(
+            table_id, [0., 1., 1.0, 2.],
+                      [2., 2., 1.0, 0.5])
+        time = np.linspace(0., 2., num=3)
+
+        y_expected = [2., 1.5, 0.5]
+
+        y = table.atvalue(time)
+        assert np.allclose(y, y_expected), f't={time} y={y} y_expected={y_expected}'
+
+        y2 = table.atvalue(time)
+        assert np.allclose(y2, y_expected), f't={time} y2={y2} y_expected={y_expected}'
+
+        #---------------------------------------------------
+        time = [0., 3.]
+        y3_expected = [2., 0.]
+        y3 = table.atvalue(time)
+        #y3 = table.interpolate(time)
+        assert np.allclose(y3, y3_expected), f't={time} y3={y3} y3_expected={y3_expected}'
+
+        y3 = table.atvalue(time)
+        #y3 = table.interpolate(time)
+        assert np.allclose(y3, y3_expected), f't={time} y3={y3} y3_expected={y3_expected}'
+
+    def test_tabled1_extrap(self):
+        # extrap
+        table_id = 42
+        table4 = TABLED1(
+            table_id, [0.,  1., 1.0, 2.],
+                      [1.5, 2., 1.0, 0.5])
+        time = [-1., 3., 4.]
+        y4_expected = [1.,  0., -0.5]
+        assert table4.extrap == 0, table.extrap
+        #print(f'time4 = {time}')
+        y4 = table4.atvalue(time)
+        assert np.allclose(y4, y4_expected), f't={time} y4={y4} y4_expected={y4_expected}'
+        
+        # extrap const
+        #print('extrap const')
+        table4.extrap = 1
+        y5_expected = [1.5,  0.5, 0.5]
+        table4.low_extrap = -0.1
+        table4.high_extrap = 0.12
+        #print(f'time4 = {time}')
+        y5 = table4.atvalue(time)
+        assert np.allclose(y5, y5_expected), f't={time} y5={y5} y5_expected={y5_expected}'
+
+        #print('extrap low/high')
+        # extrap low/high
+        table4.extrap = 2
+        y6_expected = [-0.1,  0.12, 0.12]
+        table4.low_extrap = -0.1
+        table4.high_extrap = 0.12
+        #print(f'time4 = {time}')
+        y6 = table4.atvalue(time)
+        assert np.allclose(y6, y6_expected), f't={time} y6={y6} y6_expected={y6_expected}'
+
     def test_tabrndg(self):
-        model = BDF(debug=False)
+        log = SimpleLogger(level='warning')
+        model = BDF(log=log)
         tid = 101
         #1 : von Karman
         #2 : Dryden
@@ -25,7 +86,8 @@ class TestTables(unittest.TestCase):
         save_load_deck(model, run_convert=False, run_quality=False, run_remove_unused=False)
 
     def test_tables1(self):
-        model = BDF(debug=False)
+        log = SimpleLogger(level='warning')
+        model = BDF(log=log)
         tid = 101
         #1 : von Karman
         #2 : Dryden
@@ -46,7 +108,8 @@ class TestTables(unittest.TestCase):
             run_save_load_hdf5=False)
 
     def test_tabdmp1_01(self):
-        model = BDF(debug=False)
+        log = SimpleLogger(level='warning')
+        model = BDF(log=log)
         lines = ['TABDMP1,100,,,,,,,,+',
                  '+,1e-3,.02,200.,.02,ENDT',]
         card = model._process_card(lines)
@@ -99,7 +162,8 @@ class TestTables(unittest.TestCase):
         save_load_deck(model, run_convert=False, run_quality=False, run_remove_unused=False)
 
     def test_tabled1(self):
-        model = BDF(debug=False)
+        log = SimpleLogger(level='warning')
+        model = BDF(log=log)
         lines = [
             'TABLED1, 32',
             ',-2.0, 6.0, 2.0, 5.0, 3.0, 5.6, ENDT',
@@ -126,7 +190,8 @@ class TestTables(unittest.TestCase):
         save_load_deck(model, run_convert=False, run_quality=False, run_remove_unused=False)
 
     def test_tabled2(self):
-        model = BDF(debug=False)
+        log = SimpleLogger(level='warning')
+        model = BDF(log=log)
         lines = [
             'TABLED2, 15, -10.5',
             ',1.0, -4.5, 2.0, -4.2, 2.0, 2.8, 7.0, 6.5',
@@ -155,7 +220,8 @@ class TestTables(unittest.TestCase):
         save_load_deck(model, run_convert=False, run_quality=False, run_remove_unused=False)
 
     def test_tabled3(self):
-        model = BDF(debug=False)
+        log = SimpleLogger(level='warning')
+        model = BDF(log=log)
         lines = [
             'TABLED3, 62, 126.9, 30.0',
             ',2.9, 2.9, 3.6, 4.7, 5.2, 5.7, ENDT',
@@ -181,7 +247,8 @@ class TestTables(unittest.TestCase):
         save_load_deck(model, run_convert=False, run_quality=False, run_remove_unused=False)
 
     def test_tabled4(self):
-        model = BDF(debug=False)
+        log = SimpleLogger(level='warning')
+        model = BDF(log=log)
         lines = [
             'TABLED4, 28, 0.0, 1.0, 0.0, 100.',
             ',2.91, -0.0329, 6.51-5, 0.0, -3.4-7, ENDT',
@@ -225,7 +292,8 @@ class TestTables(unittest.TestCase):
 
 
     def test_tableh1(self):
-        model = BDF(debug=False)
+        log = SimpleLogger(level='warning')
+        model = BDF(log=log)
         lines = [
             'TABLEH1, 32',
             '-3.0, 6.9, 2.0, 5.6, 3.0, 5.6, ENDT',
@@ -247,7 +315,8 @@ class TestTables(unittest.TestCase):
         save_load_deck(model)
 
     def test_tablem1(self):
-        model = BDF(debug=False)
+        log = SimpleLogger(level='warning')
+        model = BDF(log=log)
         lines = [
             'TABLEM1, 32',
             '-3.0, 6.9, 2.0, 5.6, 3.0, 5.6, ENDT',
@@ -270,7 +339,8 @@ class TestTables(unittest.TestCase):
         #assert np.allclose(interp, [5.5]), interp
 
     def test_tablem2(self):
-        model = BDF(debug=False)
+        log = SimpleLogger(level='warning')
+        model = BDF(log=log)
         lines = [
             'TABLEM2, 15, -10.5',
             ',1.0, -4.5, 2.0, -4.5, 2.0, 2.8, 7.0, 6.5',
@@ -300,7 +370,8 @@ class TestTables(unittest.TestCase):
         #assert np.allclose(interp, [5.5]), interp
 
     def test_tablem3(self):
-        model = BDF(debug=False)
+        log = SimpleLogger(level='warning')
+        model = BDF(log=log)
         lines = [
             'TABLEM3, 62, 126.9, 30.0',
             ',2.9, 2.9, 3.6, 4.7, 5.2, 5.7, ENDT',
@@ -332,7 +403,8 @@ class TestTables(unittest.TestCase):
         #assert np.allclose(interp, [5.5]), interp
 
     def test_tablem4(self):
-        model = BDF(debug=False)
+        log = SimpleLogger(level='warning')
+        model = BDF(log=log)
         lines = [
             'TABLEM4, 28, 0.0, 1.0, 0.0, 100.',
             ',2.91, -0.0329, 6.51-5, 0.0, -3.4-7, ENDT',
@@ -369,6 +441,79 @@ class TestTables(unittest.TestCase):
         #interp = table.interpolate(0.)
         #print('interp =', interp, type(interp))
         #assert np.allclose(interp, [5.5]), interp
+
+    def test_tabdmp1_interpolate_type_g(self):
+        """TABDMP1 Type=G: interpolate returns g directly."""
+        freqs = np.array([1.0, 10.0, 50.0, 100.0])
+        g_vals = np.array([0.01, 0.02, 0.05, 0.03])
+        card = TABDMP1(tid=10, x=freqs, y=g_vals, Type='G')
+
+        # At breakpoints: exact values
+        for f, g_expected in zip(freqs, g_vals):
+            g = card.interpolate(f)
+            assert np.isclose(g, g_expected), f'At {f} Hz: {g} != {g_expected}'
+
+        # Linear interpolation at midpoint: (10+50)/2=30 Hz → g=(0.02+0.05)/2=0.035
+        g_mid = card.interpolate(30.0)
+        assert np.isclose(g_mid, 0.035), f'At 30 Hz: {g_mid} != 0.035'
+
+    def test_tabdmp1_interpolate_type_crit(self):
+        """TABDMP1 Type=CRIT: interpolate converts ζ to g=2ζ."""
+        freqs = np.array([0.0, 100.0])
+        zeta_vals = np.array([0.01, 0.05])
+        card = TABDMP1(tid=11, x=freqs, y=zeta_vals, Type='CRIT')
+
+        # g = 2*zeta
+        g_0 = card.interpolate(0.0)
+        assert np.isclose(g_0, 0.02), f'At 0 Hz: g={g_0}, expected 0.02'
+
+        g_100 = card.interpolate(100.0)
+        assert np.isclose(g_100, 0.10), f'At 100 Hz: g={g_100}, expected 0.10'
+
+        # Midpoint: ζ=0.03, g=0.06
+        g_50 = card.interpolate(50.0)
+        assert np.isclose(g_50, 0.06), f'At 50 Hz: g={g_50}, expected 0.06'
+
+    def test_tabdmp1_interpolate_type_q(self):
+        """TABDMP1 Type=Q: interpolate converts Q-factor to g=1/Q."""
+        freqs = np.array([1.0, 100.0])
+        q_vals = np.array([50.0, 20.0])  # Q=50 → g=0.02, Q=20 → g=0.05
+        card = TABDMP1(tid=12, x=freqs, y=q_vals, Type='Q')
+
+        g_1 = card.interpolate(1.0)
+        assert np.isclose(g_1, 0.02), f'At 1 Hz: g={g_1}, expected 0.02'
+
+        g_100 = card.interpolate(100.0)
+        assert np.isclose(g_100, 0.05), f'At 100 Hz: g={g_100}, expected 0.05'
+
+    def test_tabdmp1_interpolate_array(self):
+        """interpolate_array matches element-wise interpolate calls."""
+        freqs = np.array([0.0, 50.0, 100.0])
+        g_vals = np.array([0.01, 0.04, 0.02])
+        card = TABDMP1(tid=13, x=freqs, y=g_vals, Type='G')
+
+        query = np.array([0.0, 10.0, 25.0, 50.0, 75.0, 100.0])
+        g_arr = card.interpolate_array(query)
+
+        for i, f in enumerate(query):
+            g_scalar = card.interpolate(f)
+            assert np.isclose(g_arr[i], g_scalar), (
+                f'Mismatch at {f} Hz: array={g_arr[i]}, scalar={g_scalar}')
+
+    def test_tabdmp1_interpolate_extrapolation(self):
+        """Values outside table range are clamped (np.interp behavior)."""
+        freqs = np.array([10.0, 100.0])
+        g_vals = np.array([0.02, 0.05])
+        card = TABDMP1(tid=14, x=freqs, y=g_vals, Type='G')
+
+        # Below table: clamps to first value
+        g_below = card.interpolate(0.0)
+        assert np.isclose(g_below, 0.02), f'Below table: {g_below}'
+
+        # Above table: clamps to last value
+        g_above = card.interpolate(200.0)
+        assert np.isclose(g_above, 0.05), f'Above table: {g_above}'
+
 
 if __name__ == '__main__':  # pragma: no cover
     unittest.main()

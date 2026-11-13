@@ -2,6 +2,8 @@
 from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 from pyNastran.bdf.cards.nodes import SPOINT, EPOINT
+from pyNastran.bdf.cards.params import PARAMS_ALLOWED
+
 if TYPE_CHECKING:  # pragma: no cover
     from pyNastran.bdf.bdf import (
         BDF, Element, Property, Material, ThermalMaterial,
@@ -96,7 +98,10 @@ if TYPE_CHECKING:  # pragma: no cover
         MONPNT1, MONPNT2, MONPNT3,
         #SPLINE1, SPLINE2, SPLINE3, SPLINE4, SPLINE5,
     )
-    from pyNastran.bdf.cards.aero.static_loads import AESTAT, AEROS, CSSCHD, TRIM, TRIM2, DIVERG, UXVEC
+    from pyNastran.bdf.cards.aero.static_loads import (
+        AESTAT, AEROS, CSSCHD, TRIM, TRIM2, DIVERG, UXVEC,
+        AEDW, AEFORCE, AEPRESS)
+
     from pyNastran.bdf.cards.aero.dynamic_loads import (
         AERO, FLFACT, FLUTTER,
         GUST, GUST2,
@@ -143,9 +148,12 @@ if TYPE_CHECKING:  # pragma: no cover
                                                 TABLES1, TABDMP1, TABLEST, TABLEHT, TABLEH1,
                                                 TABRND1, TABRNDG,
                                                 DTABLE)
-    from pyNastran.bdf.cards.contact import (
-        BCRPARA, BCTADD, BCTSET, BSURF, BSURFS, BCPARA, BCTPARA, BCONP, BLSEG,
-        BFRIC, BCTPARM, BGADD, BGSET, BCBODY)
+    from pyNastran.bdf.cards.contact.msc import BCBODY
+    from pyNastran.bdf.cards.contact.contact_common import BCPARA, BCONP
+    from pyNastran.bdf.cards.contact.nx_contact import (
+        BCRPARA, BCTADD, BCTSET, BSURF, BSURFS, BCTPARA, BLSEG,
+        BFRIC, BCTPARM)
+    from pyNastran.bdf.cards.contact.nx_glue import BGPARM, BGADD, BGSET
     from pyNastran.bdf.cards.parametric.geometry import (
         PSET, PVAL, FEEDGE, FEFACE, GMCURV, GMSURF)
     from pyNastran.bdf.cards.elements.acoustic import (
@@ -243,17 +251,16 @@ class AddMethods:
         """adds a PARAM object"""
         key = param.key
         model = self.model
+        if key not in PARAMS_ALLOWED:
+            model.log.warning(f'Possible invalid PARAM={key!r}\n{str(param)}')
         if key in model.params and not allow_overwrites:
             if not param == model.params[key]:
-                # if param.key in self.params:
-                #     msg = 'key=%s param=%s old_param=%s' % (key, param, self.params[key])
-                #     raise KeyError(msg)
-                model.log.warning('key=%s param=%s old_param=%s' %
-                                  (key, param, model.params[key]))
-                model.params[key] = param
+                model.log.warning('key=%s param=%s old_param=%s' % (key, param, model.params[key]))
+            else:
+                model.log.warning('equivalent PARAM card: key=%s: %s' % (key, param))
         else:
-            model.params[key] = param
             model._type_to_id_map[param.type].append(key)
+        model.params[key] = param
 
     def add_mdlprm_object(self, mdlprm: MDLPRM, allow_overwrites: bool=False) -> None:
         """adds a MDLPRM object"""
@@ -459,23 +466,28 @@ class AddMethods:
         key = elem.eid
         model = self.model
         assert key > 0, 'eid=%s elem=%s' % (key, elem)
-        if key not in model.elements:
-            model.elements[key] = elem
-            model._type_to_id_map[elem.type].append(key)
-        elif elem == model.elements[key]:
-            model.log.warning(f'replacing equivalent element:\n{elem}')
-        elif allow_overwrites:
-            model.log.warning(f'replacing elements:\n{model.elements[key]}with:\n{elem}')
-            model.elements[key] = elem
+        add_object_to_dict_no_dupes(model, key, 'element', elem, model.elements,
+                                    model._duplicate['elements'], allow_overwrites)
 
-            # already handled
-            #model._type_to_id_map[elem.type].append(key)
-        else:
-            model.log.error(f'duplicate element {key}:\n{model.elements[key]}with:\n{elem}')
-            model._duplicate['elements'].append(elem)
-            if model._stop_on_duplicate_error:
-                model.pop_parse_errors()
-            #raise RuntimeError('eid=%s\nold_element=\n%snew_element=\n%s' % (elem.eid, model.elements[key], elem))
+        if 0:  # pragma: no cover
+            if key not in model.elements:
+                model.elements[key] = elem
+                model._type_to_id_map[elem.type].append(key)
+            elif elem == model.elements[key]:
+                tag = _get_add_tag(model, elem, model.elements[key])
+                model.log.warning(f'replacing equivalent element:\n{elem}{tag}')
+            elif allow_overwrites:
+                model.log.warning(f'replacing elements:\n{model.elements[key]}with:\n{elem}')
+                model.elements[key] = elem
+
+                # already handled
+                #model._type_to_id_map[elem.type].append(key)
+            else:
+                model.log.error(f'duplicate element {key}:\n{model.elements[key]}with:\n{elem}')
+                model._duplicate['elements'].append(elem)
+                if model._stop_on_duplicate_error:
+                    model.pop_parse_errors()
+                #raise RuntimeError('eid=%s\nold_element=\n%snew_element=\n%s' % (elem.eid, model.elements[key], elem))
 
     def add_ao_object(self, elem_flag: CBARAO,
                       allow_overwrites: bool=False) -> None:
@@ -523,12 +535,14 @@ class AddMethods:
         key = mass.eid
         model = self.model
         assert key > 0, 'eid=%s must be positive; mass=\n%s' % (key, mass)
-        if key in model.masses and not allow_overwrites:
-            if not mass == self.model.masses[key]:
-                model._duplicate['masses'].append(mass)
-        else:
-            model.masses[key] = mass
-            model._type_to_id_map[mass.type].append(key)
+        add_object_to_dict_no_dupes(model, key, 'mass', mass, model.masses,
+                                    model._duplicate['masses'], allow_overwrites)
+        # if key in model.masses and not allow_overwrites:
+        #     if not mass == self.model.masses[key]:
+        #         model._duplicate['masses'].append(mass)
+        # else:
+        #     model.masses[key] = mass
+        #     model._type_to_id_map[mass.type].append(key)
 
     def add_damper_object(self, elem, allow_overwrites: bool=False) -> None:
         """.. warning:: can dampers have the same ID as a standard element?"""
@@ -657,6 +671,12 @@ class AddMethods:
         self.model.bctparms[key] = card
         self.model._type_to_id_map[card.type].append(key)
 
+    def add_bgparam_object(self, card: BGPARM, allow_overwrites: bool=False) -> None:
+        """adds an BCTPARM object"""
+        key = card.csid
+        self.model.bgparm[key] = card
+        self.model._type_to_id_map[card.type].append(key)
+
     def add_bctset_object(self, card: BCTSET, allow_overwrites: bool=False) -> None:
         """adds an BCTSET object"""
         key = card.csid
@@ -746,41 +766,50 @@ class AddMethods:
         """adds an PBUSHT object"""
         key = prop.pid
         model = self.model
-        if key in model.pbusht and not allow_overwrites:
-            if not prop == model.pbusht[key]:
-                assert key not in model.pbusht, 'PBUSHT.pid=%s old=\n%snew=\n%s' % (
-                    key, model.pbusht[key], prop)
-        else:
-            assert key > 0, 'pid=%s prop=%s' % (key, prop)
-            model.pbusht[key] = prop
-            model._type_to_id_map[prop.type].append(key)
+        add_object_to_dict(
+            model, key, 'pbusht', prop, model.pbusht,
+            allow_overwrites)
+        # if key in model.pbusht and not allow_overwrites:
+        #     if not prop == model.pbusht[key]:
+        #         assert key not in model.pbusht, 'PBUSHT.pid=%s old=\n%snew=\n%s' % (
+        #             key, model.pbusht[key], prop)
+        # else:
+        #     assert key > 0, 'pid=%s prop=%s' % (key, prop)
+        #     model.pbusht[key] = prop
+        #     model._type_to_id_map[prop.type].append(key)
 
     def add_pdampt_object(self, prop: PDAMPT, allow_overwrites: bool=False) -> None:
         """adds an PDAMPT object"""
         key = prop.pid
         model = self.model
-        if key in model.pdampt and not allow_overwrites:
-            if not prop == model.pdampt[key]:
-                assert key not in model.pdampt, 'PDAMPT.pid=%s old=\n%snew=\n%s' % (
-                    key, model.pdampt[key], prop)
-        else:
-            assert key > 0, 'pid=%s prop=%s' % (key, prop)
-            model.pdampt[key] = prop
-            model._type_to_id_map[prop.type].append(key)
+        add_object_to_dict(
+            model, key, 'pdampt', prop, model.pdampt,
+            allow_overwrites)
+        # if key in model.pdampt and not allow_overwrites:
+        #     if not prop == model.pdampt[key]:
+        #         assert key not in model.pdampt, 'PDAMPT.pid=%s old=\n%snew=\n%s' % (
+        #             key, model.pdampt[key], prop)
+        # else:
+        #     assert key > 0, 'pid=%s prop=%s' % (key, prop)
+        #     model.pdampt[key] = prop
+        #     model._type_to_id_map[prop.type].append(key)
 
     def add_pelast_object(self, prop: PELAST, allow_overwrites: bool=False) -> None:
         """adds an PELAST object"""
         key = prop.pid
         assert key > 0, 'pid=%s prop=%s' % (key, prop)
         model = self.model
-        if key in model.pelast and not allow_overwrites:
-            if not prop == model.pelast[key]:
-                #print('pid=%s\noldProperty=\n%snewProperty=\n%s' % (key, model.pelast[key],prop))
-                assert key not in model.pelast, 'PELAST.pid=%s old=\n%snew=\n%s' % (
-                    key, model.pelast[key], prop)
-        else:
-            model.pelast[key] = prop
-            model._type_to_id_map[prop.type].append(key)
+        add_object_to_dict(
+            model, key, 'pelast', prop, model.pelast,
+            allow_overwrites)
+        # if key in model.pelast and not allow_overwrites:
+        #     if not prop == model.pelast[key]:
+        #         #print('pid=%s\noldProperty=\n%snewProperty=\n%s' % (key, model.pelast[key],prop))
+        #         assert key not in model.pelast, 'PELAST.pid=%s old=\n%snew=\n%s' % (
+        #             key, model.pelast[key], prop)
+        # else:
+        #     model.pelast[key] = prop
+        #     model._type_to_id_map[prop.type].append(key)
 
     def add_tf_object(self, tf: TF, allow_overwrites: bool=False) -> None:
         """adds an TF (transfer function) object"""
@@ -798,13 +827,17 @@ class AddMethods:
         """adds an MAT1, MAT2, MAT8 object"""
         key = material.mid
         assert key > 0, 'mid=%s material=\n%s' % (key, material)
+
         model = self.model
-        if key in model.materials and not allow_overwrites:
-            if not material == model.materials[key]:
-                model._duplicate['materials'].append(material)
-        else:
-            model.materials[key] = material
-            model._type_to_id_map[material.type].append(key)
+        add_object_to_dict_no_dupes(model, key, 'material', material, model.materials,
+                                    model._duplicate['materials'], allow_overwrites)
+
+        # if key in model.materials and not allow_overwrites:
+        #     if not material == model.materials[key]:
+        #         model._duplicate['materials'].append(material)
+        # else:
+        #     model.materials[key] = material
+        #     model._type_to_id_map[material.type].append(key)
 
     def add_thermal_material_object(self, material: ThermalMaterial,
                                     allow_overwrites: bool=False) -> None:
@@ -824,12 +857,16 @@ class AddMethods:
         """adds an MATHP, MATHE object"""
         key = material.mid
         assert key > 0, 'mid=%s material=\n%s' % (key, material)
-        if key in self.model.hyperelastic_materials and not allow_overwrites:
-            if not material == self.model.hyperelastic_materials[key]:
-                assert key not in self.model.hyperelastic_materials, 'mid=%s\nold=\n%snew=\n%s' % (key, self.model.hyperelastic_materials[key], material)
-        else:
-            self.model.hyperelastic_materials[key] = material
-            self.model._type_to_id_map[material.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'hyperelastic_material', material, model.hyperelastic_materials,
+            allow_overwrites)
+        # if key in self.model.hyperelastic_materials and not allow_overwrites:
+        #     if not material == self.model.hyperelastic_materials[key]:
+        #         assert key not in self.model.hyperelastic_materials, 'mid=%s\nold=\n%snew=\n%s' % (key, self.model.hyperelastic_materials[key], material)
+        # else:
+        #     self.model.hyperelastic_materials[key] = material
+        #     self.model._type_to_id_map[material.type].append(key)
 
     def add_material_dependence_object(self, material: MaterialDependence,
                                        allow_overwrites: bool=False) -> None:
@@ -877,7 +914,7 @@ class AddMethods:
 
         """
         key = material.mid
-        if key in self.model.thermal_materials and not allow_overwrites:
+        if key in self.model.creep_materials and not allow_overwrites:
             if not material == self.model.creep_materials[key]:
                 assert key not in self.model.creep_materials, 'Material.mid=%s\nold=\n%snew=\n%s' % (key, self.model.creep_materials[key], material)
         else:
@@ -891,6 +928,8 @@ class AddMethods:
         key = coord.cid
         model = self.model
         assert coord.cid > -1, 'cid=%s coord=\n%s' % (key, coord)
+        if key == 0:
+            return
         # add_object_to_dict_no_dupes(model, key, 'coords', coord, model.coords,
         #                             model._duplicate['coords'], allow_overwrites)
 
@@ -910,7 +949,11 @@ class AddMethods:
 
         tag = _get_add_tag(model, coord, model.coords[key])
         if coord == model.coords[key]:
-            model.log.warning(f'replacing equivalent coord {key}:{tag}\n{coord}')
+            if model._warn_on_equivalent_duplicate:
+                model.log.warning(f'replacing equivalent coord {key}:{tag}\n{coord}')
+            if model.save_file_structure:
+                model._duplicate_equivalents.append(
+                    ('coord', key, coord.type, model.coords[key].ifile, coord.ifile))
         elif allow_overwrites:
             model.log.warning(f'replacing coord{key}:{tag}\n{model.coords[key]}with:\n{coord}')
             model.coords[key] = coord
@@ -1209,13 +1252,9 @@ class AddMethods:
     def add_aefact_object(self, aefact: AEFACT, allow_overwrites: bool=False) -> None:
         """adds an AEFACT object"""
         key = aefact.sid
-        if key in self.model.aefacts and not allow_overwrites:
-            if not aefact == self.model.aefacts[key]:
-                assert key not in self.model.aefacts, 'AEFACT.sid=%s\nold=\n%snew=\n%s' % (key, self.model.aefacts[key], aefact)
-        else:
-            assert key > 0, 'sid=%s method=\n%s' % (key, aefact)
-            self.model.aefacts[key] = aefact
-            self.model._type_to_id_map[aefact.type].append(key)
+        add_object_to_dict(
+            self.model, key, 'aefact', aefact, self.model.aefacts,
+            allow_overwrites=allow_overwrites)
 
     def add_aelist_object(self, aelist: AELIST) -> None:
         """adds an AELIST object"""
@@ -1226,8 +1265,6 @@ class AddMethods:
         add_object_to_dict(
             self.model, key, 'aelists', aelist, self.model.aelists,
             allow_overwrites=False)
-        # self.model.aelists[key] = aelist
-        # self.model._type_to_id_map[aelist.type].append(key)
 
     def add_aelink_object(self, aelink: AELINK) -> None:
         """adds an AELINK object"""
@@ -1242,26 +1279,27 @@ class AddMethods:
     def add_aecomp_object(self, aecomp: AECOMP | AECOMPL) -> None:
         """adds an AECOMP object"""
         key = aecomp.name
-        assert key not in self.model.aecomps, '\naecomp=\n%s oldAECOMP=\n%s' % (aecomp, self.model.aecomps[key])
-        self.model.aecomps[key] = aecomp
-        self.model._type_to_id_map[aecomp.type].append(key)
+        add_object_to_dict(
+            self.model, key, 'aecomp', aecomp, self.model.aecomps,
+            allow_overwrites=False)
 
     def add_aeparm_object(self, aeparam: AEPARM) -> None:
         """adds an AEPARM object"""
         key = aeparam.aeparm_id
-        assert key not in self.model.aeparams, '\naeparam=\n%s oldAEPARM=\n%s' % (aeparam, self.model.aeparams[key])
         assert key >= 0
-        self.model.aeparams[key] = aeparam
-        self.model._type_to_id_map[aeparam.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'aeparam', aeparam, model.aeparams,
+            allow_overwrites=False)
 
     def add_aestat_object(self, aestat: AESTAT) -> None:
         """adds an AESTAT object"""
         key = aestat.aestat_id
-        assert key not in self.model.aestats, '\naestat=\n%s old=\n%s' % (
-            aestat, self.model.aestats[key])
         assert key >= 0
-        self.model.aestats[key] = aestat
-        self.model._type_to_id_map[aestat.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'aestat', aestat, model.aestats,
+            allow_overwrites=False)
 
     def add_aesurf_object(self, aesurf: AESURF) -> None:
         """adds an AESURF object"""
@@ -1272,53 +1310,44 @@ class AddMethods:
         add_object_to_dict(
             self.model, key, 'aesurf', aesurf, self.model.aesurf,
             allow_overwrites=False)
-        # self.model.aesurf[key] = aesurf
-        # self.model._type_to_id_map[aesurf.type].append(key)
 
     def add_aesurfs_object(self, aesurfs: AESURFS) -> None:
         """adds an AESURFS object"""
         key = aesurfs.aesid
-        assert key not in self.model.aesurfs, '\naesurfs=\n%s old=\n%s' % (
-            aesurfs, self.model.aesurfs[key])
         assert key >= 0
-        self.model.aesurfs[key] = aesurfs
-        self.model._type_to_id_map[aesurfs.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'aesurfs', aesurfs, model.aesurfs,
+            allow_overwrites=False)
 
     def add_csschd_object(self, csschd: CSSCHD) -> None:
         """adds an CSSCHD object"""
         key = csschd.sid
-        assert key not in self.model.csschds, '\nCSSCHD=\n%s old=\n%s' % (csschd, self.model.csschds[key])
         assert key >= 0
-        self.model.csschds[key] = csschd
-        self.model._type_to_id_map[csschd.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'caero', csschd, model.csschds,
+            allow_overwrites=False)
 
     def add_caero_object(self, caero: CAEROs,
                          allow_overwrites: bool=False) -> None:
         """adds an CAERO1/CAERO2/CAERO3/CAERO4/CAERO5 object"""
         key = caero.eid
         assert key > 0
-        if key in self.model.caeros:
-            if allow_overwrites:
-                caero_old = self.model.caeros[key]
-                if caero == caero_old:
-                    assert key not in self.model.caeros, '\nkey=%s; caero=\n%r old_caero=\n%r' % (
-                        key, caero, self.model.caeros[key])
-            else:
-                assert key not in self.model.caeros, '\nkey=%s; caero=\n%r old_caero=\n%r' % (
-                    key, caero, self.model.caeros[key])
-        self.model.caeros[key] = caero
-        self.model._type_to_id_map[caero.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'caero', caero, model.caeros,
+            allow_overwrites=allow_overwrites)
 
     def add_paero_object(self, paero: PAEROs,
                          allow_overwrites: bool=False) -> None:
         """adds an PAERO1/PAERO2/PAERO3/PAERO4/PAERO5 object"""
         key = paero.pid
-        if not allow_overwrites:
-            assert key not in self.model.paeros, '\npaero=\n%r old_paero=\n%r' % (
-                paero, self.model.paeros[key])
         assert key > 0, f'paero.pid = {key}'
-        self.model.paeros[key] = paero
-        self.model._type_to_id_map[paero.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'paero', paero, model.paeros,
+            allow_overwrites=allow_overwrites)
 
     def add_monpnt_object(self, monitor_point: MONPNT1 | MONPNT2 | MONPNT3) -> None:
         """adds an MONPNT object"""
@@ -1331,65 +1360,85 @@ class AddMethods:
                           allow_overwrites: bool=False) -> None:
         """adds an SPLINE1/SPLINE2/SPLINE3/SPLINE4/SPLINE5 object"""
         key = spline.eid
-        if not allow_overwrites:
-            assert key not in self.model.splines, f'\nspline:\n{spline}\nold_spline:\n{self.model.splines[key]}'
         assert spline.eid > 0, spline
-        self.model.splines[key] = spline
-        self.model._type_to_id_map[spline.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'spline', spline, model.splines,
+            allow_overwrites=allow_overwrites)
 
     def add_gust_object(self, gust: GUST | GUST2) -> None:
         """adds an GUST object"""
         key = gust.sid
-        assert key not in self.model.gusts
         assert key > 0
-        self.model.gusts[key] = gust
-        self.model._type_to_id_map[gust.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'gust', gust, model.gusts,
+            allow_overwrites=False)
 
     def add_trim_object(self, trim: TRIM | TRIM2,
                         allow_overwrites: bool=False) -> None:
         """adds an TRIM object"""
         key = trim.sid
-        if not allow_overwrites:
-            assert key not in self.model.trims, 'TRIM=%s  old=\n%snew=\n%s' % (key, self.model.trims[key], trim)
         assert key > 0, 'key=%r trim=\n%s' % (key, trim)
-        self.model.trims[key] = trim
-        self.model._type_to_id_map[trim.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'trim', trim, model.trims,
+            allow_overwrites=allow_overwrites)
 
     def add_diverg_object(self, diverg: DIVERG, allow_overwrites: bool=False) -> None:
         """adds an DIVERG object"""
         key = diverg.sid
-        if not allow_overwrites:
-            assert key not in self.model.divergs, 'DIVERG=%s  old=\n%snew=\n%s' % (key, self.model.divergs[key], diverg)
         assert key > 0, 'key=%r diverg=\n%s' % (key, diverg)
-        self.model.divergs[key] = diverg
-        self.model._type_to_id_map[diverg.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'diverg', diverg, model.divergs,
+            allow_overwrites=allow_overwrites)
 
     def add_uxvec_object(self, uxvec: UXVEC,
                          allow_overwrites: bool=False) -> None:
         """adds an UXVEC object"""
         key = uxvec.sid
         if not allow_overwrites:
-            assert key not in self.model.trims, 'UXVEC=%s  old=\n%snew=\n%s' % (key, self.model.uxvec[key], uxvec)
+            assert key not in self.model.uxvec, 'UXVEC=%s  old=\n%snew=\n%s' % (key, self.model.uxvec[key], uxvec)
         assert key > 0, 'key=%r uxvec=\n%s' % (key, uxvec)
         self.model.uxvec[key] = uxvec
         self.model._type_to_id_map[uxvec.type].append(key)
 
+    def add_aedw_object(self, aedw: AEDW,
+                       allow_overwrites: bool=False) -> None:
+        """adds an AEDW object"""
+        self.model.aedw.append(aedw)
+        self.model._type_to_id_map['AEDW'].append(len(self.model.aedw)-1)
+
+    def add_aeforce_object(self, aeforce: AEFORCE,
+                           allow_overwrites: bool=False) -> None:
+        """adds an AEFORCE object"""
+        self.model.aeforce.append(aeforce)
+        self.model._type_to_id_map['AEFORCE'].append(len(self.model.aeforce)-1)
+
+    def add_aepress_object(self, aepress: AEPRESS,
+                           allow_overwrites: bool=False) -> None:
+        """adds an AEPRESS object"""
+        self.model.aepress.append(aepress)
+        self.model._type_to_id_map['AEPRESS'].append(len(self.model.aepress)-1)
+
     def add_flutter_object(self, flutter: FLUTTER, allow_overwrites: bool=False) -> None:
         """adds an FLUTTER object"""
         key = flutter.sid
-        if not allow_overwrites:
-            assert key not in self.model.flutters, 'FLUTTER=%s old=\n%snew=\n%s' % (key, self.model.flutters[key], flutter)
         assert key > 0
-        self.model.flutters[key] = flutter
-        self.model._type_to_id_map[flutter.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'flutter', flutter, model.flutters,
+            allow_overwrites=allow_overwrites)
 
     def add_flfact_object(self, flfact: FLFACT) -> None:
         """adds an FLFACT object"""
         key = flfact.sid
-        #assert key not in self.model.flfacts
         assert key > 0
-        self.model.flfacts[key] = flfact  # set id...
-        self.model._type_to_id_map[flfact.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'flfact', flfact, model.flfacts,
+            allow_overwrites=False)
 
     def add_dconstr_object(self, dconstr: DCONSTR | DCONADD) -> None:
         """adds a DCONSTR object"""
@@ -1418,11 +1467,11 @@ class AddMethods:
     def add_desvar_object(self, desvar: DESVAR) -> None:
         """adds a DESVAR object"""
         key = desvar.desvar_id
-        assert key not in self.model.desvars, 'DESVAR=%s old=\n%snew=\n%s' % (
-            key, self.model.desvars[key], desvar)
         assert key > 0
-        self.model.desvars[key] = desvar
-        self.model._type_to_id_map[desvar.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'desvar', desvar, model.desvars,
+            allow_overwrites=False)
 
     def add_topvar_object(self, topvar: TOPVAR) -> None:
         """adds a TOPVAR object"""
@@ -1445,11 +1494,11 @@ class AddMethods:
     def add_dlink_object(self, dlink: DLINK) -> None:
         """adds a DLINK object"""
         key = dlink.oid
-        assert key not in self.model.dlinks, 'DLINK=%s old=\n%snew=\n%s' % (
-            key, self.model.dlinks[key], dlink)
         assert key > 0
-        self.model.dlinks[key] = dlink
-        self.model._type_to_id_map[dlink.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'dlink', dlink, model.dlinks,
+            allow_overwrites=False)
 
     def add_dscreen_object(self, dscreen: DSCREEN) -> None:
         """adds a DSCREEN object"""
@@ -1463,39 +1512,38 @@ class AddMethods:
     def add_dresp_object(self, dresp: DRESP1 | DRESP2 | DRESP3) -> None:
         """adds a DRESP1/DRESP2/DRESP3 object"""
         key = dresp.dresp_id
-        assert key not in self.model.dresps, 'DRESPx=%s old=\n%snew=\n%s' % (
-            key, self.model.dresps[key], dresp)
         assert key > 0
-        self.model.dresps[key] = dresp
-        self.model._type_to_id_map[dresp.type].append(key)
+        model: BDF = self.model
+        add_object_to_dict(
+            model, key, 'dresp', dresp, model.dresps,
+            allow_overwrites=False)
 
     def add_dvcrel_object(self, dvcrel: DVCREL1 | DVCREL2) -> None:
         """adds a DVCREL1/DVCREL2 object"""
         key = dvcrel.oid
-        assert key not in self.model.dvcrels, 'DVCRELx=%s old\n%snew=\n%s' % (
-            key, self.model.dvcrels[key], dvcrel)
         assert key > 0
-        self.model.dvcrels[key] = dvcrel
-        self.model._type_to_id_map[dvcrel.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'dvcrel', dvcrel, model.dvcrels,
+            allow_overwrites=False)
 
     def add_dvmrel_object(self, dvmrel: DVMREL1 | DVMREL2) -> None:
         """adds a DVMREL1/DVMREL2 object"""
         key = dvmrel.oid
-        assert key not in self.model.dvmrels, 'DVMRELx=%s old=\n%snew=\n%s' % (
-            key, self.model.dvmrels[key], dvmrel)
-        assert key not in self.model.dvmrels
         assert key > 0
-        self.model.dvmrels[key] = dvmrel
-        self.model._type_to_id_map[dvmrel.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'dvmrel', dvmrel, model.dvmrels,
+            allow_overwrites=False)
 
     def add_dvprel_object(self, dvprel: DVPREL1 | DVPREL2) -> None:
         """adds a DVPREL1/DVPREL2 object"""
         key = dvprel.oid
-        assert key not in self.model.dvprels, 'DVPRELx=%s old\n%snew=\n%s' % (
-            key, self.model.dvprels[key], dvprel)
         assert key > 0
-        self.model.dvprels[key] = dvprel
-        self.model._type_to_id_map[dvprel.type].append(key)
+        model =  self.model
+        add_object_to_dict(
+            model, key, 'dvprel', dvprel, model.dvprels,
+            allow_overwrites=False)
 
     def add_dvgrid_object(self, dvgrid: DVGRID) -> None:
         """adds a DVGRID object"""
@@ -1511,35 +1559,40 @@ class AddMethods:
     def add_dvtrel_object(self, dvtrel: DVTREL1) -> None:  # DVTREL2
         """adds a DVTREL1/DVTREL2 object"""
         key = dvtrel.dvtrel_id
-        assert key not in self.model.dvtrels, 'DVTRELx=%s old\n%snew=\n%s' % (
-            key, self.model.dvtrels[key], dvtrel)
         assert key > 0
-        self.model.dvtrels[key] = dvtrel
-        self.model._type_to_id_map[dvtrel.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'dvtrel', dvtrel, model.dvtrels,
+            allow_overwrites=False)
 
     def add_group_object(self, group: GROUP) -> None:
         """adds a GROUP object"""
         key = group.group_id
         assert key > 0
-        self.model.group[key] = group
-        self.model._type_to_id_map[group.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'group', group, model.group,
+            allow_overwrites=False)
 
     def add_dmncon_object(self, dmncon: DMNCON) -> None:
         """adds a DMNCON object"""
         key = dmncon.constraint_id
         assert key > 0
-        self.model.dmncon[key] = dmncon
-        self.model._type_to_id_map[dmncon.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'dmncon', dmncon, model.dmncon,
+            allow_overwrites=False)
 
     #-----------------------------------------------------------
 
     def add_nlparm_object(self, nlparm: NLPARM) -> None:
         """adds an NLPARM object"""
         key = nlparm.nlparm_id
-        assert key not in self.model.nlparms
         assert key > 0, 'key=%s; nlparm=%s\n' % (key, nlparm)
-        self.model.nlparms[key] = nlparm
-        self.model._type_to_id_map[nlparm.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'nlparm', nlparm, model.nlparms,
+            allow_overwrites=False)
 
     def add_rotor_object(self, rotor: ROTORD | ROTORG) -> None:
         """adds a ROTORD/ROTORG object"""
@@ -1556,41 +1609,39 @@ class AddMethods:
     def add_nlpci_object(self, nlpci: NLPCI) -> None:
         """adds an NLPCI object"""
         key = nlpci.nlpci_id
-        assert key not in self.model.nlpcis
         assert key > 0
-        self.model.nlpcis[key] = nlpci
-        self.model._type_to_id_map[nlpci.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'nlpci', nlpci, model.nlpcis,
+            allow_overwrites=False)
 
     def add_nxstrat_object(self, nxstrat: NXSTRAT) -> None:
         key = nxstrat.sid
-        assert key not in self.model.nxstrats, 'nxstrats=%s nxstrat=%s' % (self.model.nxstrats, nxstrat)
         assert key > 0
-        self.model.nxstrats[key] = nxstrat
-        self.model._type_to_id_map[nxstrat.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'nxstrat', nxstrat, model.nxstrats,
+            allow_overwrites=False)
 
     def add_tstep_object(self, tstep: TSTEP | TSTEP1,
                          allow_overwrites: bool=False) -> None:
         """adds a TSTEP object"""
         key = tstep.sid
-        if key in self.model.tsteps and not allow_overwrites:
-            if not tstep == self.model.tsteps[key]:
-                assert key not in self.model.tsteps, 'TSTEP=%s\nold=\n%snew=\n%s' % (key, self.model.tsteps[key], tstep)
-        else:
-            assert key > 0, 'sid=%s tstep=\n%s' % (key, tstep)
-            self.model.tsteps[key] = tstep
-            self.model._type_to_id_map[tstep.type].append(key)
+        model = self.model
+        assert key > 0, 'sid=%s tstep=\n%s' % (key, tstep)
+        add_object_to_dict(
+            model, key, 'tstep', tstep, model.tsteps,
+            allow_overwrites=False)
 
     def add_tstepnl_object(self, tstepnl: TSTEPNL,
                            allow_overwrites: bool=False) -> None:
         """adds a TSTEPNL object"""
         key = tstepnl.sid
-        if key in self.model.tstepnls and not allow_overwrites:
-            if not tstepnl == self.model.tstepnls[key]:
-                assert key not in self.model.tstepnls, 'TSTEPNL=%s\nold=\n%snew=\n%s' % (key, self.model.tstepnls[key], tstepnl)
-        else:
-            assert key > 0, 'sid=%s tstepnl=\n%s' % (key, tstepnl)
-            self.model.tstepnls[key] = tstepnl
-            self.model._type_to_id_map[tstepnl.type].append(key)
+        assert key > 0, 'sid=%s tstepnl=\n%s' % (key, tstepnl)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'tstepnl', tstepnl, model.tstepnls,
+            allow_overwrites=False)
 
     def add_freq_object(self, freq: FREQs) -> None:
         key = freq.sid
@@ -1696,73 +1747,72 @@ class AddMethods:
     def add_table_object(self, table: TABLEH1 | TABLEHT | TABLES1 | TABLEST) -> None:
         """adds a TABLES1, TABLEST object"""
         key = table.tid
-        if key in self.model.tables:
-            if not table == self.model.tables[key]:
-                assert key not in self.model.tables, '\ntable=\n%s old_table=\n%s' % (
-                    table, self.model.tables[key])
+        # if key in self.model.tables:
+        #     if not table == self.model.tables[key]:
+        #         assert key not in self.model.tables, '\ntable=\n%s old_table=\n%s' % (
+        #             table, self.model.tables[key])
         assert key > 0
-        self.model.tables[key] = table
-        self.model._type_to_id_map[table.type].append(key)
+        # self.model.tables[key] = table
+        # self.model._type_to_id_map[table.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'table', table, model.tables,
+            allow_overwrites=False)
 
     def add_tabled_object(self, table: TABLED1 | TABLED2 | TABLED3 | TABLED4) -> None:
         """adds a TABLED1, TABLED2, TABLED3, TABLED4 object"""
         key = table.tid
-        assert key not in self.model.tables_d, '\ntabled=\n%s old_tabled=\n%s' % (
-            table, self.model.tables_d[key])
-        #assert key > 0; yes you can have negative tables...
-        self.model.tables_d[key] = table
-        self.model._type_to_id_map[table.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'table', table, model.tables_d,
+            allow_overwrites=False)
 
     def add_tablem_object(self, table: TABLEM1 | TABLEM2 | TABLEM3 | TABLEM4) -> None:
         """adds a TABLEM1, TABLEM2, TABLEM3, TABLEM4 object"""
         key = table.tid
-        assert key not in self.model.tables_m, '\ntablem=\n%s old_tablem=\n%s' % (
-            table, self.model.tables_m[key])
-        #assert key > 0; yes you can have negative tables...
-        self.model.tables_m[key] = table
-        self.model._type_to_id_map[table.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'table', table, model.tables_m,
+            allow_overwrites=False)
 
     def add_table_sdamping_object(self, table: TABDMP1) -> None:
         """adds a TABDMP1 object"""
         key = table.tid
-        assert key not in self.model.tables_sdamping, '\nTable=\n%s oldTable=\n%s' % (
-            table, self.model.tables_sdamping[key])
-        #assert key > 0; yes you can have negative tables...
-        self.model.tables_sdamping[key] = table
-        self.model._type_to_id_map[table.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'table', table, model.tables_sdamping,
+            allow_overwrites=False)
 
     def add_random_table_object(self, table: TABRND1 | TABRNDG) -> None:
         """adds a TABRND1, TABRNDG object"""
         key = table.tid
-        assert key not in self.model.random_tables, '\nTable=\n%s old=\n%s' % (
-            table, self.model.random_tables[key])
+        # assert key not in self.model.random_tables, '\nTable=\n%s old=\n%s' % (
+        #     table, self.model.random_tables[key])
         assert key > 0
-        self.model.random_tables[key] = table
-        self.model._type_to_id_map[table.type].append(key)
+        # self.model.random_tables[key] = table
+        # self.model._type_to_id_map[table.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'table', table, model.random_tables,
+            allow_overwrites=False)
 
     def add_method_object(self, method: EIGR | EIGRL | EIGB,
                           allow_overwrites: bool=False) -> None:
         """adds a EIGR/EIGRL object"""
         key = method.sid
-        if key in self.model.methods and not allow_overwrites:
-            if not method == self.model.methods[key]:
-                assert key not in self.model.methods, 'sid=%s\nold_method=\n%snew_method=\n%s' % (key, self.model.methods[key], method)
-        else:
-            assert key > 0, 'sid=%s method=\n%s' % (key, method)
-            self.model.methods[key] = method
-            self.model._type_to_id_map[method.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'method', method, self.model.methods,
+            allow_overwrites)
 
     def add_cmethod_object(self, method: EIGC | EIGP,
                            allow_overwrites: bool=False) -> None:
         """adds a EIGB/EIGC object"""
         key = method.sid
-        if key in self.model.cMethods and not allow_overwrites:
-            if not method == self.model.cMethods[key]:
-                assert key not in self.model.cMethods, 'sid=%s\nold_cmethod=\n%snew_cmethod=\n%s' % (key, self.model.cMethods[key], method)
-        else:
-            assert key > 0, 'sid=%s cMethod=\n%s' % (key, method)
-            self.model.cMethods[key] = method
-            self.model._type_to_id_map[method.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'cmethod', method, self.model.cMethods,
+            allow_overwrites)
 
     def add_mkaero_object(self, mkaero: MKAERO1 | MKAERO2) -> None:
         """adds an MKAERO1/MKAERO2 object"""
@@ -1787,54 +1837,42 @@ class AddMethods:
         assert surf.surf_id not in self.model.gmsurf, surf
         self.model.gmsurf[surf.surf_id] = surf
 
-    def add_feface(self, face: FEFACE, allow_overwrites: bool=False) -> None:
-        key = face.face_id
-        if key in self.model.feface and not allow_overwrites:
-            if not face == self.model.feface[key]:
-                raise RuntimeError(f'feface is duplicated\n{face}\nold:\n{self.model.feface[key]}')
-        else:
-            self.model.feface[face.face_id] = face
-            self.model._type_to_id_map[face.type].append(key)
-        #assert face.face_id not in self.model.feface, face
-        #self.model.feface[face.face_id] = face
+    def add_feface(self, feface: FEFACE, allow_overwrites: bool=False) -> None:
+        key = feface.face_id
+        model = self.model
+        add_object_to_dict(
+            model, key, 'feface', feface, model.feface,
+            allow_overwrites=False)
 
-    def add_feedge(self, edge: FEEDGE, allow_overwrites: bool=False) -> None:
-        key = edge.edge_id
-        if key in self.model.feedge and not allow_overwrites:
-            if not edge == self.model.feedge[key]:
-                raise RuntimeError(f'feedge is duplicated\n{edge}\nold:\n{self.model.feedge[key]}')
-        else:
-            self.model.feedge[edge.edge_id] = edge
-            self.model._type_to_id_map[edge.type].append(key)
+    def add_feedge(self, feedge: FEEDGE, allow_overwrites: bool=False) -> None:
+        key = feedge.edge_id
+        model = self.model
+        add_object_to_dict(
+            model, key, 'feedge', feedge, model.feedge,
+            allow_overwrites=False)
 
     #---------------------------------------------------------------------------
     # nx bolts
     def add_bolt_object(self, bolt: BOLT, allow_overwrites: bool=False) -> None:
         key = bolt.bolt_id
-        if key in self.model.bolt and not allow_overwrites:
-            if not bolt == self.model.bolt[key]:
-                raise RuntimeError(f'bolt is duplicated\n{bolt}\nold:\n{self.model.bolt[key]}')
-        else:
-            self.model.bolt[bolt.bolt_id] = bolt
-            self.model._type_to_id_map[bolt.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'feedge', bolt, model.bolt,
+            allow_overwrites=False)
 
     def add_boltseq_object(self, boltseq: BOLTSEQ, allow_overwrites: bool=False) -> None:
         key = boltseq.sid
-        if key in self.model.boltseq and not allow_overwrites:
-            if not boltseq == self.model.boltseq[key]:
-                raise RuntimeError(f'boltseq is duplicated\n{boltseq}\nold:\n{self.model.boltseq[key]}')
-        else:
-            self.model.boltseq[boltseq.sid] = boltseq
-            self.model._type_to_id_map[boltseq.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'boltseq', boltseq, model.boltseq,
+            allow_overwrites=False)
 
     def add_boltfor_object(self, boltfor: BOLTFOR, allow_overwrites: bool=False) -> None:
         key = boltfor.sid
-        if key in self.model.boltfor and not allow_overwrites:
-            if not boltfor == self.model.boltfor[key]:
-                raise RuntimeError(f'boltfor is duplicated\n{boltfor}\nold:\n{self.model.boltfor[key]}')
-        else:
-            self.model.boltfor[boltfor.sid] = boltfor
-            self.model._type_to_id_map[boltfor.type].append(key)
+        model = self.model
+        add_object_to_dict(
+            model, key, 'boltfor', boltfor, model.boltfor,
+            allow_overwrites=False)
 
 
 def _add_value_to_dict(result: dict[int, Any], key: int, card: Any,
@@ -1887,7 +1925,11 @@ def add_object_to_dict(model: BDF, key: int,
 
     tag = _get_add_tag(model, obj, obj_dict[key])
     if obj == obj_dict[key]:
-        model.log.warning(f'replacing equivalent {obj_name} {key}:{tag}\n{obj}')
+        if model._warn_on_equivalent_duplicate:
+            model.log.warning(f'replacing equivalent {obj_name} {key}:{tag}\n{obj}')
+        if model.save_file_structure:
+            model._duplicate_equivalents.append(
+                (obj_name, key, obj.type, obj_dict[key].ifile, obj.ifile))
     elif allow_overwrites:
         model.log.warning(f'replacing {obj_name} {key}:{tag}\n{obj_dict[key]}with:\n{obj}')
         obj_dict[key] = obj
@@ -1900,7 +1942,7 @@ def add_object_to_dict(model: BDF, key: int,
         #     model.pop_parse_errors()
         raise RuntimeError(f'id={key!r}\n'
                            f'old_{obj_name}=\n{str(obj_dict[key])}'
-                           f'new_{obj_name}=\n{str(obj)}')
+                           f'new_{obj_name}=\n{str(obj)}{tag}')
 
 
 def add_object_to_dict_no_dupes(model: BDF, key: int, obj_name: str,
@@ -1946,7 +1988,11 @@ def add_object_to_dict_no_dupes(model: BDF, key: int, obj_name: str,
 
     tag = _get_add_tag(model, obj, obj_dict[key])
     if obj == obj_dict[key]:
-        model.log.warning(f'replacing equivalent {obj_name} {key}:{tag}\n{obj}')
+        if model._warn_on_equivalent_duplicate:
+            model.log.warning(f'replacing equivalent {obj_name} {key}:{tag}\n{obj}')
+        if model.save_file_structure:
+            model._duplicate_equivalents.append(
+                (obj_name, key, obj.type, obj_dict[key].ifile, obj.ifile))
     elif allow_overwrites:
         model.log.warning(f'replacing {obj_name} {key}:{tag}\n{obj_dict[key]}\nwith:\n{obj}')
         obj_dict[key] = obj

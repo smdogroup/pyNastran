@@ -1,22 +1,35 @@
-#import os
 import unittest
 import pathlib
-#import numpy as np
 
+from cpylog import SimpleLogger
 import pyNastran
+import numpy as np
+from pyNastran.bdf.bdf import read_bdf
 from pyNastran.dev.bdf_vectorized3.test.test_bdf import (
     read_bdfv, main as test_bdf, IS_PYTABLES)
 from pyNastran.dev.bdf_vectorized3.bdf import BDF
 from pyNastran.dev.op2_vectorized3.test.test_op2 import main as test_op2
+from pyNastran.dev.bdf_vectorized3.to_bdf import (
+    bdf_to_bdf_vectorized, bdf_vectorized_to_bdf)
+from pyNastran.bdf.test.compare import compare
 
 PKG_PATH = pathlib.Path(pyNastran.__path__[0])
 TEST_PATH = PKG_PATH / 'bdf' / 'test'
 MODEL_PATH = PKG_PATH / '..' / 'models'
+BWB_PATH = MODEL_PATH / 'bwb'
 
 #from cpylog import SimpleLogger
 
 
+class TestModelsLax(unittest.TestCase):
+    def test_transient_lax(self):
+        bdf_filename = MODEL_PATH / 'elements' / 'time_elements.bdf'
+        args2 = ['test_bdf', str(bdf_filename), '--lax', '--quiet']
+        test_bdf(args2, show_args=False)
+
+
 class TestModels(unittest.TestCase):
+#class TestModelsH5(unittest.TestCase):
     def test_h5_freq(self):
         h5_filename = MODEL_PATH / 'elements' / 'freq_elements.h5'
         args = ['test_bdf', str(h5_filename), '--skip_nominal', '--quiet']
@@ -26,7 +39,6 @@ class TestModels(unittest.TestCase):
         #test_op2(args2, show_args=False)
 
     def test_h5_transient(self):
-        #bdf_filename = MODEL_PATH / 'elements' / 'time_elements.bdf'
         h5_filename = MODEL_PATH / 'elements' / 'time_elements.h5'
         #args = ['test_bdf', str(bdf_filename), '--skip_nominal', '--quiet']
         #test_bdf(args, show_args=False)
@@ -106,6 +118,41 @@ class TestModels(unittest.TestCase):
         #args = ['test_bdf', str(h5_filename), '--skip_nominal', '--quiet']
         #test_bdf(args, show_args=False)
 
+#------------------------------------------------------------------
+
+#class TestModels(unittest.TestCase):
+
+    def test_to_bdf_bwb(self):
+        """tests ``model conversion``"""
+        log = SimpleLogger(level='warning')
+        bdf_filename = BWB_PATH / 'bwb_saero.bdf'
+
+        # read from scratch
+        model1 = read_bdf(bdf_filename, log=log, xref=False)
+
+        model = read_bdf(bdf_filename, log=log)
+        modelv = bdf_to_bdf_vectorized(model, clean_parent=True)
+        assert len(modelv.params), modelv.params
+
+        model2 = bdf_vectorized_to_bdf(modelv, clean_parent=True)
+        #model2.cross_reference()
+        assert len(model2.params) == len(model1.params), model2.params
+        assert len(model2.nodes) == len(model1.nodes), model2.nodes
+        assert len(model2.properties) == len(model1.properties), model2.properties
+        assert len(model2.materials) == len(model1.materials), model2.materials
+        assert len(model2.coords) == len(model1.coords), model2.coords
+
+        cards1 = sorted(model1.card_count)
+        cards2 = sorted(model2.card_count)
+        assert len(model2.card_count) == len(model1.card_count), model2.card_count
+
+        skip_cards = []
+        diff_cards = compare(model1, model2, xref=False,
+                             run_mass=False, check=True,
+                             print_stats=False, quiet=True,
+                             skip_cards=skip_cards)
+        assert len(diff_cards) == 0, diff_cards
+
     def test_models_beam_modes1(self):
         bdf_filename = MODEL_PATH / 'beam_modes' / 'beam_modes.dat'
         args = ['test_bdf', str(bdf_filename), '--quiet']
@@ -115,6 +162,7 @@ class TestModels(unittest.TestCase):
         bdf_filename = MODEL_PATH / 'beam_modes' / 'cbarao_cbeam_static.bdf'
         args = ['test_bdf', str(bdf_filename), '--quiet']
         test_bdf(args, show_args=False)
+
     def test_models_beam_modes3(self):
         bdf_filename = MODEL_PATH / 'beam_modes' / 'cbarao_cbeam_modes.bdf'
         args = ['test_bdf', str(bdf_filename), '--quiet']
@@ -129,6 +177,7 @@ class TestModels(unittest.TestCase):
         bdf_filename = MODEL_PATH / 'random' / 'random_test_bar_plus_tri.bdf'
         args = ['test_bdf', str(bdf_filename), '--quiet', '--safe']
         test_bdf(args, show_args=False)
+
     def test_models_random2(self):
         bdf_filename = MODEL_PATH / 'random' / 'rms_tri_oesrmx1.bdf'
         args = ['test_bdf', str(bdf_filename), '--quiet', '--safe']
@@ -138,19 +187,53 @@ class TestModels(unittest.TestCase):
         bdf_filename = MODEL_PATH / 'freq_sine' / 'good_sine.dat'
         args = ['test_bdf', str(bdf_filename), '--quiet']
         test_bdf(args, show_args=False)
+
     def test_models_support_structure(self):
         bdf_filename = MODEL_PATH / 'support_structure' / 'W1000BOstat.dat'
         args = ['test_bdf', str(bdf_filename), '--quiet']
         test_bdf(args, show_args=False)
+
     def test_models_fsi(self):
         bdf_filename = MODEL_PATH / 'fsi' / 'fsi.bdf'
         args = ['test_bdf', str(bdf_filename), '--quiet']
         test_bdf(args, show_args=False)
+
     def test_models_bwb(self):
         bdf_filename = MODEL_PATH / 'bwb' / 'bwb_saero.bdf'
+        model = BDF()
+        model.read_bdf(bdf_filename)
+
+        ctria3_eids = model.ctria3.element_id[:10]
+        cquad4_eids = model.cquad4.element_id[:10]
+        shell_eids = np.hstack([ctria3_eids, cquad4_eids])
+        nsm_id = 1
+        model.add_nsml1(nsm_id, 'ELEMENT', 1.0, shell_eids, 'mystring')
+        model.setup()
+
+        mass0, cg0, inertia0 = model.inertia_sum(
+            nsm_id=nsm_id, include_base_mass=True, scale=1.0, sym_axis='no')
+        assert np.allclose(mass0, 112616.08243956308), mass0
+        assert np.allclose(cg0, [866.1320514684787, 150.61740236156632, 24.03841129486398]), cg0.tolist()
+
+        mass_nsm, cg, inertia = model.inertia_sum(
+            nsm_id=nsm_id, include_base_mass=False, scale=1.0, sym_axis='no')
+        assert np.allclose(mass_nsm, 1.0), mass_nsm
+
+        mass_nsm0, cg, inertia = model.inertia_sum(
+            nsm_id=nsm_id, include_base_mass=False, scale=1.0, sym_axis='')
+        assert np.allclose(mass_nsm0, 2.0), mass_nsm0
+
+        mass_all, cg, inertia = model.inertia_sum(
+            nsm_id=nsm_id, include_base_mass=True, scale=1.0, sym_axis='no')
+        assert np.allclose(mass_all, mass0+1.0), mass_all
+
         #args = ['test_bdf', str(bdf_filename), '--quiet', '--skip_equivalence']
+        args = ['test_bdf', str(bdf_filename), '--quiet', '--lax']
+        test_bdf(args, show_args=False)
+
         args = ['test_bdf', str(bdf_filename), '--quiet']
         test_bdf(args, show_args=False)
+
     def test_solid_bending(self):
         bdf_filename = MODEL_PATH / 'solid_bending' / 'solid_bending.bdf'
         args = ['test_bdf', str(bdf_filename), '--quiet']
@@ -195,6 +278,7 @@ class TestModels(unittest.TestCase):
 
         args = ['test_bdf', str(bdf_filename), '--quiet']
         test_bdf(args, show_args=False)
+
     def test_models_isat2(self):
         bdf_filename = MODEL_PATH / 'iSat' / 'iSat_launch_100Hz.dat'
         args = ['test_bdf', str(bdf_filename), '--quiet']
@@ -209,6 +293,7 @@ class TestModels(unittest.TestCase):
         bdf_filename = MODEL_PATH / 'contact' / '2bars_shell_s-contact.dat'
         args = ['test_bdf', str(bdf_filename), '--quiet']
         test_bdf(args, show_args=False)
+
     def test_models_contact_3(self):
         bdf_filename = MODEL_PATH / 'contact' / '2bars_shell_s-contact.dat'
         args = ['test_bdf', str(bdf_filename), '--quiet']
@@ -220,12 +305,13 @@ class TestModels(unittest.TestCase):
         test_bdf(args, show_args=False)
 
         model = BDF(debug=False)
-        model.include_zip(bdf_filename, encoding=None, make_ilines=True)
+        model.include_zip(bdf_filename, encoding=None)
 
         #if IS_PYTABLES:
             #h5_filename = MODEL_PATH / 'elements' / 'static_elements.h5'
             #args = ['test_bdf', str(h5_filename), '--quiet']
             #test_bdf(args, show_args=False)
+
     def test_models_elements_modes(self):
         bdf_filename = MODEL_PATH / 'elements' / 'modes_elements.bdf'
         args = ['test_bdf', str(bdf_filename), '--quiet']
@@ -239,10 +325,12 @@ class TestModels(unittest.TestCase):
         bdf_filename = MODEL_PATH / 'elements' / 'time_elements.bdf'
         args = ['test_bdf', str(bdf_filename), '--quiet']
         test_bdf(args, show_args=False)
+
     def test_models_elements_freq(self):
         bdf_filename = MODEL_PATH / 'elements' / 'freq_elements.bdf'
         args = ['test_bdf', str(bdf_filename), '--quiet']
         test_bdf(args, show_args=False)
+
     def test_models_elements_freq2(self):
         bdf_filename = MODEL_PATH / 'elements' / 'freq_elements2.bdf'
         args = ['test_bdf', str(bdf_filename), '--quiet']
@@ -260,6 +348,7 @@ class TestModels(unittest.TestCase):
             #h5_filename = MODEL_PATH / 'elements' / 'loadstep_elements.h5'
             #args = ['test_bdf', str(h5_filename), '--quiet']
             #test_bdf(args, show_args=False)
+
     def test_models_elements_modes_complex(self):
         bdf_filename = MODEL_PATH / 'elements' / 'modes_complex_elements.bdf'
         args = ['test_bdf', str(bdf_filename), '--quiet']
@@ -274,18 +363,22 @@ class TestModels(unittest.TestCase):
         bdf_filename = MODEL_PATH / 'thermal' / 'hd15901.bdf'
         args = ['test_bdf', str(bdf_filename)]
         test_bdf(args, show_args=False)
+
     def test_models_thermal_2(self):
         bdf_filename = MODEL_PATH / 'thermal' / 'htflw47.bdf'
         args = ['test_bdf', str(bdf_filename), '--skip_nominal', '--quiet']
         test_bdf(args, show_args=False)
+
     def test_models_thermal_3(self):
         bdf_filename = MODEL_PATH / 'thermal' / 'thermal_elements.bdf'
         args = ['test_bdf', str(bdf_filename), '--skip_nominal', '--quiet']
         test_bdf(args, show_args=False)
+
     def test_models_thermal_4(self):
         bdf_filename = MODEL_PATH / 'thermal' / 'thermal_elements2.bdf'
         args = ['test_bdf', str(bdf_filename), '--skip_nominal', '--quiet']
         test_bdf(args, show_args=False)
+
     def test_models_thermal_5(self):
         bdf_filename = MODEL_PATH / 'thermal' / 'thermal_test_153.bdf'
         args = ['test_bdf', str(bdf_filename), '--quiet']
@@ -295,14 +388,17 @@ class TestModels(unittest.TestCase):
         bdf_filename = MODEL_PATH / 'sol200' / 'd200obus.bdf'
         args = ['test_bdf', str(bdf_filename)]
         test_bdf(args, show_args=False)
+
     def test_models_sol200_2(self):
         bdf_filename = MODEL_PATH / 'sol200' / 'model_200.bdf'
         args = ['test_bdf', str(bdf_filename), '--quiet']
         test_bdf(args, show_args=False)
+
     def test_models_transfer_function(self):
         bdf_filename = MODEL_PATH / 'transfer_function' / 'actuator_tf_modeling.bdf'
         args = ['test_bdf', str(bdf_filename), '--quiet']
         test_bdf(args, show_args=False)
+
     def test_models_aero_1(self):
         bdf_filename = MODEL_PATH / 'aero' / 'freedlm' / 'freedlm.bdf'
         args = ['test_bdf', str(bdf_filename), '--quiet']
@@ -311,6 +407,7 @@ class TestModels(unittest.TestCase):
             h5_filename = MODEL_PATH / 'aero' / 'freedlm' / 'freedlm_msc.h5'
             args = ['test_bdf', str(h5_filename), '--quiet']
             test_bdf(args, show_args=False)
+
     def test_models_aero_2(self):
         bdf_filename = MODEL_PATH / 'aero' / 'bah_plane' / 'bah_plane.bdf'
         args = ['test_bdf', str(bdf_filename), '--quiet']
@@ -320,6 +417,7 @@ class TestModels(unittest.TestCase):
         bdf_filename = MODEL_PATH / 'other' / 'ac10707a.bdf'
         args = ['test_bdf', str(bdf_filename), '--skip_nominal']
         test_bdf(args, show_args=False)
+
     def test_models_other_2(self):
         bdf_filename = MODEL_PATH / 'other' / 'dbxdra2.bdf'
         args = ['test_bdf', str(bdf_filename), '--skip_nominal']
@@ -480,7 +578,7 @@ class TestModels(unittest.TestCase):
         test_bdf(args, show_args=False)
 
 
-if __name__ == '__main__':
+if __name__ == '__main__':  # pragma: no cover
     import warnings
     warnings.simplefilter('always', DeprecationWarning)
     unittest.main()
