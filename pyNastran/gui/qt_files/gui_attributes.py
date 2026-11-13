@@ -75,15 +75,13 @@ if TYPE_CHECKING:  # pragma: no cover
     #from vtkmodules.vtkFiltersGeneral import vtkAxes
     from vtkmodules.vtkCommonDataModel import vtkUnstructuredGrid, vtkPointData
     from pyNastran.gui.qt_files.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
-
+    from pyNastran.gui.gui_objects.coord_properties import CoordProperties
 
     FollowerFunction = Callable[[dict[int, int], vtkUnstructuredGrid,
                                  vtkPointData, np.ndarray], None]
 
 
 class GeometryObject(BaseGui):
-    """
-    """
     def __init__(self, gui: MainWindow):
         super().__init__(gui)
         #self.gui = parent
@@ -175,7 +173,7 @@ class GuiAttributes:
         self.is_gui = True
 
         # testing enables additional checks
-        # it's different than if we're just running tests
+        # it's different if we're just running tests
         if 'test' in inputs:
             self.is_testing_flag = inputs['test']
         else:
@@ -1004,16 +1002,22 @@ class GuiAttributes:
         fmts: list[Format] = []
         self.supported_formats = []
         #assert 'h5nastran' in fmt_order
+        #assert 'nastran_aero' in fmt_order, fmt_order
         for fmt in fmt_order:
-            geom_results_funcs = 'get_%s_wildcard_geometry_results_functions' % fmt
+            geom_results_funcs = f'get_{fmt}_wildcard_geometry_results_functions'
 
             if fmt in self.format_class_map:
-                cls = self.format_class_map[fmt](self)
-                data = getattr(cls, geom_results_funcs)()
+                cls = self.format_class_map[fmt]
+                if cls is None:
+                    # nastran_aero
+                    data = getattr(self, geom_results_funcs)()
+                else:
+                    cls_obj = cls(self)
+                    data = getattr(cls_obj, geom_results_funcs)()
             elif hasattr(self, geom_results_funcs):
                 data = getattr(self, geom_results_funcs)()
             else:
-                msg = 'get_%s_wildcard_geometry_results_functions does not exist' % fmt
+                msg = f'get_{fmt}_wildcard_geometry_results_functions does not exist'
                 if stop_on_failure:
                     raise RuntimeError(msg)
                 if not IS_OFFICIAL_RELEASE:
@@ -1368,7 +1372,9 @@ class GuiAttributes:
     #def mark_min_elements(self, neids, show_command: bool=True):
         #"""mark the elements by the top/btm x elements"""
 
-    def mark_nodes(self, nids, icase, text) -> None:
+    def mark_nodes(self, nids: list[int] | int,
+                   icase: int,
+                   text: list[str] | str) -> None:
         """
         Marks a series of nodes with custom text labels
 
@@ -1441,7 +1447,7 @@ class GuiAttributes:
         edit geometry properties dialog if it is open.
 
         Parameters
-        -----------
+        ----------
         geometry_properties : dict {str : CoordProperties or AltGeometry}
             Dictionary from name to properties object. Only the names included in
             ``geometry_properties`` are modified.

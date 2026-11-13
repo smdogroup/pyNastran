@@ -1,10 +1,11 @@
+import copy
 #pylint: disable=C0301,C0111
 import numpy as np
 from numpy import zeros, concatenate
 
 from pyNastran.op2.result_objects.op2_objects import get_complex_times_dtype
 from pyNastran.op2.result_objects.utils_pandas import build_dataframe_transient_header, build_pandas_transient_element_node
-from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import StressObject, StrainObject, OES_Object
+from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import StressObject, StrainObject, OES_Object, slice_eids_by_index
 from pyNastran.op2.op2_interface.write_utils import to_column_bytes, get_complex_fdtype
 from pyNastran.f06.f06_formatting import write_imag_floats_13e
 
@@ -25,6 +26,76 @@ class ComplexSolidArray(OES_Object):
             pass
         else:
             raise NotImplementedError('SORT2')
+
+    def slice_by_element_id(self, eids: np.ndarray,
+                            assume_exists: bool=False, inplace: bool=False):
+        element = self.element_node[:, 0]
+        eids, ieid, neid2 = slice_eids_by_index(np.unique(element), eids, assume_exists)
+        irow = np.where(np.isin(element, eids))[0]
+        obj = self if inplace else copy.deepcopy(self)
+        obj.element_node = obj.element_node[irow, :]
+        obj.element_cid = obj.element_cid[np.isin(obj.element_cid[:, 0], eids), :]
+        obj.data = obj.data[:, irow, :]
+        obj.nelements = neid2
+        return obj
+
+    def h5_table_dict(self) -> dict:
+        neid = len(self.element_cid)
+        neid_nnode = len(self.element_node)
+        nnode = neid_nnode // neid
+
+        from tables import Int64Col, Float64Col, StringCol
+        h5_table_dict = {
+            'EID': Int64Col(pos=0),
+            'CID': Int64Col(pos=1),
+            'CTYPE': StringCol(4, pos=2),
+            'GRID': Int64Col(shape=(nnode,), pos=3),
+
+            'XR': Float64Col(shape=(nnode,), pos=4),
+            'YR': Float64Col(shape=(nnode,), pos=5),
+            'ZR': Float64Col(shape=(nnode,), pos=6),
+            'TXYR': Float64Col(shape=(nnode,), pos=7),
+            'TYZR': Float64Col(shape=(nnode,), pos=8),
+            'TZXR': Float64Col(shape=(nnode,), pos=9),
+
+            'XI': Float64Col(shape=(nnode,), pos=10),
+            'YI': Float64Col(shape=(nnode,), pos=11),
+            'ZI': Float64Col(shape=(nnode,), pos=12),
+            'TXYI': Float64Col(shape=(nnode,), pos=13),
+            'TYZI': Float64Col(shape=(nnode,), pos=14),
+            'TZXI': Float64Col(shape=(nnode,), pos=15),
+
+            'DOMAIN_ID': Int64Col(pos=16),
+        }
+        return h5_table_dict
+
+    def add_to_h5_array(self, arr, ntime_neid0: int, ntime_neid1: int, itime: int):
+        neid = len(self.element_cid)
+        neid_nnode = len(self.element_node)
+        nnode = neid_nnode // neid
+        ntime, neid_nnode, nresult = self.data.shape
+        
+        nodes = self.element_node[:, 1].reshape(neid, nnode)
+        data = self.data.reshape(ntime, neid, nnode, nresult)
+
+        arr["EID"][ntime_neid0:ntime_neid1] = self.element_cid[:, 0]
+        arr["CID"][ntime_neid0:ntime_neid1] = self.element_cid[:, 1]
+        arr["CTYPE"][ntime_neid0:ntime_neid1] = 'GRID'
+        arr["GRID"][ntime_neid0:ntime_neid1] = nodes
+
+        arr["XR"][ntime_neid0:ntime_neid1] = data[itime, :, :, 0].real
+        arr["YR"][ntime_neid0:ntime_neid1] = data[itime, :, :, 1].real
+        arr["ZR"][ntime_neid0:ntime_neid1] = data[itime, :, :, 2].real
+        arr["TXYR"][ntime_neid0:ntime_neid1] = data[itime, :, :, 3].real
+        arr["TYZR"][ntime_neid0:ntime_neid1] = data[itime, :, :, 4].real
+        arr["TZXR"][ntime_neid0:ntime_neid1] = data[itime, :, :, 5].real
+
+        arr["XI"][ntime_neid0:ntime_neid1] = data[itime, :, :, 0].imag
+        arr["YI"][ntime_neid0:ntime_neid1] = data[itime, :, :, 1].imag
+        arr["ZI"][ntime_neid0:ntime_neid1] = data[itime, :, :, 2].imag
+        arr["TXYI"][ntime_neid0:ntime_neid1] = data[itime, :, :, 3].imag
+        arr["TYZI"][ntime_neid0:ntime_neid1] = data[itime, :, :, 4].imag
+        arr["TZXI"][ntime_neid0:ntime_neid1] = data[itime, :, :, 5].imag
 
     @property
     def is_real(self) -> bool:
@@ -333,18 +404,18 @@ class ComplexSolidArray(OES_Object):
         op2_ascii.write(f'  ntimes = {self.ntimes}\n')
 
         eids = self.element_node[:, 0]
-        eids_device = eids * 10 + self.device_code
+        # eids_device = eids * 10 + self.device_code
         eids_device_nelements = eids[::nnodes_centroid] * 10 + self.device_code
         assert len(eids_device_nelements) == nelements, f'neids_device={len(eids_device_nelements)}; nelements={nelements}'
 
         if not self.is_sort1:
             raise NotImplementedError('SORT2')
-        struct1 = Struct(endian + b'2i 4s 2i 12f')
-        struct2 = Struct(endian + b'i 12f')
+        # struct1 = Struct(endian + b'2i 4s 2i 12f')
+        # struct2 = Struct(endian + b'i 12f')
 
         op2_ascii.write(f'nelements={nelements:d}\n')
 
-        eids2 = self.element_node[:, 0]
+        # eids2 = self.element_node[:, 0]
         nodes = self.element_node[:, 1]
         nelements_nodes = len(nodes)
 
@@ -381,8 +452,7 @@ class ComplexSolidArray(OES_Object):
         nodes_view = nodes.view(fdtype).reshape(nelements_nodes, 1)
         #data_out[:, 4] = nodes_view.reshape(nelements_nodes, 1)
 
-        unused_msg_temp, nnodes = get_f06_header(self, is_mag_phase, is_sort1=True)
-
+        # unused_msg_temp, nnodes = get_f06_header(self, is_mag_phase, is_sort1=True)
         for itime in range(self.ntimes):
             self._write_table_3(op2_file, op2_ascii, new_result, itable, itime)
 

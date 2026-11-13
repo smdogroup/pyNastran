@@ -1,7 +1,9 @@
 """various OP2 tests"""
 import os
 import copy
+import struct
 import unittest
+from unittest import mock
 from io import StringIO
 from pathlib import Path
 
@@ -39,7 +41,8 @@ from pyNastran.op2.op2 import OP2, read_op2  # FatalError, FortranMarkerError
 from pyNastran.op2.op2_interface.op2_common import get_scode_word
 from pyNastran.op2.op2_geom import OP2Geom, read_op2_geom
 from pyNastran.op2.test.test_op2 import run_op2, main as test_op2
-from pyNastran.op2.result_objects.contact_traction_and_pressure import RealContactTractionAndPressureArray
+from pyNastran.op2.result_objects.contact_traction_and_pressure import (
+    RealContactTractionAndPressureArray)
 from pyNastran.op2.result_objects.glue_force import GlueForceArray
 
 from pyNastran.bdf.test.test_bdf_unit_tests import Tester
@@ -48,26 +51,48 @@ from pyNastran.bdf.bdf_interface.compare_card_content import compare_elements
 
 # from pyNastran.op2.tables.oef_forces.oef_force_objects import (
 #     RealPlateBilinearForceArray, RealPlateForceArray)
-#from pyNastran.op2.tables.ogf_gridPointForces.ogf_objects import RealGridPointForcesArray
+from pyNastran.op2.tables.ogf_gridPointForces.ogf_objects import (
+    RealGridPointForcesArray, stack_grid_point_force)
 from pyNastran.op2.vector_utils import filter1d, abs_max_min_global, abs_max_min_vector
 from pyNastran.op2.tables.oug.oug_displacements import RealDisplacementArray
 from pyNastran.femutils.test.utils import is_array_close
 from pyNastran.op2.result_objects.grid_point_weight import make_grid_point_weight
 from pyNastran.op2.tables.geom.geom4 import _read_spcadd_mpcadd
 from pyNastran.f06.csv_writer import write_csv
-
-PKG_PATH = Path(pyNastran.__path__[0])
-MODEL_PATH = (PKG_PATH / '..' / 'models').resolve()
-OP2_TEST_PATH = (PKG_PATH / 'op2' / 'test' / 'examples').resolve()
-OP2_TEST = PKG_PATH / 'op2' / 'test'
 from pyNastran.op2.stress_reduction import (
     von_mises_2d, principal_2d, max_shear_2d,
     max_shear,
     von_mises_3d, principal_components_3d)
 
+PKG_PATH = Path(pyNastran.__path__[0])
+MODEL_PATH = (PKG_PATH / '..' / 'models').resolve()
+OP2_TEST_PATH = (PKG_PATH / 'op2' / 'test' / 'examples').resolve()
+OP2_TEST = PKG_PATH / 'op2' / 'test'
+
 
 class TestOP2Unit(Tester):
     """various OP2 tests"""
+    def test_params_flag3_double(self):
+        """
+        PVT0 flag=3 is 8 bytes: text or a double.  Numeric flag=3 values
+        must be read as a double, not the top 4 bytes as a float.
+
+        deck: PARAM,K6ROT,100. / PARAM,MAXRATIO,1.+7 / PARAM,WTMASS,.002588
+              PARAM,UNITSYS,LBF-IN
+        """
+        log = get_logger(level='error')
+        op2_filename = MODEL_PATH / 'bugs' / 'flat_plate_pcomp_test' / 'flat_plate_tip_loads_mixed_2cases.op2'
+        model = OP2(log=log)
+        model.IS_TESTING = True
+        model.read_op2(op2_filename, build_dataframe=False)
+        params = model.params
+        assert params['K6ROT'].values == [100.0], params['K6ROT']
+        assert params['MAXRATIO'].values == [1.0e7], params['MAXRATIO']
+        assert np.allclose(params['WTMASS'].values, [0.002588], rtol=0., atol=1e-15), params['WTMASS']
+        assert params['UNITSYS'].values == ['LBF-IN'], params['UNITSYS']
+        assert params['GRDPNT'].values == [0], params['GRDPNT']
+        assert params['POST'].values == [-2], params['POST']
+
     def test_stress_transform_2d(self):
         is_stress = True
         oxx = -10.
@@ -204,6 +229,103 @@ class TestOP2Unit(Tester):
             isubcase,
             is_msc=False)
         obj1.assert_equal(obj1, rtol=1.e-5, atol=1.e-8)
+
+    def test_op2_grid_point_forces_add(self):
+        cls = RealGridPointForcesArray
+        table_name = 'OGPFB1'
+        # modes = np.array([1], dtype='int32')
+        # eigenvalues = np.array([2.], dtype='float32')
+        # mode_cycles = np.array([3.], dtype='float32')
+
+        node_element6 = np.array([
+            [1, 10],
+            [1, 0],
+            [1, 0],
+            [2, 12],
+            [2, 0],
+            [2, 0],
+        ])
+        element_names6 = np.array([
+            'QUAD4', 'F-OF-SPC', '*TOTALS*',
+            'TRIA3', 'F-OF-SPC', '*TOTALS*',
+        ], dtype='U8')
+        element_names6b = np.array([
+            'QUAD4', 'F-OF-SPC', '*TOTALS*',
+            'TRIA3', 'F-OF-MPC', '*TOTALS*',
+        ], dtype='U8')
+        data6 = np.array([[
+            [10., 2., 3., 4., 5., 6.],
+            [20., 2., 3., 4., 5., 6.],
+            [0., 0., 0., 0., 0., 0.],
+            [30., 2., 3., 4., 5., 6.],
+            [40., 2., 3., 4., 5., 6.],
+            [0., 0., 0., 0., 0., 0.],
+        ]])
+
+        # static, so easy
+        isubcase = 1
+        obj = cls.add_static_case(
+            table_name, node_element6, element_names6, data6,
+            isubcase, is_msc=False)
+        str(obj)
+        str(obj.print_f06())
+
+        # same lengths, but different data
+        times = np.arange(2)
+        obj = cls.add_transient_case(
+            table_name,
+            [node_element6, node_element6],
+            [element_names6, element_names6b],
+            [data6, data6],
+            isubcase, times, is_msc=False)
+        str(obj)
+        str(obj.print_f06())
+        stack_grid_point_force(
+            [node_element6, node_element6],
+            [element_names6, element_names6b],
+            [data6, data6], diff_method='same',
+        )
+
+        node_element7 = np.array([
+            [1, 10],
+            [1, 11],
+            [1, 0],
+            [1, 0],
+            [2, 12],
+            [2, 13],
+            [2, 0],
+        ])
+        element_names7 = np.array([
+            # 'QUAD4', 'F-OF-SPC', '*TOTALS*',  # og
+            # 'TRIA3', 'F-OF-MPC', '*TOTALS*',  # og
+            'QUAD4', 'F-OF-SPC', 'F-OF-MPC', '*TOTALS*',
+            'TRIA3', 'APP-LOAD', '*TOTALS*',
+        ], dtype='U8')
+        data7 = np.array([[
+            [100., 2., 3., 4., 5., 6.],
+            [200., 2., 3., 4., 5., 6.],
+            [300., 2., 3., 4., 5., 6.],
+            [0., 0., 0., 0., 0., 0.],  # total
+            [400., 2., 3., 4., 5., 6.],
+            [500., 2., 3., 4., 5., 6.],
+            [0., 0., 0., 0., 0., 0.],  # total
+        ]])
+        times = np.arange(2)
+
+        # different lengths
+        obj = cls.add_transient_case(
+            table_name,
+            [node_element6, node_element7],
+            [element_names6, element_names7],
+            [data6, data7],
+            isubcase, times, is_msc=False)
+        str(obj)
+        str(obj.print_f06())
+        stack_grid_point_force(
+            [node_element6, node_element7],
+            [element_names6, element_names7],
+            [data6, data7], diff_method='same',
+        )
 
     def test_op2_traction(self):
         cls = RealContactTractionAndPressureArray
@@ -394,6 +516,48 @@ class TestOP2Unit(Tester):
         assert len(model.mpcadds) == 2, model.mpcadds
 
 
+class TestOP2Params(unittest.TestCase):
+    """PARAM (PVT/PVT0) reading"""
+    def _get_op2(self) -> OP2:
+        op2 = OP2(debug=None)
+        op2._endian = b'<'
+        op2._uendian = '<'
+        op2._set_structs(4)
+        return op2
+
+    def test_pvt0_rvmass(self):
+        """PARAM,RVMASS,YES is an NX string PARAM"""
+        op2 = self._get_op2()
+        data = (
+            b'AUTOSPC ' + struct.pack('<i', 3) + b'YES     ' +
+            b'RVMASS  ' + struct.pack('<i', 3) + b'YES     '
+        )
+        op2._read_pvto_4_helper(data, len(data))
+        assert op2.params['RVMASS'].values == ['YES'], op2.params['RVMASS']
+        assert op2.params['AUTOSPC'].values == ['YES'], op2.params['AUTOSPC']
+
+    def test_pvt0_record_of_length_584(self):
+        """a 584-byte PVT0 record is PARAM data, not a table3 header"""
+        op2 = self._get_op2()
+        op2.table_name = b'PVT0'
+        reader = op2.op2_reader
+        data = b'\x00' * 584
+        calls = []
+
+        def table3_parser(data, ndata):  # pragma: no cover
+            calls.append('table3')
+            raise RuntimeError('PVT0 data was sent to the table3 parser')
+
+        def table4_parser(data, ndata):
+            calls.append('table4')
+            return ndata
+
+        with mock.patch.object(reader, '_get_record_length', return_value=584), \
+             mock.patch.object(reader, '_read_record_ndata', return_value=(data, 584)):
+            reader._read_subtable_3_4(table3_parser, table4_parser, passer=False)
+        assert calls == ['table4'], calls
+
+
 class TestOP2Functions(unittest.TestCase):
     def test_filter1d(self):
         """tests filtering small values out of arrays"""
@@ -531,11 +695,12 @@ class TestAutodeskOP2(Tester):
             is_autodesk=True, post=-4)
 
         stress = op2.op2_results.stress
+        nonlinear = op2.op2_results.nonlinear
         strain_energy = op2.op2_results.strain_energy
         assert len(op2.displacements) == 4, len(op2.displacements)
         assert len(op2.spc_forces) == 4, len(op2.spc_forces)
         assert len(stress.ctetra_stress) == 4, len(stress.ctetra_stress)
-        assert len(op2.nonlinear_ctetra_stress_strain) == 4, len(op2.nonlinear_ctetra_stress_strain)
+        assert len(nonlinear.ctetra_stress_strain) == 4, len(nonlinear.ctetra_stress_strain)
 
         # isubcase = 1
         # ctetra_stress = op2.ctetra_stress[isubcase]
@@ -750,8 +915,9 @@ class TestSATKOP2(Tester):
 
         assert len(op2.op2_results.force.cbar_force[1].modes) == 8
         # type=RealCBarForceArray ntimes=8 nelements=5; table_name='OEF1'
-        # data: [ntimes, nnodes, 8] where 8=[bending_moment_a1, bending_moment_a2, bending_moment_b1,
-        #                                   bending_moment_b2, shear1, shear2, axial, torque]
+        # data: [ntimes, nnodes, 8] where 8=[bending_moment_a1, bending_moment_a2,
+        #                                   bending_moment_b1, bending_moment_b2,
+        #                                   shear1, shear2, axial, torque]
         # data.shape = (8, 5, 8)
         # element.shape = (5,)
         # element name: CBAR-34
@@ -774,7 +940,8 @@ class TestSATKOP2(Tester):
         case = op2.op2_results.psd.cbar_force[key]
         assert len(case.freqs) == 127, len(case.freqs)
         # type=RealCBarForceArray ntimes=127 nelements=5; table_name='OEFPSD1'
-        # data: [ntimes, nnodes, 8] where 8=[bending_moment_a1, bending_moment_a2, bending_moment_b1, bending_moment_b2,
+        # data: [ntimes, nnodes, 8] where 8=[bending_moment_a1, bending_moment_a2,
+        #                                    bending_moment_b1, bending_moment_b2,
         #                                    shear1, shear2, axial, torque]
         # data.shape = (127, 10, 8)
         # element.shape = (5,)
@@ -828,7 +995,8 @@ class TestSATKOP2(Tester):
 
         assert len(op2.op2_results.no.cbar_force[(3, 5, 1, 0, 0, '', 'RANDOM  103')].freqs) == 1
         # type=RealCBarForceArray nelements=5; table_name='OEFNO1'
-        # data: [1, nnodes, 8] where 8=[bending_moment_a1, bending_moment_a2, bending_moment_b1, bending_moment_b2,
+        # data: [1, nnodes, 8] where 8=[bending_moment_a1, bending_moment_a2,
+        #                               bending_moment_b1, bending_moment_b2,
         #                               shear1, shear2, axial, torque]
         # data.shape = (1, 5, 8)
         # element.shape = (5,)
@@ -847,12 +1015,13 @@ class TestSATKOP2(Tester):
 
         str(op2.eigenvalues[''])
         # type=RealEigenvalues neigenvalues=8
-        # title, extraction_order, eigenvalues, radians, cycles, generalized_mass, generalized_stiffness
+        #   title, extraction_order, eigenvalues, radians, cycles,
+        #   generalized_mass, generalized_stiffness
 
         str(op2.matrices['BHH'])
         str(op2.matrices['KHH'])
-        # Matrix['BHH'];      shape=(8, 8);     type=scipy.sparse._coo.coo_matrix;     dtype=float64;   desc=symmetric
-        # Matrix['KHH'];      shape=(8, 8);     type=scipy.sparse._coo.coo_matrix;     dtype=complex128; desc=symmetric
+        # Matrix['BHH']; shape=(8, 8); type=scipy.sparse._coo.coo_matrix; dtype=float64;    desc=symmetric
+        # Matrix['KHH']; shape=(8, 8); type=scipy.sparse._coo.coo_matrix; dtype=complex128; desc=symmetric
 
         str(op2.get_op2_stats())
 
@@ -889,7 +1058,8 @@ class TestSATKOP2(Tester):
         assert len(op2.op2_results.psd.cbar_force[(1, 5, 2, 0, 0, '', '')].freqs) == 298
         # type=RealCBarForceArray ntimes=298 nelements=5; table_name='OEFPSD1'
         # data: [ntimes, nnodes, 8] where 8=[bending_moment_a1, bending_moment_a2,
-        #                                   bending_moment_b1, bending_moment_b2, shear1, shear2, axial, torque]
+        #                                    bending_moment_b1, bending_moment_b2,
+        #                                    shear1, shear2, axial, torque]
         # data.shape = (298, 10, 8)
         # element.shape = (5,)
         # element name: CBAR-34
@@ -914,24 +1084,12 @@ class TestSATKOP2(Tester):
 
 
 class TestNX(Tester):
-    def test_nx_cbush_psd(self):
+    def test_nx_grid_point_forces_64(self):
+        """tests a 64-bit RealGridPointForcesArray"""
         log = get_logger(level='warning')
-        folder = MODEL_PATH / 'bugs' / 'random_cbush_example'
-        op2_filename = folder / 'cbush_example.op2'
-        bdf_filename = folder / 'cbush_example.bdf'
-        op2_model, unused_is_passed = run_op2(
-            op2_filename, make_geom=False, write_bdf=False, read_bdf=None, write_f06=True,
-            write_op2=False, write_hdf5=IS_H5PY, is_mag_phase=False, is_sort2=False,
-            is_nx=True, delete_f06=True, build_pandas=True, subcases=None,
-            exclude_results=None, short_stats=False, compare=True, debug=False, log=log,
-            binary_debug=True, quiet=True, stop_on_failure=True,
-            dev=False, xref_safe=False, post=None, load_as_h5=False)
-
-    def test_nx_cbeam_psd(self):
-        log = get_logger(level='warning')
-        folder = MODEL_PATH / 'bugs' / 'random_cbeam_example'
-        op2_filename = folder / 'cbeam_example.op2'
-        bdf_filename = folder / 'cbeam_example.bdf'
+        folder = MODEL_PATH / 'nx'
+        op2_filename = folder / 'z402cdamp1_04.op2'
+        bdf_filename = folder / 'z402cdamp1_04.bdf'
         op2_model, unused_is_passed = run_op2(
             op2_filename, make_geom=False, write_bdf=False, read_bdf=None, write_f06=True,
             write_op2=False, write_hdf5=IS_H5PY, is_mag_phase=False, is_sort2=False,
@@ -1027,13 +1185,14 @@ class TestNX(Tester):
     def test_nx_flutter(self):
         log = get_logger(level='warning')
         op2_filename = MODEL_PATH / 'aero' / 'flutter_bug' / 'wing_b1.op2'
-        unused_op2, unused_is_passed = run_op2(
+        op2, unused_is_passed = run_op2(
             op2_filename, make_geom=True, write_bdf=True, read_bdf=True, write_f06=True,
-            write_op2=True, write_hdf5=IS_H5PY, is_mag_phase=False, is_sort2=False,
+            write_op2=False, write_hdf5=IS_H5PY, is_mag_phase=False, is_sort2=False,
             is_nx=None, delete_f06=True, build_pandas=True, subcases=None,
             exclude_results=None, short_stats=False, compare=True, debug=False, log=log,
             binary_debug=True, quiet=True, stop_on_failure=True,
             dev=False, xref_safe=False, post=None, load_as_h5=False)
+        # assert len(op2.eigenvalues)
 
     def test_nx_glue_slide_distance(self):
         """test NX 2020 version"""
@@ -1380,7 +1539,7 @@ class TestMSC(Tester):
 
         unused_op2, unused_is_passed = run_op2(
             op2_filename, make_geom=True, write_bdf=True, read_bdf=True, write_f06=True,
-            write_op2=True, write_hdf5=IS_H5PY, is_mag_phase=False, is_sort2=False,
+            write_op2=False, write_hdf5=IS_H5PY, is_mag_phase=False, is_sort2=False,
             is_nx=None, delete_f06=True, build_pandas=True, subcases=None,
             exclude_results=None, short_stats=False, compare=True, debug=False, log=log,
             binary_debug=True, quiet=True, stop_on_failure=True,
@@ -1440,16 +1599,24 @@ class TestMSC(Tester):
         # save_load_deck(model, run_save_load=False)
 
         log = get_logger(level='warning')
-        with self.assertRaises(NotImplementedError):
-            run_op2(op2_filename, make_geom=True, write_bdf=False, read_bdf=True,
-                    write_f06=True, write_op2=False,
-                    is_mag_phase=False,
-                    is_sort2=False, is_nx=None, delete_f06=True,
-                    subcases=None, exclude_results=None, short_stats=False,
-                    compare=False, debug=False, binary_debug=True,
-                    quiet=True,
-                    stop_on_failure=True, dev=False,
-                    build_pandas=True, log=log)
+        op2, unused_is_passed = run_op2(
+            op2_filename, make_geom=True, write_bdf=False, read_bdf=True,
+            write_f06=True, write_op2=False,
+            is_mag_phase=False,
+            is_sort2=False, is_nx=None, delete_f06=True,
+            subcases=None, exclude_results=None, short_stats=False,
+            compare=False, debug=False, binary_debug=True,
+            quiet=True,
+            stop_on_failure=True, dev=False,
+            build_pandas=True, log=log)
+
+        # CPHSF: 1x2 complex double (tout=4) matrix
+        cphsf = op2.matrices['CPHSF'].data.toarray()
+        assert cphsf.shape == (1, 2), cphsf.shape
+        assert cphsf.dtype == np.complex128, cphsf.dtype
+        expected = np.array([[0.034635167996216576-0.03878865282190708j,
+                              0.004334146986123152-0.0046695190746185505j]])
+        assert np.array_equal(cphsf, expected), cphsf
 
     def test_msc_2021_cbush_rbe3(self):
         """
@@ -1552,6 +1719,152 @@ class TestMSC(Tester):
         op2 = read_op2_geom(op2_filename, debug=False, log=log)
         op2.write_f06(f06_filename)
         os.remove(f06_filename)
+
+
+class TestOP2Random(Tester):
+
+    def test_nx_cbush_psd(self):
+        log = get_logger(level='warning')
+        folder = MODEL_PATH / 'bugs' / 'random_cbush_example'
+        op2_filename = folder / 'cbush_example.op2'
+        bdf_filename = folder / 'cbush_example.bdf'
+        op2_model, unused_is_passed = run_op2(
+            op2_filename, make_geom=False, write_bdf=False, read_bdf=None, write_f06=True,
+            write_op2=False, write_hdf5=IS_H5PY, is_mag_phase=False, is_sort2=False,
+            is_nx=True, delete_f06=True, build_pandas=True, subcases=None,
+            exclude_results=None, short_stats=False, compare=True, debug=False, log=log,
+            binary_debug=True, quiet=True, stop_on_failure=True,
+            dev=False, xref_safe=False, post=None, load_as_h5=False)
+
+    def test_nx_cbeam_psd(self):
+        log = get_logger(level='warning')
+        folder = MODEL_PATH / 'bugs' / 'random_cbeam_example'
+        op2_filename = folder / 'cbeam_example.op2'
+        bdf_filename = folder / 'cbeam_example.bdf'
+        op2_model, unused_is_passed = run_op2(
+            op2_filename, make_geom=False, write_bdf=False, read_bdf=None, write_f06=True,
+            write_op2=False, write_hdf5=IS_H5PY, is_mag_phase=False, is_sort2=False,
+            is_nx=True, delete_f06=True, build_pandas=True, subcases=None,
+            exclude_results=None, short_stats=False, compare=True, debug=False, log=log,
+            binary_debug=True, quiet=True, stop_on_failure=True,
+            dev=False, xref_safe=False, post=None, load_as_h5=False)
+
+    def test_bdf_op2_other_01(self):
+        """checks ofprand1.bdf which tests nonlinear elements"""
+        log = get_logger(level='warning')
+        #bdf_filename = MODEL_PATH / 'elements' / 'time_thermal_elements.bdf'
+        #f06_filename = MODEL_PATH / 'elements' / 'modes_complex_elements.test_op2.f06'
+        #op2_filename = MODEL_PATH / 'elements' / 'time_thermal_elements.op2'
+
+        #bdf_filename = MODEL_PATH / 'other' / 'ofprand1.bdf'
+        op2_filename = MODEL_PATH / 'other' / 'ofprand1.op2'
+        #fem1, fem2, diff_cards = self.run_bdf('', bdf_filename, log=log)
+        #diff_cards2 = list(set(diff_cards))
+        #diff_cards2.sort()
+        #assert len(diff_cards2) == 0, diff_cards2
+
+        include_results = None
+        #include_results = 'ato.displacements'
+        #include_results = 'psd.cquad8_force'
+        #include_results = 'ato.cbend_force'
+        op2, is_passed = run_op2(
+            op2_filename, make_geom=True, write_bdf=True, read_bdf=False, xref_safe=True,
+            write_f06=True, write_op2=False,
+            is_mag_phase=False,
+            is_sort2=False, is_nx=None, delete_f06=True,
+            subcases=None,
+            exclude_results=None,
+            include_results=include_results,
+            short_stats=False,
+            compare=True, debug=False, binary_debug=True,
+            quiet=True, stop_on_skip=False,
+            stop_on_failure=True, dev=False,
+            build_pandas=False, log=log)  # TODO: enable pandas...
+        if IS_PANDAS:
+            op2.op2_results.stress.cbush_stress[1].build_dataframe()
+        #op2 = read_op2_geom(op2_filename, debug=False)
+        #op2.write_f06(f06_filename)
+        #os.remove(f06_filename)
+
+    def test_random_ctria3(self):
+        """runs a random test"""
+        log = get_logger(level='warning')
+        folder = MODEL_PATH / 'random'
+        op2_filename = folder / 'random_test_bar_plus_tri.op2'
+        f06_filename = folder / 'random_test_bar_plus_tri.test_op2.f06'
+        op2 = read_op2_geom(op2_filename, debug=False, log=log)
+
+        op2res = op2.op2_results
+        assert len(op2res.psd.displacements) == 1
+        assert len(op2res.rms.displacements) == 1
+        assert len(op2res.crm.displacements) == 1
+        assert len(op2res.no.displacements) == 1
+        assert len(op2res.psd.accelerations) == 1
+        assert len(op2res.rms.accelerations) == 1
+        assert len(op2res.crm.accelerations) == 1
+        assert len(op2res.no.accelerations) == 1
+        assert len(op2res.crm.cbar_force) == 1, len(op2res.crm.cbar_force)
+        assert len(op2res.psd.cbar_force) == 1
+        assert len(op2res.rms.cbar_force) == 1
+        assert len(op2res.no.cbar_force) == 1
+        assert len(op2res.crm.cquad4_force) == 1
+        assert len(op2res.psd.cquad4_force) == 1
+        assert len(op2res.rms.cquad4_force) == 1
+        assert len(op2res.no.cquad4_force) == 1
+        assert len(op2res.crm.ctria3_force) == 1
+        assert len(op2res.psd.ctria3_force) == 1
+        assert len(op2res.rms.ctria3_force) == 1
+        assert len(op2res.no.ctria3_force) == 1
+        assert len(op2res.no.cbar_force) == 1
+        assert len(op2res.no.cbar_force) == 1
+        assert len(op2res.no.cbar_force) == 1
+        assert len(op2.eigenvalues) == 1
+        assert 'BHH' in op2.matrices
+        assert 'KHH' in op2.matrices
+
+        #psd.displacements_psd[1]
+        #rms.displacements[1]
+        #crm.displacements[1]
+        #no.displacements[1]
+        #psd.accelerations[1]
+        #rms.accelerations[1]
+        #crm.accelerations[1]
+        #no.accelerations[1]
+        #crm.cbar_force[1]
+        #psd.cbar_force[1]
+        #rms.cbar_force[1]
+        #no.cbar_force[1]
+        #eigenvalues[u'RANDOM TEST']
+        #crm.cquad4_force[1]
+        #psd.cquad4_force[1]
+        #rms.cquad4_force[1]
+        #no.cquad4_force[1]
+        #crm.ctria3_force[1]
+        #psd.ctria3_force[1]
+        #rms.ctria3_force[1]
+        #no.ctria3_force[1]
+        #Matrix['BHH'];   shape=(20, 20);
+        # type=numpy.matrixlib.defmatrix.matrix; dtype=float64; desc=symmetric
+        #Matrix['KHH'];   shape=(20, 20);
+        # type=numpy.matrixlib.defmatrix.matrix; dtype=float64; desc=symmetric
+
+        op2.write_f06(f06_filename)
+        os.remove(f06_filename)
+
+    def test_random_ctria3_oesrmx1(self):
+        """runs a random test"""
+        log = get_logger(level='warning')
+        folder = MODEL_PATH / 'random'
+        op2_filename = folder / 'rms_tri_oesrmx1.op2'
+        #bdf_filename = folder / 'rms_tri_oesrmx1.bdf'
+        #unused_op2 = read_op2_geom(op2_filename, debug=False, log=log)
+        unused_op2, unused_is_passed = run_op2(
+            op2_filename, make_geom=True, write_bdf=True, read_bdf=None, write_f06=True,
+            write_op2=False, write_hdf5=False, is_mag_phase=False, is_sort2=False,
+            is_nx=None, delete_f06=False, build_pandas=False, subcases=None,
+            exclude_results=None, short_stats=False, compare=True, debug=False, log=log,
+            binary_debug=True, quiet=True, stop_on_failure=True,
+            dev=False, xref_safe=False, post=None, load_as_h5=False)
 
 
 class TestOP2Main(Tester):
@@ -1795,7 +2108,7 @@ class TestOP2Main(Tester):
         #print(op2.get_op2_stats())
         write_csv(op2, csv_filename)
 
-        exclude_results = ['modal_contribution.cquadr_composite_strain', 'grid_point_forces',
+        exclude_results = ['modal_contribution.cquadr_composite_strain', #'grid_point_forces',
                            'force*', 'load_vectors']
         op2b, unused_is_passed = run_op2(
             op2_filename, make_geom=False, write_bdf=False, read_bdf=False,
@@ -2071,45 +2384,13 @@ class TestOP2Main(Tester):
                 stop_on_failure=True, dev=False,
                 build_pandas=True, log=log)
 
-    def test_bdf_op2_other_01(self):
-        """checks ofprand1.bdf which tests nonlinear elements"""
-        log = get_logger(level='warning')
-        #bdf_filename = MODEL_PATH / 'elements' / 'time_thermal_elements.bdf'
-        #f06_filename = MODEL_PATH / 'elements' / 'modes_complex_elements.test_op2.f06'
-        #op2_filename = MODEL_PATH / 'elements' / 'time_thermal_elements.op2'
-
-        #bdf_filename = MODEL_PATH / 'other' / 'ofprand1.bdf'
-        op2_filename = MODEL_PATH / 'other' / 'ofprand1.op2'
-        #fem1, fem2, diff_cards = self.run_bdf('', bdf_filename, log=log)
-        #diff_cards2 = list(set(diff_cards))
-        #diff_cards2.sort()
-        #assert len(diff_cards2) == 0, diff_cards2
-
-        include_results = None
-        #include_results = 'ato.displacements'
-        #include_results = 'psd.cquad8_force'
-        #include_results = 'ato.cbend_force'
-        op2, is_passed = run_op2(
-            op2_filename, make_geom=True, write_bdf=True, read_bdf=False, xref_safe=True,
-            write_f06=True, write_op2=False,
-            is_mag_phase=False,
-            is_sort2=False, is_nx=None, delete_f06=True,
-            subcases=None,
-            exclude_results=None,
-            include_results=include_results,
-            short_stats=False,
-            compare=True, debug=False, binary_debug=True,
-            quiet=True, stop_on_skip=False,
-            stop_on_failure=True, dev=False,
-            build_pandas=False, log=log)  # TODO: enable pandas...
-        if IS_PANDAS:
-            op2.op2_results.stress.cbush_stress[1].build_dataframe()
-        #op2 = read_op2_geom(op2_filename, debug=False)
-        #op2.write_f06(f06_filename)
-        #os.remove(f06_filename)
-
     def test_bdf_op2_other_02(self):
-        """checks ac10707a.bdf, which is an acoustic problem"""
+        """
+        checks ac10707a.bdf, which is an acoustic problem
+         - ComplexSolidPressureForceArray
+         - ComplexSpringForceArray
+         - ComplexDamperForceArray
+        """
         log = get_logger(level='warning')
         bdf_filename = MODEL_PATH / 'other' / 'ac10707a.bdf'
         op2_filename = MODEL_PATH / 'other' / 'ac10707a.op2'
@@ -2123,7 +2404,7 @@ class TestOP2Main(Tester):
         save_load_deck(model)
 
         run_op2(op2_filename, make_geom=True, write_bdf=True, read_bdf=False,
-                write_f06=True, write_op2=False,
+                write_f06=True, write_op2=True,
                 is_mag_phase=False,
                 is_sort2=False, is_nx=None, delete_f06=True,
                 subcases=None, exclude_results=None, short_stats=False,
@@ -2280,7 +2561,11 @@ class TestOP2Main(Tester):
                 build_pandas=IS_PANDAS, log=log)
 
     def test_bdf_op2_other_09(self):
-        """checks sdbush10.bdf, which is a ??? problem"""
+        """
+        checks sdbush10.bdf, which is a ??? problem
+         - RealCShearForceArray
+         - ComplexCBushForceArray
+        """
         log = get_logger(level='warning')
         bdf_filename = MODEL_PATH / 'other' / 'sdbush10.bdf'
         op2_filename = MODEL_PATH / 'other' / 'sdbush10.op2'
@@ -2294,7 +2579,7 @@ class TestOP2Main(Tester):
         save_load_deck(model, run_convert=False, run_renumber=False)  # excite_id
 
         run_op2(op2_filename, make_geom=True, write_bdf=True, read_bdf=False,
-                write_f06=True, write_op2=False,
+                write_f06=True, write_op2=True,
                 is_mag_phase=False,
                 is_sort2=False, is_nx=None, delete_f06=True,
                 subcases=None, exclude_results=None, short_stats=False,
@@ -2356,13 +2641,16 @@ class TestOP2Main(Tester):
         log = get_logger(level='warning')
         bdf_filename = MODEL_PATH / 'other' / 'api3.bdf'
         op2_filename = MODEL_PATH / 'other' / 'api3.op2'
-        fem1, unused_fem2, diff_cards = self.run_bdf('', bdf_filename, run_skin_solids=False, log=log)
+        fem1, unused_fem2, diff_cards = self.run_bdf(
+            '', bdf_filename, run_skin_solids=False, log=log)
         expected = {
-            'ENDDATA': 1, 'PARAM': 4, 'MAT1': 1, 'RLOAD1': 1, 'TLOAD2': 1, 'TABLED1': 1, 'FREQ': 1, 'TSTEP': 1,
-            'RANDPS': 2, 'RANDT1': 1, 'TABRNDG': 1, 'GRID': 144, 'CBEAM': 2, 'SPC1': 35, 'FORCE': 48, 'MOMENT': 3,
-            'DAREA': 19, 'DESVAR': 6, 'DVPREL1': 6, 'PBEAM': 2, 'CQUAD4': 2, 'PSHELL': 6, 'CBAR': 2, 'PBAR': 2,
-            'CQUAD8': 4, 'CHEXA': 3, 'PSOLID': 2, 'CPENTA': 4, 'CBEND': 2, 'PBEND': 2, 'CTRIAR': 2, 'CTRIA3': 2,
-            'CTRIA6': 4, 'CQUADR': 2}
+            'ENDDATA': 1, 'PARAM': 4, 'MAT1': 1, 'RLOAD1': 1, 'TLOAD2': 1, 'TABLED1': 1,
+            'FREQ': 1, 'TSTEP': 1, 'RANDPS': 2, 'RANDT1': 1, 'TABRNDG': 1, 'GRID': 144,
+            'CBEAM': 2, 'SPC1': 35, 'FORCE': 48, 'MOMENT': 3, 'DAREA': 19,
+            'DESVAR': 6, 'DVPREL1': 6, 'PBEAM': 2,
+            'CQUAD4': 2, 'PSHELL': 6, 'CBAR': 2, 'PBAR': 2, 'CQUAD8': 4,
+            'CHEXA': 3, 'PSOLID': 2, 'CPENTA': 4, 'CBEND': 2, 'PBEND': 2,
+            'CTRIAR': 2, 'CTRIA3': 2, 'CTRIA6': 4, 'CQUADR': 2}
         assert fem1.card_count == expected
         diff_cards2 = list(set(diff_cards))
         diff_cards2.sort()
@@ -2570,6 +2858,7 @@ class TestOP2Main(Tester):
     def test_bdf_op2_other_20(self):
         """checks gpst17.bdf, which tests GridPointStressesVolumeDirectArray"""
         log = get_logger(level='error')
+        # log = get_logger(level='debug')
         bdf_filename = MODEL_PATH / 'other' / 'gpst17.bdf'
         op2_filename = MODEL_PATH / 'other' / 'gpst17.op2'
         unused_fem1, unused_fem2, diff_cards = self.run_bdf('', bdf_filename, log=log)
@@ -3113,7 +3402,7 @@ class TestOP2Main(Tester):
 
     def test_bdf_op2_other_39(self):
         """tests oef_shells_composite_complex_9 OESRT"""
-        log = get_logger(level='debug')
+        log = get_logger(level='info')
         # bdf_filename = MODEL_PATH / 'other' / 'extfib_fr1.bdf'
         op2_filename = MODEL_PATH / 'other' / 'extfib_fr1.op2'
 
@@ -3142,10 +3431,10 @@ class TestOP2Main(Tester):
 
     def test_bdf_op2_other_40(self):
         """tests:
-         = ComplexLayeredCompositeStressArray12
-         - ComplexLayeredCompositeStrainArray12
+        - ComplexLayeredCompositeStressArray12
+        - ComplexLayeredCompositeStrainArray12
         """
-        log = get_logger(level='debug')
+        log = get_logger(level='warning')
         # bdf_filename = MODEL_PATH / 'other' / 'ranco07a.bdf'
         op2_filename = MODEL_PATH / 'other' / 'ranco07a.op2'
 
@@ -3174,17 +3463,17 @@ class TestOP2Main(Tester):
 
     def test_bdf_op2_other_41(self):
         """tests:
-         = force.ctria3_force
-         - force.ctria6_force
-         - force.ctriar_force
-         - stress.cquadr_stress
-         - stress.ctria3_composite_stress
-         - stress.ctriar_composite_stress
-         - ato.cquadr_stress
-         - psd.cquadr_stress
-         - rms.cquadr_stress
-         - no.cquadr_stress
-         - crm.cquadr_stress
+        - force.ctria3_force
+        - force.ctria6_force
+        - force.ctriar_force
+        - stress.cquadr_stress
+        - stress.ctria3_composite_stress
+        - stress.ctriar_composite_stress
+        - ato.cquadr_stress
+        - psd.cquadr_stress
+        - rms.cquadr_stress
+        - no.cquadr_stress
+        - crm.cquadr_stress
         """
         log = get_logger(level='debug')
         # bdf_filename = MODEL_PATH / 'other' / 'pmultrand.bdf'
@@ -3563,7 +3852,13 @@ class TestOP2Main(Tester):
         os.remove(f06_filename)
 
     def test_op2_frequency_solid_shell_bar_01_geom(self):
-        """frequency test"""
+        """
+        frequency test
+         - ComplexRodForceArray
+         - ComplexCBarWeldForceArray
+         - ComplexPlateForceArray
+         - ComplexPlate2ForceArray (not enabled)
+        """
         log = SimpleLogger(level='warning')
         folder = MODEL_PATH / 'sol_101_elements'
         op2_filename = folder / 'freq_solid_shell_bar.op2'
@@ -3681,7 +3976,7 @@ class TestOP2Main(Tester):
         assert cbeam_force.data.shape == (1, 2, 8), cbeam_force.data.shape
 
         cbeam_stress = stress.cbeam_stress[isubcase]
-        assert cbeam_stress.nelements == 11, cbeam_stress.nelements  # wrong
+        assert cbeam_stress.nelements == 1, cbeam_stress.nelements  # wrong
         assert cbeam_stress.data.shape == (1, 2, 8), cbeam_stress.data.shape
 
         cquad4_force = force.cquad4_force[isubcase]
@@ -3689,8 +3984,7 @@ class TestOP2Main(Tester):
         assert cquad4_force.data.shape == (1, 20, 8), cquad4_force.data.shape
 
         cquad4_stress = stress.cquad4_stress[isubcase]
-        # TODO: should this be 4; yes by actual count...
-        assert cquad4_stress.nelements == 20, cquad4_stress.nelements
+        assert cquad4_stress.nelements == 2, cquad4_stress.nelements
         assert cquad4_stress.data.shape == (1, 20, 8), cquad4_stress.data.shape
         assert cquad4_stress.is_fiber_distance, cquad4_stress
         assert cquad4_stress.is_von_mises, cquad4_stress
@@ -3700,7 +3994,7 @@ class TestOP2Main(Tester):
         assert ctria3_force.data.shape == (1, 8, 8), ctria3_force.data.shape
 
         ctria3_stress = stress.ctria3_stress[isubcase]
-        assert ctria3_stress.nelements == 8, ctria3_stress.nelements
+        assert ctria3_stress.nelements == 4, ctria3_stress.nelements
         assert ctria3_stress.data.shape == (1, 8, 8), ctria3_stress.data.shape
         assert ctria3_stress.is_fiber_distance, ctria3_stress
         assert ctria3_stress.is_von_mises, ctria3_stress
@@ -3764,27 +4058,27 @@ class TestOP2Main(Tester):
         stress = op2.op2_results.stress
         strain = op2.op2_results.strain
         ctria3_stress = stress.ctria3_stress[isubcase]
-        assert ctria3_stress.nelements == 8, ctria3_stress.nelements
+        assert ctria3_stress.nelements == 4, ctria3_stress.nelements
         assert ctria3_stress.data.shape == (1, 8, 8), ctria3_stress.data.shape
         assert ctria3_stress.is_fiber_distance, ctria3_stress
         assert ctria3_stress.is_von_mises, ctria3_stress
 
         cquad4_stress = stress.cquad4_stress[isubcase]
-        assert cquad4_stress.nelements == 4, cquad4_stress.nelements  # TODO: this should be 2
+        assert cquad4_stress.nelements == 2, cquad4_stress.nelements
         assert cquad4_stress.data.shape == (1, 4, 8), cquad4_stress.data.shape
         assert cquad4_stress.is_fiber_distance, cquad4_stress
         assert cquad4_stress.is_von_mises, cquad4_stress
 
         ctria3_strain = strain.ctria3_strain[isubcase]
         sword = get_scode_word(ctria3_strain.s_code, ctria3_strain.stress_bits)
-        assert ctria3_strain.nelements == 8, ctria3_strain.nelements
+        assert ctria3_strain.nelements == 4, ctria3_strain.nelements
         assert ctria3_strain.data.shape == (1, 8, 8), ctria3_strain.data.shape
         assert not ctria3_strain.is_fiber_distance, '%s\n%s' % (ctria3_strain, sword)
         assert ctria3_strain.is_von_mises, '%s\n%s' % (ctria3_strain, sword)
 
         cquad4_strain = strain.cquad4_strain[isubcase]
         sword = get_scode_word(cquad4_strain.s_code, cquad4_strain.stress_bits)
-        assert cquad4_strain.nelements == 4, cquad4_strain.nelements  # TODO: this should be 2
+        assert cquad4_strain.nelements == 2, cquad4_strain.nelements
         assert cquad4_strain.data.shape == (1, 4, 8), cquad4_strain.data.shape
         assert not cquad4_strain.is_fiber_distance, cquad4_strain
         assert cquad4_strain.is_von_mises, cquad4_strain
@@ -3815,26 +4109,26 @@ class TestOP2Main(Tester):
         stress = op2.op2_results.stress
         strain = op2.op2_results.strain
         ctria3_stress = stress.ctria3_stress[isubcase]
-        assert ctria3_stress.nelements == 8, ctria3_stress.nelements
+        assert ctria3_stress.nelements == 4, ctria3_stress.nelements
         assert ctria3_stress.data.shape == (1, 8, 8), ctria3_stress.data.shape
         assert ctria3_stress.is_fiber_distance, ctria3_stress
         assert ctria3_stress.is_von_mises, ctria3_stress
 
         cquad4_stress = stress.cquad4_stress[isubcase]
-        assert cquad4_stress.nelements == 4, cquad4_stress.nelements  # TODO: this should be 2?
+        assert cquad4_stress.nelements == 2, cquad4_stress.nelements
         assert cquad4_stress.data.shape == (1, 4, 8), cquad4_stress.data.shape
         assert cquad4_stress.is_fiber_distance, cquad4_stress
         assert cquad4_stress.is_von_mises, cquad4_stress
 
         ctria3_strain = strain.ctria3_strain[isubcase]
-        assert ctria3_strain.nelements == 8, ctria3_strain.nelements
+        assert ctria3_strain.nelements == 4, ctria3_strain.nelements
         assert ctria3_strain.data.shape == (1, 8, 8), ctria3_strain.data.shape
         assert ctria3_strain.is_fiber_distance, ctria3_strain
         assert ctria3_strain.is_von_mises, ctria3_strain
 
         cquad4_strain = strain.cquad4_strain[isubcase]
         sword = get_scode_word(cquad4_strain.s_code, cquad4_strain.stress_bits)
-        assert cquad4_strain.nelements == 4, cquad4_strain.nelements  # TODO: this should be 2?
+        assert cquad4_strain.nelements == 2, cquad4_strain.nelements
         assert cquad4_strain.data.shape == (1, 4, 8), '%s\n%s' % (cquad4_strain.data.shape, sword)
         assert cquad4_strain.is_fiber_distance, '%s\n%s' % (cquad4_strain, sword)
         assert cquad4_strain.is_von_mises, '%s\n%s' % (cquad4_strain, sword)
@@ -3865,25 +4159,25 @@ class TestOP2Main(Tester):
         stress = op2.op2_results.stress
         strain = op2.op2_results.strain
         ctria3_stress = stress.ctria3_stress[isubcase]
-        assert ctria3_stress.nelements == 8, ctria3_stress.nelements
+        assert ctria3_stress.nelements == 4, ctria3_stress.nelements
         assert ctria3_stress.data.shape == (1, 8, 8), ctria3_stress.data.shape
         assert ctria3_stress.is_fiber_distance, ctria3_stress
         assert not ctria3_stress.is_von_mises, ctria3_stress
 
         cquad4_stress = stress.cquad4_stress[isubcase]
-        assert cquad4_stress.nelements == 4, cquad4_stress.nelements  # TODO: this should be 2?
+        assert cquad4_stress.nelements == 2, cquad4_stress.nelements
         assert cquad4_stress.data.shape == (1, 4, 8), cquad4_stress.data.shape
         assert cquad4_stress.is_fiber_distance, cquad4_stress
         assert not cquad4_stress.is_von_mises, cquad4_stress
 
         ctria3_strain = strain.ctria3_strain[isubcase]
-        assert ctria3_strain.nelements == 8, ctria3_strain.nelements
+        assert ctria3_strain.nelements == 4, ctria3_strain.nelements
         assert ctria3_strain.data.shape == (1, 8, 8), ctria3_strain.data.shape
         assert not ctria3_strain.is_fiber_distance, ctria3_strain
         assert not ctria3_strain.is_von_mises, ctria3_strain
 
         cquad4_strain = strain.cquad4_strain[isubcase]
-        assert cquad4_strain.nelements == 4, cquad4_strain.nelements  # TODO: this should be 2?
+        assert cquad4_strain.nelements == 2, cquad4_strain.nelements
         assert cquad4_strain.data.shape == (1, 4, 8), cquad4_strain.data.shape
         assert not cquad4_strain.is_fiber_distance, cquad4_strain
         assert not cquad4_strain.is_von_mises, cquad4_strain
@@ -3914,25 +4208,25 @@ class TestOP2Main(Tester):
         stress = op2.op2_results.stress
         strain = op2.op2_results.strain
         ctria3_stress = stress.ctria3_stress[isubcase]
-        assert ctria3_stress.nelements == 8, ctria3_stress.nelements
+        assert ctria3_stress.nelements == 4, ctria3_stress.nelements
         assert ctria3_stress.data.shape == (1, 8, 8), ctria3_stress.data.shape
         assert ctria3_stress.is_fiber_distance, ctria3_stress
         assert ctria3_stress.is_von_mises is False, ctria3_stress
 
         cquad4_stress = stress.cquad4_stress[isubcase]
-        assert cquad4_stress.nelements == 4, cquad4_stress.nelements  # TODO: this should be 2
+        assert cquad4_stress.nelements == 2, cquad4_stress.nelements
         assert cquad4_stress.data.shape == (1, 4, 8), cquad4_stress.data.shape
         assert cquad4_stress.is_fiber_distance, cquad4_stress
         assert cquad4_stress.is_von_mises is False, cquad4_stress
 
         ctria3_strain = strain.ctria3_strain[isubcase]
-        assert ctria3_strain.nelements == 8, ctria3_strain.nelements
+        assert ctria3_strain.nelements == 4, ctria3_strain.nelements
         assert ctria3_strain.data.shape == (1, 8, 8), ctria3_strain.data.shape
         assert ctria3_strain.is_fiber_distance, ctria3_strain
         assert ctria3_strain.is_von_mises is False, ctria3_strain
 
         cquad4_strain = strain.cquad4_strain[isubcase]
-        assert cquad4_strain.nelements == 4, cquad4_strain.nelements  # TODO: this should be 2
+        assert cquad4_strain.nelements == 2, cquad4_strain.nelements
         assert cquad4_strain.data.shape == (1, 4, 8), cquad4_strain.data.shape
         assert cquad4_strain.is_fiber_distance, cquad4_strain
         assert cquad4_strain.is_von_mises is False, cquad4_strain
@@ -3975,19 +4269,19 @@ class TestOP2Main(Tester):
         assert cbar_force.data.shape == (3, 1, 8), cbar_force.data.shape
 
         cbar_stress = stress.cbar_stress[isubcase]
-        assert cbar_stress.nelements == 3, cbar_stress.nelements  # TODO: wrong
+        assert cbar_stress.nelements == 1, cbar_stress.nelements
         assert cbar_stress.data.shape == (3, 1, 15), cbar_stress.data.shape
 
         cbeam_stress = stress.cbeam_stress[isubcase]
-        assert cbeam_stress.nelements == 11, cbeam_stress.nelements  # TODO: wrong
+        assert cbeam_stress.nelements == 1, cbeam_stress.nelements
         assert cbeam_stress.data.shape == (3, 2, 8), cbeam_stress.data.shape
 
         cquad4_stress = stress.cquad4_stress[isubcase]
-        assert cquad4_stress.nelements == 20, cquad4_stress.nelements
+        assert cquad4_stress.nelements == 2, cquad4_stress.nelements
         assert cquad4_stress.data.shape == (3, 20, 8), cquad4_stress.data.shape
 
         ctria3_stress = stress.ctria3_stress[isubcase]
-        assert ctria3_stress.nelements == 8, ctria3_stress.nelements
+        assert ctria3_stress.nelements == 4, ctria3_stress.nelements
         assert ctria3_stress.data.shape == (3, 8, 8), ctria3_stress.data.shape
 
         ctetra_stress = stress.ctetra_stress[isubcase]
@@ -4051,19 +4345,19 @@ class TestOP2Main(Tester):
         assert cbar_force.data.shape == (4, 1, 8), cbar_force.data.shape
 
         cbar_stress = stress.cbar_stress[isubcase]
-        assert cbar_stress.nelements == 4, cbar_stress.nelements  # TODO: wrong
+        assert cbar_stress.nelements == 1, cbar_stress.nelements
         assert cbar_stress.data.shape == (4, 1, 15), cbar_stress.data.shape
 
         cbeam_stress = stress.cbeam_stress[isubcase]
-        assert cbeam_stress.nelements == 11, cbeam_stress.nelements  # TODO: wrong
+        assert cbeam_stress.nelements == 1, cbeam_stress.nelements
         assert cbeam_stress.data.shape == (4, 2, 8), cbeam_stress.data.shape
 
         cquad4_stress = stress.cquad4_stress[isubcase]
-        assert cquad4_stress.nelements == 20, cquad4_stress.nelements
+        assert cquad4_stress.nelements == 2, cquad4_stress.nelements
         assert cquad4_stress.data.shape == (4, 20, 8), cquad4_stress.data.shape
 
         ctria3_stress = stress.ctria3_stress[isubcase]
-        assert ctria3_stress.nelements == 8, ctria3_stress.nelements
+        assert ctria3_stress.nelements == 4, ctria3_stress.nelements
         assert ctria3_stress.data.shape == (4, 8, 8), ctria3_stress.data.shape
 
         ctetra_stress = stress.ctetra_stress[isubcase]
@@ -4142,7 +4436,7 @@ class TestOP2Main(Tester):
 
         cquad4_stress = stress.cquad4_stress[isubcase]
         assert cquad4_stress.data.shape == (7, 40, 3), cquad4_stress.data.shape
-        assert cquad4_stress.nelements == 40, cquad4_stress.nelements  # TODO: wrong?
+        assert cquad4_stress.nelements == 4, cquad4_stress.nelements  # unique elements
 
         #print(stress.ctria3_stress.keys())
         ctria3_stress = stress.ctria3_stress[isubcase]
@@ -4240,7 +4534,7 @@ class TestOP2Main(Tester):
         assert cbar_force.data.shape == (21, 1, 8), cbar_force.data.shape
 
         cbar_stress = stress.cbar_stress[isubcase]
-        assert cbar_stress.nelements == 21, cbar_stress.nelements  # 1-wrong
+        assert cbar_stress.nelements == 1, cbar_stress.nelements
         assert cbar_stress.data.shape == (21, 1, 15), cbar_stress.data.shape
 
         #print(op2.cbeam_stress.keys())
@@ -4249,12 +4543,12 @@ class TestOP2Main(Tester):
         # assert cbeam_stress.data.shape == (7, 11, 8), cbeam_stress.data.shape
 
         cquad4_stress = stress.cquad4_stress[isubcase]
-        assert cquad4_stress.nelements == 40, cquad4_stress.nelements
+        assert cquad4_stress.nelements == 4, cquad4_stress.nelements
         assert cquad4_stress.data.shape == (21, 40, 8), cquad4_stress.data.shape
 
         #print(op2.ctria3_stress.keys())
         ctria3_stress = stress.ctria3_stress[isubcase]
-        assert ctria3_stress.nelements == 16, ctria3_stress.nelements  # TODO: 8-wrong
+        assert ctria3_stress.nelements == 8, ctria3_stress.nelements
         assert ctria3_stress.data.shape == (21, 16, 8), ctria3_stress.data.shape
 
         assert len(stress.ctetra_stress) == 1, stress.ctetra_stress
@@ -4567,86 +4861,6 @@ class TestOP2Main(Tester):
         #print(eigenvector)
         assert len(eigenvector.modes) == 2, eigenvector.modes
 
-    def test_random_ctria3(self):
-        """runs a random test"""
-        log = get_logger(level='warning')
-        folder = MODEL_PATH / 'random'
-        op2_filename = folder / 'random_test_bar_plus_tri.op2'
-        f06_filename = folder / 'random_test_bar_plus_tri.test_op2.f06'
-        op2 = read_op2_geom(op2_filename, debug=False, log=log)
-
-        op2res = op2.op2_results
-        assert len(op2res.psd.displacements) == 1
-        assert len(op2res.rms.displacements) == 1
-        assert len(op2res.crm.displacements) == 1
-        assert len(op2res.no.displacements) == 1
-        assert len(op2res.psd.accelerations) == 1
-        assert len(op2res.rms.accelerations) == 1
-        assert len(op2res.crm.accelerations) == 1
-        assert len(op2res.no.accelerations) == 1
-        assert len(op2res.crm.cbar_force) == 1, len(op2res.crm.cbar_force)
-        assert len(op2res.psd.cbar_force) == 1
-        assert len(op2res.rms.cbar_force) == 1
-        assert len(op2res.no.cbar_force) == 1
-        assert len(op2res.crm.cquad4_force) == 1
-        assert len(op2res.psd.cquad4_force) == 1
-        assert len(op2res.rms.cquad4_force) == 1
-        assert len(op2res.no.cquad4_force) == 1
-        assert len(op2res.crm.ctria3_force) == 1
-        assert len(op2res.psd.ctria3_force) == 1
-        assert len(op2res.rms.ctria3_force) == 1
-        assert len(op2res.no.ctria3_force) == 1
-        assert len(op2res.no.cbar_force) == 1
-        assert len(op2res.no.cbar_force) == 1
-        assert len(op2res.no.cbar_force) == 1
-        assert len(op2.eigenvalues) == 1
-        assert 'BHH' in op2.matrices
-        assert 'KHH' in op2.matrices
-
-        #psd.displacements_psd[1]
-        #rms.displacements[1]
-        #crm.displacements[1]
-        #no.displacements[1]
-        #psd.accelerations[1]
-        #rms.accelerations[1]
-        #crm.accelerations[1]
-        #no.accelerations[1]
-        #crm.cbar_force[1]
-        #psd.cbar_force[1]
-        #rms.cbar_force[1]
-        #no.cbar_force[1]
-        #eigenvalues[u'RANDOM TEST']
-        #crm.cquad4_force[1]
-        #psd.cquad4_force[1]
-        #rms.cquad4_force[1]
-        #no.cquad4_force[1]
-        #crm.ctria3_force[1]
-        #psd.ctria3_force[1]
-        #rms.ctria3_force[1]
-        #no.ctria3_force[1]
-        #Matrix['BHH'];   shape=(20, 20);
-        # type=numpy.matrixlib.defmatrix.matrix; dtype=float64; desc=symmetric
-        #Matrix['KHH'];   shape=(20, 20);
-        # type=numpy.matrixlib.defmatrix.matrix; dtype=float64; desc=symmetric
-
-        op2.write_f06(f06_filename)
-        os.remove(f06_filename)
-
-    def test_random_ctria3_oesrmx1(self):
-        """runs a random test"""
-        log = get_logger(level='warning')
-        folder = MODEL_PATH / 'random'
-        op2_filename = folder / 'rms_tri_oesrmx1.op2'
-        #bdf_filename = folder / 'rms_tri_oesrmx1.bdf'
-        #unused_op2 = read_op2_geom(op2_filename, debug=False, log=log)
-        unused_op2, unused_is_passed = run_op2(
-            op2_filename, make_geom=True, write_bdf=True, read_bdf=None, write_f06=True,
-            write_op2=False, write_hdf5=False, is_mag_phase=False, is_sort2=False,
-            is_nx=None, delete_f06=False, build_pandas=False, subcases=None,
-            exclude_results=None, short_stats=False, compare=True, debug=False, log=log,
-            binary_debug=True, quiet=True, stop_on_failure=True,
-            dev=False, xref_safe=False, post=None, load_as_h5=False)
-
     def test_aero_cpmopt(self):
         """test optimization with multiple GEOM1 tables and multiple CSTM tables"""
         log = get_logger(level='warning')
@@ -4749,7 +4963,7 @@ class TestOP2Main(Tester):
 
         unused_op2, unused_is_passed = run_op2(
             op2_filename, make_geom=True, write_bdf=False, read_bdf=False, write_f06=True,
-            write_op2=True, write_hdf5=IS_H5PY, is_mag_phase=False, is_sort2=False,
+            write_op2=False, write_hdf5=IS_H5PY, is_mag_phase=False, is_sort2=False,
             is_nx=None, delete_f06=True, build_pandas=True, subcases=None,
             exclude_results=None, short_stats=False, compare=True, debug=False, log=log,
             binary_debug=True, quiet=True, stop_on_failure=True,

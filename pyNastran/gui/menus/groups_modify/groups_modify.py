@@ -28,7 +28,7 @@ from pyNastran.gui.menus.groups_modify.groups import Group, _get_collapsed_text
 from pyNastran.gui.utils.vtk.gui_utils import add_actors_to_gui, remove_actors_from_gui
 from pyNastran.gui.menus.highlight.highlight import create_highlighted_actors
 from pyNastran.gui.menus.groups_modify.utils import get_groups_sorted_by_name
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # pragma: no cover
     from pyNastran.gui.main_window import MainWindow
     from pyNastran.bdf.bdf import BDF
 
@@ -371,11 +371,19 @@ class GroupsModify(PyDialog):
         self._update_active_key_by_name(name)
 
     def on_delete_group(self) -> None:
+        """Deletes the active group from out_data.
+
+        out_data uses integer keys for groups and string keys for metadata
+        (e.g., 'font_size', 'close'). The isinstance(key, int) filter
+        separates group entries from metadata to support multiple models.
+        """
         self.remove_highlight_actor()
         if self.active_key == 0:
             return
 
-        #self.deleted_groups.add(self.imain)
+        # TODO: this loop is broken — enumerate(keys) produces tuples,
+        # not ints, so isinstance(i, int) is always False and out_data[i]
+        # will KeyError on the tuple. Needs to be: for i, key in enumerate(keys)
         items = {}
         j = 0
         keys = [key for key in self.out_data.keys() if isinstance(key, int)]

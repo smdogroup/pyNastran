@@ -332,6 +332,13 @@ class TestOpt(unittest.TestCase):
 
         op2 = OP2(log=log, debug=True, debug_file='temp.debug')
         op2.read_op2(op2_filename)
+
+        op2_filename_out = 'junk.op2'
+        op2.write_op2(op2_filename_out)
+
+        op2b = OP2(log=log, debug=True)
+        op2b.read_op2(op2_filename_out)
+
         unused_subcase_ids = op2.subcase_key.keys()
         #for subcase_id in subcase_ids:
             #assert isinstance(subcase_id, integer_types), subcase_id
@@ -339,6 +346,7 @@ class TestOpt(unittest.TestCase):
                 #print(dresp)
                 #dresp.calculate(op2, subcase_id)
         os.remove('temp.debug')
+        os.remove(op2_filename_out)
 
     def test_opt_2(self):
         """tests updating model based on DESVARs"""
@@ -567,17 +575,17 @@ class TestOpt(unittest.TestCase):
         atta = None
         attb = None
         atti = []
-        model.add_dresp1(dresp_id, label, response_type, property_type, region, atta, attb, atti)
+        model.add_dresp1(dresp_id, label, response_type, property_type, atta, attb, atti, region=region)
 
         dresp_id += 1
         label = 'DWEIGHT'
         response_type = 'DWEIGHT'
-        model.add_dresp1(dresp_id, label, response_type, property_type, region, atta, attb, atti)
+        model.add_dresp1(dresp_id, label, response_type, property_type, atta, attb, atti, region=region)
 
         dresp_id += 1
         label = 'WEIGHT'
         response_type = 'WEIGHT'
-        model.add_dresp1(dresp_id, label, response_type, property_type, region, atta, attb, atti)
+        model.add_dresp1(dresp_id, label, response_type, property_type, atta, attb, atti, region=region)
 
         #----------------------------------------------
         dresp_id += 1
@@ -585,7 +593,7 @@ class TestOpt(unittest.TestCase):
         response_type = 'FLUTTER'
         atti = [1, 2, 3, 4]
         property_type = 'PKNL'
-        model.add_dresp1(dresp_id, label, response_type, property_type, region, atta, attb, atti)
+        model.add_dresp1(dresp_id, label, response_type, property_type, atta, attb, atti, region=region)
         model.add_set1(1, [10]) # nodes
         model.add_flfact(2, [0.1]) # rho
         model.add_flfact(3, [0.9]) # mach
@@ -601,19 +609,19 @@ class TestOpt(unittest.TestCase):
         atta = 2
         label = 'CEIG'
         response_type = 'CEIG'
-        model.add_dresp1(dresp_id, label, response_type, property_type, region, atta, attb, atti)
+        model.add_dresp1(dresp_id, label, response_type, property_type, atta, attb, atti, region=region)
 
         dresp_id += 1
         atta = 2
         label = 'LAMA'
         response_type = 'LAMA'
-        model.add_dresp1(dresp_id, label, response_type, property_type, region, atta, attb, atti)
+        model.add_dresp1(dresp_id, label, response_type, property_type, atta, attb, atti, region=region)
 
         dresp_id += 1
         atta = 2
         label = 'EIGN'
         response_type = 'EIGN'
-        model.add_dresp1(dresp_id, label, response_type, property_type, region, atta, attb, atti)
+        model.add_dresp1(dresp_id, label, response_type, property_type, atta, attb, atti, region=region)
         #----------------------------------------------
         # atti only
         dresp_id += 1
@@ -621,7 +629,7 @@ class TestOpt(unittest.TestCase):
         label = 'STABDER'
         response_type = 'STABDER'
         atti = [1]
-        model.add_dresp1(dresp_id, label, response_type, property_type, region, atta, attb, atti)
+        model.add_dresp1(dresp_id, label, response_type, property_type,  atta, attb, atti, region=region)
 
         # reset
         atti = []
@@ -636,7 +644,7 @@ class TestOpt(unittest.TestCase):
         property_type = 'PSHELL'
         atta = 4
         atti = [1]
-        model.add_dresp1(dresp_id, label, response_type, property_type, region, atta, attb, atti)
+        model.add_dresp1(dresp_id, label, response_type, property_type, atta, attb, atti, region=region)
 
         dresp_id += 1
         label = 'STRAIN'
@@ -644,7 +652,7 @@ class TestOpt(unittest.TestCase):
         property_type = 'PSHELL'
         atta = 4
         atti = [1]
-        model.add_dresp1(dresp_id, label, response_type, property_type, region, atta, attb, atti)
+        model.add_dresp1(dresp_id, label, response_type, property_type, atta, attb, atti, region=region)
 
         dresp_id += 1
         label = 'FORCE'
@@ -652,7 +660,7 @@ class TestOpt(unittest.TestCase):
         property_type = 'PROD'
         atta = 2
         atti = [1]
-        model.add_dresp1(dresp_id, label, response_type, property_type, region, atta, attb, atti)
+        model.add_dresp1(dresp_id, label, response_type, property_type, atta, attb, atti, region=region)
 
         # attb is the lamina number
         dresp_id += 1
@@ -661,7 +669,7 @@ class TestOpt(unittest.TestCase):
         property_type = 'PCOMP'
         atta = 4
         atti = [1]
-        model.add_dresp1(dresp_id, label, response_type, property_type, region, atta, attb, atti)
+        model.add_dresp1(dresp_id, label, response_type, property_type, atta, attb, atti, region=region)
 
         dresp_id += 1
         label = 'CSTRAIN'
@@ -669,7 +677,7 @@ class TestOpt(unittest.TestCase):
         property_type = 'PCOMP'
         atta = 4
         atti = [1]
-        model.add_dresp1(dresp_id, label, response_type, property_type, region, atta, attb, atti)
+        model.add_dresp1(dresp_id, label, response_type, property_type, atta, attb, atti, region=region)
 
         dresp_id += 1
         label = 'CFAILURE'
@@ -677,7 +685,7 @@ class TestOpt(unittest.TestCase):
         property_type = 'PCOMP'
         atta = 3
         attai = [1]
-        model.add_dresp1(dresp_id, label, response_type, property_type, region, atta, attb, atti)
+        model.add_dresp1(dresp_id, label, response_type, property_type, atta, attb, atti, region=region)
         # ---------------------------------------------
 
         #  reset
@@ -768,8 +776,8 @@ class TestOpt(unittest.TestCase):
         attb = None
         atti = pid
         dresp1 = model.add_dresp1(dresp1_id, label, response_type,
-                                  property_type, region,
-                                  atta, attb, atti, validate=True, comment='dresp1')
+                                  property_type,
+                                  atta, attb, atti, region=region, validate=True, comment='dresp1')
         dresp1.response_type = response_type
         dresp1.property_type = property_type
 
@@ -785,7 +793,7 @@ class TestOpt(unittest.TestCase):
         dequation = equation_id
         label = 'dresp2'
         region = None
-        dresp2 = model.add_dresp2(dresp2_id, label, dequation, region, params,
+        dresp2 = model.add_dresp2(dresp2_id, label, dequation, params, region=region,
                                   method='MIN', c1=100., c2=0.005, c3=None,
                                   comment='dresp2')
         dresp2.raw_fields()
@@ -803,8 +811,8 @@ class TestOpt(unittest.TestCase):
             (3, 'DVPREL2') : [dvprel2_id],
             (3, 'DNODE') : [[100, 101], [1, 2]],
         }
-        dresp3 = model.add_dresp3(dresp3_id, label, group, Type, region,
-                                  params, comment='dresp3')
+        dresp3 = model.add_dresp3(dresp3_id, label, group, Type,
+                                  params, region=region, comment='dresp3')
         dresp3.raw_fields()
 
         oid = 1001
@@ -1276,7 +1284,7 @@ class TestOpt(unittest.TestCase):
         model.add_cbeam(eid+3, pid+3, nids, x, g0, offt='GGG', bit=None, pa=0, pb=0,
                         wa=wa, wb=wb, sa=0, sb=0, comment='')
 
-        model.add_pbar(pid, mid, A=0., i1=0., i2=0., i12=0., j=0., nsm=0.,
+        model.add_pbar(pid, mid, A=1., i1=0., i2=0., i12=0., j=0., nsm=0.,
                        c1=0., c2=0., d1=0., d2=0., e1=0., e2=0., f1=0., f2=0.,
                        k1=1.e8, k2=1.e8, comment='')
         Type = 'BAR'
@@ -1448,7 +1456,7 @@ class TestOpt(unittest.TestCase):
         params = {
             (0, 'DTABLE'): ['B1', 'C', 'A'],
         }
-        dresp2 = model.add_dresp2(dresp_id, label, dequation, region, params,
+        dresp2 = model.add_dresp2(dresp_id, label, dequation, params, region=region,
                                   method='MIN', c1=1., c2=0.005, c3=10., validate=True,
                                   comment='')
         eqs = [

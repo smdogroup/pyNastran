@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Optional, Any, TYPE_CHECKING
 import numpy as np
 
-from pyNastran.utils.numpy_utils import integer_types
+from pyNastran.utils.numpy_utils import integer_types, float_types
 from pyNastran.bdf.bdf_interface.assign_type_force import force_double, force_double_or_blank
 from pyNastran.bdf.bdf_interface.assign_type import (
     integer, double, string, blank,
@@ -281,6 +281,33 @@ class CBUSH(Element):
                    self.g0.max(), self.coord_id.max(), self.ocid.max())
 
     @parse_check
+    def write_file_8(self, bdf_file: TextIOLike,
+                     write_card_header: bool=False) -> None:
+        if self.max_id >= 100_000_000:
+            self.write_file(bdf_file, size=8, write_card_header=write_card_header)
+            return
+
+        all_g0 = np.all(self.g0 > 0)
+        no_cid = np.all(self.coord_id == -1)
+        no_ocid = np.all(self.ocid == -1)
+        all_s_default = np.allclose(self.s, 0.5)
+        is_basic = all_g0 and no_cid and no_ocid and all_s_default
+
+        if is_basic:
+            eids = np.char.rjust(array_str(self.element_id, size=8), 8).tolist()
+            pids = np.char.rjust(array_str(self.property_id, size=8), 8).tolist()
+            nodes_str = np.char.rjust(array_str(self.nodes, size=8), 8)
+            n1s = nodes_str[:, 0].tolist()
+            n2s = nodes_str[:, 1].tolist()
+            g0s = np.char.rjust(array_str(self.g0, size=8), 8).tolist()
+            lines = [f'CBUSH   {eid}{pid}{n1}{n2}{g0}\n'
+                     for eid, pid, n1, n2, g0
+                     in zip(eids, pids, n1s, n2s, g0s)]
+            bdf_file.write(''.join(lines))
+        else:
+            self.write_file(bdf_file, size=8, write_card_header=write_card_header)
+
+    @parse_check
     def write_file(self, bdf_file: TextIOLike, size: int=8,
                    is_double: bool=False,
                    write_card_header: bool=False) -> None:
@@ -471,8 +498,8 @@ class PBUSH(Property):
         self.coincident_length = np.array([], dtype='float64')
 
     def add(self, pid: int, k: list[float], b: list[float], ge: list[float],
-            rcv: Optional[list[float]]=None, mass: Optional[float]=None,
-            alpha: float=0., tref: float=0., coincident_length=None,
+            rcv: Optional[list[float]]=None, mass: float=0.0,
+            alpha: float=0.0, tref: float=0.0, coincident_length=None,
             ifile: int=0, comment: str='') -> int:
         """
         Creates a PBUSH card, which defines a property for a PBUSH
@@ -482,25 +509,32 @@ class PBUSH(Property):
         pid : int
             property id
         k : list[float]
-            Nominal stiffness values in directions 1 through 6.
+            Stiffness values in directions 1 through 6.
             len(k) = 6
         b : list[float]
-            Nominal damping coefficients in direction 1 through 6 in units of
+            Damping coefficients in direction 1 through 6 in units of
             force per unit velocity
             len(b) = 6
         ge : list[float]
-            Nominal structural damping constant in directions 1 through 6.
+            Structural damping constant in directions 1 through 6.
             len(ge) = 6
         rcv : list[float]; default=None -> (None, None, None, None)
             [sa, st, ea, et] = rcv
             length(rcv) = 4
-        mass : float; default=None
+        mass : float; default=0.0
             lumped mass of the CBUSH
             This is an MSC only parameter.
         comment : str; default=''
             a comment for the card
 
         """
+        if isinstance(k, float_types):
+            k = [k] * 6
+        if isinstance(b, float_types):
+            b = [b] * 6
+        if isinstance(ge, float_types):
+            ge = [ge] * 6
+        assert len(k) >= 0
         self.cards.append((pid, k, b, ge, rcv,
                            mass, alpha, tref, coincident_length, ifile, comment))
         self.n += 1
@@ -515,7 +549,7 @@ class PBUSH(Property):
         ge_fields = []
         t_fields = [np.nan, np.nan, np.nan]
         rcv_fields = [1., 1., 1., 1.]
-        mass = None
+        mass = 0.0
 
         pid = integer(card, 1, 'pid')
 
@@ -555,7 +589,7 @@ class PBUSH(Property):
                 rcv_fields = read_pbush_rcv(model, card, istart)
             elif pname == 'M':
                 # Lumped mass of the cbush; default=0.0
-                mass = fdouble_or_blank(card, istart + 1, 'mass', default=0.)
+                mass = fdouble_or_blank(card, istart + 1, 'mass', default=0.0)
             elif pname == 'T':
                 t_fields = self._read_var(card, 'Ti', istart + 1, istart + 4)
                 assert len(t_fields) == 3, t_fields
@@ -565,6 +599,7 @@ class PBUSH(Property):
             istart += 8
 
         alpha, tref, coincident_length = t_fields
+        assert len(k_fields) >= 0
         self.cards.append((pid, k_fields, b_fields, ge_fields, rcv_fields,
                            mass, alpha, tref, coincident_length, ifile, comment))
         self.n += 1
@@ -592,11 +627,11 @@ class PBUSH(Property):
             ifile[icard] = ifilei
             property_id[icard] = pid
             if k_fieldsi:
-                k_fields[icard, :] = k_fieldsi
+                k_fields[icard, :len(k_fieldsi)] = k_fieldsi
             if b_fieldsi:
-                b_fields[icard, :] = b_fieldsi
+                b_fields[icard, :len(b_fieldsi)] = b_fieldsi
             if ge_fieldsi:
-                ge_fields[icard, :] = ge_fieldsi
+                ge_fields[icard, :len(ge_fieldsi)] = ge_fieldsi
             #t_fields[icard, :] = t_fields
             rcv_fields[icard, :] = rcv_fieldsi
             _mass[icard] = massi
@@ -696,8 +731,9 @@ class PBUSH(Property):
     def geom_check(self, missing: dict[str, np.ndarray]):
         pass
         #nid = self.model.grid.node_id
-        #pids = hstack_msg([prop.property_id for prop in self.allowed_properties],
-                          #msg=f'no spring properties for {self.type}')
+        #pids = hstack_msg(
+          #[prop.property_id for prop in self.allowed_properties],
+          #msg=f'no spring properties for {self.type}')
         #pids.sort()
         #geom_check(self,
                    #missing,
@@ -719,7 +755,7 @@ class PBUSH(Property):
         #T/ALPHA/TREF/COINL was added in MSC 2021
         no_rcv = self.rcv_fields.max() == 1. and self.rcv_fields.min() == 1.
         no_t = np.any(np.isfinite(self.alpha)) | np.any(np.isfinite(self.tref)) | np.any(np.isfinite(self.coincident_length))
-        no_mass = np.any(np.isfinite(self._mass))
+        no_mass = np.any(np.abs(self._mass) > 0.0)
         if no_rcv and no_t and no_mass:
             # MSC 2005r2
             for pid, k_fields, b_fields, ge_fields in zip(self.property_id, self.k_fields, self.b_fields,
@@ -746,8 +782,8 @@ class PBUSH(Property):
                 #self.tref[icard] = tref
                 #self.coinl[icard] = coinl
 
-                mass = None if mass == 0. else mass
-                rcv_fields = [None if rcv == 1. else rcv
+                mass = None if mass == 0.0 else mass
+                rcv_fields = [None if rcv == 1.0 else rcv
                               for rcv in rcv_fields]
                 list_fields = ['PBUSH', pid]
                 _set_fields_pbush(list_fields, 'K', k_fields)
@@ -1052,7 +1088,11 @@ class CBUSH1D(Element):
         if ifile is None:
             ifile = np.zeros(ncards, dtype='int32')
         if len(self.element_id) != 0:
-            raise RuntimeError(f'stacking of {self.type} is not supported')
+            ifile = np.hstack([self.ifile, ifile])
+            element_id = np.hstack([self.element_id, element_id])
+            property_id = np.hstack([self.property_id, property_id])
+            nodes = np.vstack([self.nodes, nodes])
+            coord_id = np.hstack([self.coord_id, coord_id])
         save_ifile_comment(self, ifile, comment)
         self.element_id = element_id
         self.property_id = property_id
@@ -1353,7 +1393,23 @@ class PBUSH1D(Property):
         if ifile is None:
             ifile = np.zeros(ncards, dtype='int32')
         if len(self.property_id) != 0:
-            raise RuntimeError(f'stacking of {self.type} is not supported')
+            ifile = np.hstack([self.ifile, ifile])
+            property_id = np.hstack([self.property_id, property_id])
+            k = np.hstack([self.k, k])
+            c = np.hstack([self.c, c])
+            sa = np.hstack([self.sa, sa])
+            se = np.hstack([self.se, se])
+            mass = np.hstack([self.mass, mass])
+            spring_type = np.hstack([self.spring_type, spring_type])
+            spring_table = np.hstack([self.spring_table, spring_table])
+            spring_equation = np.hstack([self.spring_equation, spring_equation])
+            damper_type = np.hstack([self.damper_type, damper_type])
+            damper_table = np.hstack([self.damper_table, damper_table])
+            damper_equation = np.hstack([self.damper_equation, damper_equation])
+            shock_type = np.hstack([self.shock_type, shock_type])
+            shock_table = np.hstack([self.shock_table, shock_table])
+            shock_equation = np.hstack([self.shock_equation, shock_equation])
+            gener_equation = np.hstack([self.gener_equation, gener_equation])
         save_ifile_comment(self, ifile, comment)
         self.property_id = property_id
         self.k = k

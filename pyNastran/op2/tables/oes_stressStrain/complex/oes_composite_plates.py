@@ -1,11 +1,12 @@
 # import warnings
 from itertools import zip_longest
+import copy
 import numpy as np
 
 from pyNastran.utils.numpy_utils import integer_types
 from pyNastran.op2.result_objects.op2_objects import get_complex_times_dtype
 from pyNastran.op2.result_objects.utils_pandas import build_dataframe_transient_header, build_pandas_transient_element_node
-from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import StressObject, StrainObject, OES_Object
+from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import StressObject, StrainObject, OES_Object, slice_eids_by_index
 from pyNastran.f06.f06_formatting import (
     write_float_12e, write_imag_floats_12e,
     # write_float_13e,
@@ -36,6 +37,41 @@ class ComplexLayeredCompositesVMArray(OES_Object):
         #else:
             #raise NotImplementedError('SORT2')
         assert self.table_name is not None, self.data_code
+
+    def h5_table_dict(self) -> dict:
+        from tables import Int64Col, Float64Col
+        h5_table_dict = {
+            'EID': Int64Col(pos=0),
+            'PLY': Int64Col(pos=1),
+            'X1R': Float64Col(pos=2),
+            'Y1R': Float64Col(pos=3),
+            'T1R': Float64Col(pos=4),
+            'L1R': Float64Col(pos=5),
+            'L2R': Float64Col(pos=6),
+
+            'X1I': Float64Col(pos=7),
+            'Y1I': Float64Col(pos=8),
+            'T1I': Float64Col(pos=9),
+            'L1I': Float64Col(pos=10),
+            'L2I': Float64Col(pos=11),
+            'DOMAIN_ID': Int64Col(pos=12),
+        }
+        return h5_table_dict
+
+    def add_to_h5_array(self, arr, ntime_neid0: int, ntime_neid1: int, itime: int):
+        arr["EID"][ntime_neid0:ntime_neid1] = self.element_layer[:, 0]
+        arr["PLY"][ntime_neid0:ntime_neid1] = self.element_layer[:, 1]
+        arr["X1R"][ntime_neid0:ntime_neid1] = self.data[itime, :, 0].real
+        arr["Y1R"][ntime_neid0:ntime_neid1] = self.data[itime, :, 1].real
+        arr["T1R"][ntime_neid0:ntime_neid1] = self.data[itime, :, 2].real
+        arr["L1R"][ntime_neid0:ntime_neid1] = self.data[itime, :, 3].real
+        arr["L2R"][ntime_neid0:ntime_neid1] = self.data[itime, :, 4].real
+
+        arr["X1I"][ntime_neid0:ntime_neid1] = self.data[itime, :, 0].imag
+        arr["Y1I"][ntime_neid0:ntime_neid1] = self.data[itime, :, 1].imag
+        arr["T1I"][ntime_neid0:ntime_neid1] = self.data[itime, :, 2].imag
+        arr["L1I"][ntime_neid0:ntime_neid1] = self.data[itime, :, 3].imag
+        arr["L2I"][ntime_neid0:ntime_neid1] = self.data[itime, :, 4].imag
 
     @property
     def is_real(self) -> bool:
@@ -165,6 +201,24 @@ class ComplexLayeredCompositesVMArray(OES_Object):
         self.data[self.itime, self.itotal] = [o1, o2, t12, o1z, o2z, ovm]
         self.element_layer[self.itotal, :] = [eid, ply_id]
         self.itotal += 1
+
+    def slice_by_element_id(self, eids: np.ndarray,
+                            assume_exists: bool=False, inplace: bool=False):
+        element = self.element_layer[:, 0]
+        eids, ieid, neid2 = slice_eids_by_index(np.unique(element), eids, assume_exists)
+        ilayer = np.where(np.isin(element, eids))[0]
+        obj = self if inplace else copy.deepcopy(self)
+        obj.element_layer = obj.element_layer[ilayer, :]
+        obj.data = obj.data[:, ilayer, :]
+        obj.nelements = neid2
+        return obj
+
+    def finalize(self):
+        """Calls any OP2 objects that need to do any post matrix calcs"""
+        # after build(), nelements is a row count (rows per element and/or
+        # summed over the times); nelements is the *actual* number of elements
+        self.nelements = len(np.unique(self.element_layer[:, 0]))
+        self.set_as_sort1()
 
     def get_stats(self, short: bool=False) -> list[str]:
         if not self.is_built:
@@ -462,6 +516,24 @@ class ComplexLayeredCompositesArray(OES_Object):
         self.data[self.itime, self.itotal] = [oxx, oyy, t12, t1z, t2z]
         self.element_layer[self.itotal, :] = [eid, ply_id]
         self.itotal += 1
+
+    def slice_by_element_id(self, eids: np.ndarray,
+                            assume_exists: bool=False, inplace: bool=False):
+        element = self.element_layer[:, 0]
+        eids, ieid, neid2 = slice_eids_by_index(np.unique(element), eids, assume_exists)
+        ilayer = np.where(np.isin(element, eids))[0]
+        obj = self if inplace else copy.deepcopy(self)
+        obj.element_layer = obj.element_layer[ilayer, :]
+        obj.data = obj.data[:, ilayer, :]
+        obj.nelements = neid2
+        return obj
+
+    def finalize(self):
+        """Calls any OP2 objects that need to do any post matrix calcs"""
+        # after build(), nelements is a row count (rows per element and/or
+        # summed over the times); nelements is the *actual* number of elements
+        self.nelements = len(np.unique(self.element_layer[:, 0]))
+        self.set_as_sort1()
 
     def get_stats(self, short: bool=False) -> list[str]:
         if not self.is_built:

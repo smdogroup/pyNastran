@@ -205,6 +205,29 @@ class VectorizedBaseCard:
     def _ids(self, ids: np.ndarray) -> None:
         return setattr(self, self._id_name, ids)
 
+    def slice_card_by_id(self, ids: np.ndarray,
+                         assume_sorted: bool=True,
+                         sort_ids: bool=False) -> Any:
+        """uses a node_id to extract Elements, Properties, etc.
+
+        Parameters
+        ----------
+        ids : (n,) int array
+            the ids to extract (should be a subset of elem.element_id)
+        assume_sorted: bool; default=True
+            assume the parent array (e.g., elem.element_id is sorted)
+        sort_ids: bool; default=False
+            True: sort the input ids
+            False: output is unsorted, which could cause issues
+
+        """
+        i = self.index(ids, assume_sorted=assume_sorted)
+        cls_obj = self.slice_card_by_index(i, sort_index=sort_ids) # , assume_sorted=assume_sorted)
+        #if 1:
+            #assert np.array_equal(self._ids, np.unique(self._ids))
+            #ids = np.atleast_1d(np.asarray(ids, dtype=self._ids.dtype))
+        return cls_obj
+
     def remove_duplicates(self, inplace: bool=True) -> Any:
         """
         Removes duplicates
@@ -258,29 +281,6 @@ class VectorizedBaseCard:
         else:
             card = self.slice_card_by_index(i, sort_ids=True)
         return card
-
-    def slice_card_by_id(self, ids: np.ndarray,
-                         assume_sorted: bool=True,
-                         sort_ids: bool=False) -> Any:
-        """uses a node_id to extract Elements, Properties, etc.
-
-        Parameters
-        ----------
-        ids : (n,) int array
-            the ids to extract (should be a subset of elem.element_id)
-        assume_sorted: bool; default=True
-            assume the parent array (e.g., elem.element_id is sorted)
-        sort_ids: bool; default=False
-            True: sort the input ids
-            False: output is unsorted, which could cause issues
-
-        """
-        i = self.index(ids, assume_sorted=assume_sorted)
-        cls_obj = self.slice_card_by_index(i, sort_index=sort_ids) # , assume_sorted=assume_sorted)
-        #if 1:
-            #assert np.array_equal(self._ids, np.unique(self._ids))
-            #ids = np.atleast_1d(np.asarray(ids, dtype=self._ids.dtype))
-        return cls_obj
 
     def remove_card_by_id(self, ids: np.ndarray) -> Any:
         """inplace operation"""
@@ -575,6 +575,10 @@ class VectorizedBaseCard:
                     self.model.log.error(f'{self.type} {attr}\nold:{value1}\nnew:{value2}')
                     raise
 
+def slice_element_by_property_id(element: Element, property_id: np.ndarray):
+    ieids_list = np.array([i for i, pid in enumerate(element.property_id) if pid in property_id])
+    return element.slice_card_by_index(ieids_list, sort_index=True)
+
 
 class Element(VectorizedBaseCard):
     _id_name = 'element_id'
@@ -746,7 +750,8 @@ class Element(VectorizedBaseCard):
         #print(f'prop is_in = {is_in.tolist()}')
         if not np.any(is_in):
             log.error(f'skipping {element.type} because it is empty after filtering; '
-                      f'property_ids={upids}')
+                      # f'property_ids={upids}'
+                      )
             return is_removed, element
 
         is_removed = False

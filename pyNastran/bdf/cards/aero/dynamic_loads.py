@@ -13,7 +13,7 @@ All cards are BaseCard objects.
 """
 from __future__ import annotations
 from itertools import count
-from typing import Optional, Any, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 import numpy as np
 
 from pyNastran.utils.numpy_utils import integer_types
@@ -21,13 +21,14 @@ from pyNastran.bdf.field_writer_8 import set_blank_if_default, print_card_8
 from pyNastran.bdf.field_writer_16 import print_card_16
 from pyNastran.bdf.cards.base_card import BaseCard
 from pyNastran.utils.atmosphere import (
+    atm_density, _velocity_factor)
+from pyNastran.utils.atmosphere_sweep import (
     make_flfacts_eas_sweep_constant_alt,
     make_flfacts_eas_sweep_constant_mach,
     make_flfacts_alt_sweep_constant_mach,
     make_flfacts_mach_sweep_constant_alt,
     make_flfacts_tas_sweep_constant_alt,
-    make_flfacts_alt_sweep_constant_tas,
-    atm_density, _velocity_factor)
+    make_flfacts_alt_sweep_constant_tas,)
 from pyNastran.bdf.bdf_interface.assign_type import (
     integer, integer_or_blank, double, double_or_blank,
     fields, string_or_blank, double_string_or_blank)
@@ -89,7 +90,7 @@ class Aero(BaseCard):
             return True
         return False
 
-    def set_ground_effect(self, enable: bool) -> bool:  # TODO: verify
+    def set_ground_effect(self, enable: bool) -> None:  # TODO: verify
         if enable:
             self.sym_xy = -1
         else:
@@ -249,7 +250,8 @@ class AERO(Aero):
         sym_xz = data[4]
         sym_xy = data[5]
         assert len(data) == 6, 'data = %s' % data
-        return AERO(acsid, velocity, cref, rho_ref, sym_xz, sym_xy,
+        return AERO(velocity, cref, rho_ref,
+                    acsid=acsid, sym_xz=sym_xz, sym_xy=sym_xy,
                     comment=comment)
 
         # T is the tabular function
@@ -699,11 +701,11 @@ class FLUTTER(BaseCard):
 
     def make_flfacts_eas_sweep_constant_alt(self, model: BDF,
                                             alt: float, eass: list[float],
-                                            minus_eas: float=0.0,
+                                            minus_eas: Optional[list[float]]=None,
                                             alt_units: str='m',
                                             velocity_units: str='m/s',
                                             density_units: str='kg/m^3',
-                                            eas_units: str='m/s') -> None:
+                                            eas_units: str='m/s') -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Makes a sweep across equivalent airspeed for a constant altitude.
 
@@ -725,6 +727,8 @@ class FLUTTER(BaseCard):
             the equivalent airspeed units; ft/s, m/s, in/s, knots
 
         """
+        if minus_eas is None:
+            minus_eas = []
         eass.sort()
         rho, mach, velocity = make_flfacts_eas_sweep_constant_alt(
             alt, eass,
@@ -753,16 +757,22 @@ class FLUTTER(BaseCard):
             eass.min(), eass.max(), eas_units)
         model.add_flfact(flfact_eas, eass, comment=comment)
 
+        nmach = len(mach)
+        alts = np.ones(nmach) * alt
+        return alts, mach, eass
+
     def make_flfacts_alt_sweep_constant_mach(self,
                                              model: BDF,
                                              mach: float, alts: np.ndarray,
                                              eas_limit: float=1000.,
-                                             minus_eas: float=0.0,
+                                             minus_eas: Optional[list[float]]=None,
                                              alt_units: str='m',
                                              velocity_units: str='m/s',
                                              density_units: str='kg/m^3',
-                                             eas_units: str='m/s') -> None:
+                                             eas_units: str='m/s') -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """makes an altitude sweep"""
+        if minus_eas is None:
+            minus_eas = []
         alts.sort()
         alts = alts[::-1]
         rho, mach, velocity = make_flfacts_alt_sweep_constant_mach(
@@ -801,17 +811,20 @@ class FLUTTER(BaseCard):
 
         comment = ' Alt: min=%.3f max=%.3f %s' % (alts2.min(), alts2.max(), alt_units)
         model.add_flfact(flfact_alt, alts2, comment=comment)
+        return alts2, mach, eas
 
     def make_flfacts_alt_sweep_constant_tas(self,
                                             model: BDF,
                                             tas: float, alts: np.ndarray,
                                             eas_limit: float=1000.,
-                                            minus_eas: float=0.0,
+                                            minus_eas: Optional[list[float]]=None,
                                             alt_units: str='m',
                                             velocity_units: str='m/s',
                                             density_units: str='kg/m^3',
-                                            eas_units: str='m/s') -> tuple[Any, Any, Any]:
+                                            eas_units: str='m/s') -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """untested"""
+        if minus_eas is None:
+            minus_eas = []
         alts.sort()
         alts = alts[::-1]
         rho, mach, velocity = make_flfacts_alt_sweep_constant_tas(
@@ -849,17 +862,20 @@ class FLUTTER(BaseCard):
         comment = ' EAS: min=%.3f max=%.3f %s' % (
             eas_in_eas_units.min(), eas_in_eas_units.max(), eas_units)
         model.add_flfact(flfact_eas, eas_in_eas_units, comment=comment)
+        return alts, mach, eas
 
     def make_flfacts_tas_sweep_constant_alt(self,
                                             model: BDF,
                                             alt: float, tass: np.ndarray,
                                             eas_limit: float=1000.,
-                                            minus_eas: float=0.0,
+                                            minus_eas: Optional[list[float]]=None,
                                             alt_units: str='m',
                                             velocity_units: str='m/s',
                                             density_units: str='kg/m^3',
-                                            eas_units: str='m/s') -> tuple[Any, Any, Any]:
+                                            eas_units: str='m/s') -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """makes an altitude sweep (dev...not validated)"""
+        if minus_eas is None:
+            minus_eas = []
         tass.sort()
         rho, mach, velocity = make_flfacts_tas_sweep_constant_alt(
             alt, tass, eas_limit=eas_limit,
@@ -898,16 +914,18 @@ class FLUTTER(BaseCard):
 
         #comment = ' Alt: min=%.3f max=%.3f %s' % (alt, al, alt_units)
         #model.add_flfact(flfact_alt, alts2, comment=comment)
+        alts = np.ones(len(mach)) * alt
+        return alts, mach, eas
 
     def make_flfacts_eas_sweep_constant_mach(self, model: BDF,
                                              mach: float, eass: np.ndarray,
                                              gamma: float=1.4,
-                                             minus_eas: float=0.0,
+                                             minus_eas: Optional[list[float]]=None,
                                              alt_units: str='m',
                                              velocity_units: str='m/s',
                                              density_units: str='kg/m^3',
                                              eas_units: str='m/s',
-                                             pressure_units: str='Pa'):
+                                             pressure_units: str='Pa') -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         eas = tas * sqrt(rho/rho0)
         ainf*Minf = V
@@ -917,6 +935,8 @@ class FLUTTER(BaseCard):
             = sqrt(gamma*R*Tinf) * Minf * sqrt(p_inf/(R*T_inf*rho0))
             = Minf * sqrt(gamma*p_inf/rho0)
         """
+        if minus_eas is None:
+            minus_eas = []
         neas = len(eass)
         #machs = mach * np.ones(neas)
         rho, machs, velocity, alts = make_flfacts_eas_sweep_constant_mach(
@@ -957,15 +977,18 @@ class FLUTTER(BaseCard):
         comment = ' EAS: min=%.3f max=%.3f %s' % (
             eas_in_eas_units.min(), eas_in_eas_units.max(), eas_units)
         model.add_flfact(flfact_eas, eas_in_eas_units, comment=comment)
+        return alts, machs, eas
 
     def make_flfacts_mach_sweep_constant_alt(self, model: BDF, alt, machs,
                                              eas_limit=1000.,
-                                             minus_eas: float=0.0,
+                                             minus_eas: Optional[list[float]]=None,
                                              alt_units='m',
                                              velocity_units='m/s',
                                              density_units='kg/m^3',
-                                             eas_units='m/s'):
+                                             eas_units='m/s') -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """makes a mach sweep"""
+        if minus_eas is None:
+            minus_eas = []
         machs.sort()
         #machs = machs[::-1]
         rho, mach, velocity = make_flfacts_mach_sweep_constant_alt(
@@ -1003,6 +1026,8 @@ class FLUTTER(BaseCard):
         comment = ' EAS: min=%.3f max=%.3f %s' % (
             eas_in_eas_units.min(), eas_in_eas_units.max(), eas_units)
         model.add_flfact(flfact_eas, eas_in_eas_units, comment=comment)
+        alts = np.ones(len(machs)) * alt
+        return alts, machs, eas
 
     @property
     def headers(self):
@@ -1029,8 +1054,8 @@ class FLUTTER(BaseCard):
         omax = data[8]
         epsilon = None
         return FLUTTER(sid, method, density, mach, reduced_freq_velocity,
-                       imethod, nvalue, omax,
-                       epsilon, comment=comment)
+                       imethod=imethod, nvalue=nvalue, omax=omax,
+                       epsilon=epsilon, comment=comment)
 
     def cross_reference(self, model: BDF) -> None:
         """
@@ -1132,33 +1157,109 @@ class FLUTTER(BaseCard):
         return self.comment + print_card_8(card)
 
 
-def gust_function(gust_model: str='von_karman', V: float=1.0):
-    """
+def gust_function(omega: np.ndarray, L: float, V: float,
+                  gust_model: str = 'von_karman') -> np.ndarray:
+    """Normalized gust PSD shape function.
+
+    Returns the dimensionless shape factor S(omega) such that:
+        Phi_g(omega) = sigma_g^2 * (L / (pi*V)) * S(omega)
 
     Parameters
     ----------
-    gust_model
-    V
+    omega : ndarray
+        Circular frequency [rad/s].
+    L : float
+        Turbulence scale length [length units].
+    V : float
+        True airspeed [length/time].
+    gust_model : str
+        'von_karman' or 'dryden'.
 
     Returns
     -------
-
-    Sa(omega) = 2 * wg^2 * (L/V) * gust_function(gust_model, V=V)
-
+    ndarray
+        Dimensionless PSD shape factor at each omega.
     """
+    omega = np.asarray(omega, dtype=float)
     if gust_model == 'von_karman':
-        k = 1.399
-        p = 1/3
+        k = 1.339
+        p = 1.0 / 3.0
     elif gust_model == 'dryden':
         k = 1.0
         p = 0.5
-    else:  # pragma: no cover
+    else:
         raise NotImplementedError(gust_model)
     q = (k * L * omega / V) ** 2
-    num = 1 + 2 * (p + 1) * q
-    denom = 1 + q ** (p + 1.5)
-    out = num / denom
-    return out
+    num = 1.0 + 2.0 * (p + 1.0) * q
+    denom = (1.0 + q) ** (p + 1.5)
+    return num / denom
+
+
+def von_karman_psd(omega: np.ndarray, sigma: float, L: float,
+                   V: float) -> np.ndarray:
+    """Von Karman vertical turbulence power spectral density.
+
+    Phi_g(omega) = sigma^2 * L / (pi*V)
+                   * (1 + (8/3)*(1.339*L*omega/V)^2)
+                   / (1 + (1.339*L*omega/V)^2)^(11/6)
+
+    One-sided PSD (omega >= 0) per MIL-STD-1797 / FAR 25.
+
+    Parameters
+    ----------
+    omega : (N,) ndarray
+        Circular frequency [rad/s].
+    sigma : float
+        RMS gust velocity [length/time].
+    L : float
+        Turbulence scale length [length].
+    V : float
+        True airspeed [length/time].
+
+    Returns
+    -------
+    (N,) ndarray
+        PSD [velocity^2 / (rad/s)].
+    """
+    omega = np.asarray(omega, dtype=float)
+    c = 1.339
+    Omega_bar = c * L * omega / V
+    return (sigma**2 * L / (np.pi * V)
+            * (1.0 + (8.0 / 3.0) * Omega_bar**2)
+            / (1.0 + Omega_bar**2) ** (11.0 / 6.0))
+
+
+def dryden_psd(omega: np.ndarray, sigma: float, L: float,
+               V: float) -> np.ndarray:
+    """Dryden vertical turbulence power spectral density.
+
+    Phi_g(omega) = sigma^2 * L / (pi*V)
+                   * (1 + 3*(L*omega/V)^2)
+                   / (1 + (L*omega/V)^2)^2
+
+    Rational form suitable for state-space coloring filter representation.
+
+    Parameters
+    ----------
+    omega : (N,) ndarray
+        Circular frequency [rad/s].
+    sigma : float
+        RMS gust velocity [length/time].
+    L : float
+        Turbulence scale length [length].
+    V : float
+        True airspeed [length/time].
+
+    Returns
+    -------
+    (N,) ndarray
+        PSD [velocity^2 / (rad/s)].
+    """
+    omega = np.asarray(omega, dtype=float)
+    Omega_bar = L * omega / V
+    return (sigma**2 * L / (np.pi * V)
+            * (1.0 + 3.0 * Omega_bar**2)
+            / (1.0 + Omega_bar**2) ** 2)
 
 
 class GUST(BaseCard):
@@ -1282,6 +1383,18 @@ class GUST(BaseCard):
     def write_card(self, size: int=8, is_double: bool=False) -> str:
         card = self.repr_fields()
         return self.comment + print_card_8(card)
+
+    @staticmethod
+    def get_von_karman_psd(omega: np.ndarray, sigma: float, L: float,
+                           V: float) -> np.ndarray:
+        """Von Karman vertical turbulence PSD. See ``von_karman_psd``."""
+        return von_karman_psd(omega, sigma, L, V)
+
+    @staticmethod
+    def get_dryden_psd(omega: np.ndarray, sigma: float, L: float,
+                       V: float) -> np.ndarray:
+        """Dryden vertical turbulence PSD. See ``dryden_psd``."""
+        return dryden_psd(omega, sigma, L, V)
 
 
 class MKAERO1(BaseCard):

@@ -142,7 +142,7 @@ class OUG:
             # load set number
             op2.lsdvmn = op2.add_data_parameter(data, 'lsdvmn', b'i', 5)
             # real eigenvalue
-            op2.eigr = op2.add_data_parameter(data, 'eigr', b'f', 6, False)
+            op2.eigr = op2.add_data_parameter(data, 'eigr', b'f', 6, ) # TODO: was False
             op2.data_names = op2.apply_data_code_value('data_names', ['lsdvmn', 'eigr'])
         elif op2.analysis_code == 9:  # complex eigenvalues
             # mode number
@@ -610,7 +610,7 @@ class OUG:
         assert op2.data_type == 1, op2.data_type
 
         n = 0
-        ntotal = 16 * self.factor
+        ntotal = 16 * op2.factor
         npanels = ndata // ntotal
         assert ndata % ntotal == 0, f'ndata={ndata} ntotal={ntotal} data_type={op2.data_type}'
         if op2.sort_method == 1:
@@ -656,10 +656,9 @@ class OUG:
         if op2.table_name in [b'OUGMC1', b'OQGMC1']:
             if op2.read_mode == 1:
                 return ndata
-            from struct import Struct
-            ntotal = 16 * self.factor  # 4*4
+            ntotal = 16 * op2.factor  # 4*4
             nnodes = ndata // ntotal
-            fmt = mapfmt(op2._endian + b'i 3f', self.size)
+            fmt = mapfmt(op2._endian + b'i 3f', op2.size)
             struct1 = Struct(fmt)
             for unused_inode in range(nnodes):
                 edata = data[n:n+ntotal]
@@ -1044,6 +1043,14 @@ class OUG:
         is_saved, slot = get_is_slot_saved(op2, result_name)
         if not is_saved:
             return ndata
+
+        if 'eigenvectors' in result_name:
+            if op2.analysis_code == 2 and not op2.flags['eigenvectors_real']:
+                op2.log.warning('returning on eigenvectors_real')
+                return ndata
+            if op2.analysis_code == 9 and not op2.flags['eigenvectors_complex']:
+                op2.log.warning('returning on eigenvectors_complex')
+                return ndata
 
         # NX THERMAL
         # 1: heat transfer

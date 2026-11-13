@@ -5,7 +5,7 @@ import warnings
 from getpass import getuser
 from itertools import count
 from struct import pack
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 import numpy as np
 
 from cpylog import SimpleLogger
@@ -15,7 +15,7 @@ from pyNastran.utils.numpy_utils import integer_types, integer_float_types
 
 from pyNastran.op2.errors import OverwriteTableError
 from pyNastran.op2.op2_interface.op2_codes import Op2Codes, get_sort_method_from_table_name
-from pyNastran.op2.op2_interface.write_utils import write_table_header, export_to_hdf5
+from pyNastran.op2.op2_interface.write_utils import write_table_header
 if TYPE_CHECKING:  # pragma: no cover
     import pandas as pd
 Date = tuple[int, int, int]
@@ -147,6 +147,35 @@ SORT1_TABLES.extend([
 SORT2_TABLES = list(SORT2_TABLE_NAME_MAP.keys())
 
 
+def h5_deepcopy(self, memo):
+    """deepcopy an op2 object without using h5py"""
+    # Create result without calling __init__ to avoid side effects
+    cls = self.__class__
+    result = cls.__new__(cls)
+
+    # Add new object to memo to prevent infinite loops
+    memo[id(self)] = result
+    1
+    # Copy attributes
+    for key, value in self.__dict__.items():
+        #elif key in {'data', 'element', 'element_node', 'node_gridtype'}:
+        #    setattr(result, key, None)
+        #    continue
+
+        class_name = type(value).__name__
+        if class_name == 'Dataset':
+            # un-h5py the array
+            value = value[:]
+        elif class_name == 'File':
+            # skip h5.File
+            continue
+
+        # Safely deepcopy all other attributes
+        #print(key, value, type(value), class_name)
+        setattr(result, key, copy.deepcopy(value, memo))
+    return result
+
+
 class BaseScalarObject(Op2Codes):
     """
     The base scalar class is used by:
@@ -176,6 +205,9 @@ class BaseScalarObject(Op2Codes):
         #self.ntimes = 0
         #self.ntotal = 0
         #assert isinstance(self.name, (str, bytes)), 'name=%s type=%s' % (self.name, type(self.name))
+
+    def __deepcopy__(self, memo: dict[str, Any]):
+        return h5_deepcopy(self, memo)
 
     def object_attributes(self, mode: str='public', keys_to_skip=None,
                           filter_properties: bool=False) -> list[str]:
@@ -236,6 +268,7 @@ class BaseScalarObject(Op2Codes):
 
     def export_to_hdf5(self, group, log: SimpleLogger) -> None:
         """exports the object to HDF5 format"""
+        from pyNastran.op2.op2_interface.write_utils_hdf5 import export_to_hdf5
         export_to_hdf5(self, group, log)
 
     def write_f06(self, f06_file, header=None, page_stamp='PAGE %s',
@@ -614,7 +647,18 @@ class ScalarObject(BaseScalarObject):
     def _write_table_header(self, op2_file, fascii,
                             date: tuple[int, int, int],
                             include_date: bool=True,
-                            subtable_name_default: bytes=b'OUG1    ') -> None:
+                            subtable_name_default: bytes=b'OUG1    '):
+                            #subtable_name_default=None) -> None:
+
+        # subtable_name_default = None
+        # print(f'self.table_name[:4] = {self.table_name[:4]!r}')
+        if subtable_name_default is None and 0:
+            if self.table_name[:4] in {'OUG1', 'OEF1', 'OES1'}: # , 'OSTR1'
+                subtable_name_default = self.table_name[:4].encode('latin1') + b'    '
+            # else:
+            #     raise RuntimeError(self.table_name)
+            #     subtable_name_default: bytes = b'OUG1    '
+
         try:
             subtable_name = self.subtable_name
         except AttributeError:
@@ -724,9 +768,13 @@ def get_sort_element_sizes(self, debug: bool=False) -> tuple[int, int, int]:
             print(f'SORT1 {self.__class__.__name__} ntimes={ntimes} nelements={nelements}')
     elif self.is_sort2:
         # flip this to sort1
+        # SORT2 has 1 table3/table4 pair per element and 1 row per time:
+        #  - ntimes (counter)  = number of elements (records)
+        #  - ntotal (counter)  = number of times (rows per record)
+        # for 1 row per element, ntotal (rows in data) = nelements
         ntimes = self.ntotal
         nelements = self.ntimes
-        ntotal = self.nelements
+        ntotal = nelements
         #nx = ntimes
         #ny = nnodes
         if debug:
@@ -775,6 +823,9 @@ class BaseElement(ScalarObject):
         #self.element_type = None
         ScalarObject.__init__(self, data_code, isubcase, apply_data_code=apply_data_code)
 
+    def __deepcopy__(self, memo: dict[str, Any]):
+        return h5_deepcopy(self, memo)
+
     def _eq_header(self, table):
         ScalarObject._eq_header(self, table)
         is_nan = (self.nonlinear_factor is not None and
@@ -788,6 +839,7 @@ class BaseElement(ScalarObject):
         log = SimpleLogger()
         _check_element(self, table, log)
         _check_element_node(self, table, log)
+
 
 def get_times_dtype(nonlinear_factor: int | float, size: int,
                     analysis_code_fmt=None) -> tuple[str, str, str]:
@@ -977,28 +1029,57 @@ def combination_inplace(data: np.ndarray,
                         datai: np.ndarray,
                         factor: integer_float_types,
                         ires=None) -> None:
-    """does a linear combination; deals with underflow bugs"""
+    """Accumulate a scaled result into data: ``data[..., ires] += datai[..., ires] * factor``.
+
+    Used by solution_combination to build linear combinations of load cases.
+    The typical two-step pattern is:
+        1. combination_inplace(data, None, 0.0, ires)  -- zero the columns to reset for accumulation
+        2. combination_inplace(data, casei.data, factor, ires)  -- accumulate each scaled case
+
+    Parameters
+    ----------
+    data : np.ndarray
+        the output array to modify in place (shape: ntimes x nelements x ncols)
+    datai : np.ndarray or None
+        the input array to add scaled.
+        None is only valid with factor=0.0 (zeros data, step 1 above).
+        None with factor!=0.0 raises RuntimeError.
+    factor : int/float
+        scale factor applied to datai before adding
+    ires : slice, list[int], or None
+        column indices to operate on; None means all columns.
+        Used to skip derived quantities (e.g., safety margins, principal stresses)
+        that should not be linearly combined.
+    """
     assert isinstance(factor, integer_float_types), f'factor={factor} and must be a float'
-    if datai is None:
-        data *= factor
-    elif ires is not None:
-        assert data.ndim == 3, data.shape
-        return combination_inplace(data[:, :, ires], None, factor)
+    if datai is None and factor == 0.0:
+        if ires is not None and data.ndim == 3:
+            data[:, :, ires] *= factor
+        else:
+            data *= factor
+    elif datai is None:
+        raise RuntimeError(f'datai is None with factor={factor}; datai is only allowed to be None when factor=0.0')
     else:
-        try:
-            data += datai * factor
-        except FloatingPointError as error:
-            dtype = data.dtype.name
-            import warnings
-            if dtype in {'float32'}:
-                # underflow
-                # warnings.warn('upcasting to try and prevent error')
-                with np.errstate(under='ignore'):
-                    data32 = (datai.astype('float64') * factor).astype('float32')
-                data += data32
-                # data += datai * factor
-            else:
-                raise RuntimeError(f'Floating point error: dtype={dtype!r} factor={factor}')
+        if ires is not None and data.ndim == 3:
+            try:
+                data[:, :, ires] += datai[:, :, ires] * factor
+            except FloatingPointError:
+                dtype = data.dtype.name
+                if dtype in {'float32'}:
+                    with np.errstate(under='ignore'):
+                        data[:, :, ires] += (datai[:, :, ires].astype('float64') * factor).astype('float32')
+                else:
+                    raise RuntimeError(f'Floating point error: dtype={dtype!r} factor={factor}')
+        else:
+            try:
+                data += datai * factor
+            except FloatingPointError:
+                dtype = data.dtype.name
+                if dtype in {'float32'}:
+                    with np.errstate(under='ignore'):
+                        data += (datai.astype('float64') * factor).astype('float32')
+                else:
+                    raise RuntimeError(f'Floating point error: dtype={dtype!r} factor={factor}')
     return
 
 # def cast_grid_type(grid_type_str: str) -> int:

@@ -28,7 +28,7 @@ class TestReadWriteFiles(unittest.TestCase):
         """
         log = SimpleLogger(level='info', encoding='utf-8')
         bdf_filename = os.path.join(TEST_PATH, 'include_dir2', 'level2', 'file1.bdf')
-        model =read_bdf(bdf_filename, log=log)
+        model = read_bdf(bdf_filename, log=log)
         assert len(model.nodes) == 5, model.nodes
 
     def test_read_include_dir_2_files(self):
@@ -41,7 +41,7 @@ class TestReadWriteFiles(unittest.TestCase):
             bdf_filename, xref=True, punch=False,
             save_file_structure=True, log=log)
 
-        all_lines, ilines = model.include_zip(bdf_filename, encoding=None, make_ilines=True)
+        all_lines, ilines = model.include_zip(bdf_filename, encoding=None)
         #for (ifile, iline), line in zip(ilines, all_lines):
             #print(ifile, iline, line.rstrip())
         #print(ilines)
@@ -110,7 +110,7 @@ class TestReadWriteFiles(unittest.TestCase):
             #print(bdf_filename2)
         #print('out_filenames =', out_filenames)
 
-        all_lines, ilines = model.include_zip(bdf_filename, encoding=None, make_ilines=True)
+        all_lines, ilines = model.include_zip(bdf_filename, encoding=None)
         #for (ifile, iline), line in zip(ilines, all_lines):
             #if iline > 100:
                 #continue
@@ -542,7 +542,7 @@ class TestReadWrite(unittest.TestCase):
         include_dir = ''
         filename = 'model.bdf'
         filename_out = split_filename_into_tokens(include_dir, filename, is_windows=True)
-        filename_out = split_filename_into_tokens(include_dir, filename, is_windows=True, debug=True)
+        filename_out = split_filename_into_tokens(include_dir, filename, is_windows=True, debug=False)
         assert filename_out == PureWindowsPath('model.bdf'), 'filename_out=%r windows' % filename_out
 
         filename_out = split_filename_into_tokens(include_dir, filename, is_windows=False)

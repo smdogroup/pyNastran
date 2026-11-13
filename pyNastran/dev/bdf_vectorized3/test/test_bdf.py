@@ -44,8 +44,12 @@ from pyNastran.bdf.subcase import Subcase
 from pyNastran.bdf.test.compare import compare_card_count
 from pyNastran.bdf.bdf import BDF as BDF_old #, read_bdf as read_bdf_old
 from pyNastran.dev.bdf_vectorized3.bdf import BDF as BDFv, read_bdf as read_bdfv, map_version
+from pyNastran.dev.bdf_vectorized3.cards.elements.shell_coords import (
+    get_shell_element_coordinate_system, get_shell_material_coordinate_system)
+
 from pyNastran.dev.bdf_vectorized3.mesh_utils.convert import convert
 from pyNastran.dev.bdf_vectorized3.mesh_utils.bdf_equivalence import bdf_equivalence_nodes
+
 try:
     import tables
     IS_PYTABLES = True
@@ -282,6 +286,7 @@ def run_bdf(folder: str, bdf_filename: str,
             encoding=None, sum_load: bool=True,
             size: int=8, is_double: bool=False,
             hdf5: bool=False,
+            write_obj: bool=False,
             stop: bool=False, nastran: str='',
             post: int=-1, dynamic_vars=None,
             quiet: bool=False,
@@ -299,6 +304,7 @@ def run_bdf(folder: str, bdf_filename: str,
             nerrors: int=0, dev: bool=False,
             crash_cards=None,
             safe_xref: bool=False, run_pickle: bool=False,
+            is_lax_parser: bool=True,
             version: Optional[str]=None,
             validate_case_control: bool=True,
             stop_on_failure: bool=True,
@@ -385,11 +391,13 @@ def run_bdf(folder: str, bdf_filename: str,
         punch=punch, mesh_form=mesh_form,
         print_stats=print_stats, encoding=encoding,
         sum_load=sum_load, size=size, is_double=is_double,
-        stop=stop, nastran=nastran, post=post, hdf5=hdf5,
+        stop=stop, nastran=nastran, post=post,
+        hdf5=hdf5, write_obj=write_obj,
         dynamic_vars=dynamic_vars,
         quiet=quiet, dumplines=dumplines, dictsort=dictsort,
         nerrors=nerrors, dev=dev, crash_cards=crash_cards,
         safe_xref=safe_xref,
+        is_lax_parser=is_lax_parser,
         version=version,
         limit_mesh_opt=limit_mesh_opt,
 
@@ -429,6 +437,7 @@ def run_and_compare_fems(
         nastran: str='',
         post: int=-1,
         hdf5: bool=False,
+        write_obj: bool=False,
         dynamic_vars=None,
         quiet: bool=False,
         dumplines: bool=False,
@@ -450,6 +459,7 @@ def run_and_compare_fems(
         stop_on_failure: bool=True,
         log: Optional[SimpleLogger]=None,
         name: str='',
+        is_lax_parser: bool=True,
         run_nominal: bool=True):
     """runs two fem models and compares them"""
     if skip_cards is None:
@@ -457,7 +467,6 @@ def run_and_compare_fems(
     assert isinstance(bdf_model, (Path, str)) and os.path.exists(bdf_model), f'{bdf_model!r} doesnt exist\n%s' % print_bad_path(bdf_model)
     fem1 = BDFv(debug=debug, log=log)
     fem1.idtype = 'int64'
-    is_lax_parser = True
     if is_lax_parser:
         fem1.log.warning('using lax card parser')
         fem1.is_strict_card_parser = False
@@ -528,19 +537,21 @@ def run_and_compare_fems(
 
         ierror = 0
         fem1.log.info('running fem2')
-        fem2 = run_fem2(bdf_model, out_model, xref, punch, sum_load, size, is_double, mesh_form,
-                        skip_cards,
-                        safe_xref=safe_xref,
-                        run_geom_check=run_geom_check,
-                        encoding=encoding, debug=debug, quiet=quiet,
-                        ierror=ierror, nerrors=nerrors,
-                        stop_on_failure=stop_on_failure,
-                        validate_case_control=validate_case_control, log=log)
+        fem2 = run_fem2(
+            bdf_model, out_model, xref, punch,
+            sum_load, size, is_double, mesh_form,
+            skip_cards,
+            safe_xref=safe_xref,
+            run_geom_check=run_geom_check,
+            encoding=encoding, debug=debug, quiet=quiet,
+            ierror=ierror, nerrors=nerrors,
+            stop_on_failure=stop_on_failure,
+            validate_case_control=validate_case_control, log=log)
 
         diff_cards = compare(fem1, fem2, xref=xref, check=check,
                              print_stats=print_stats, quiet=quiet)
         check_setup_flag(fem1)
-        test_get_cards_by_card_types(fem2)
+        _test_get_cards_by_card_types(fem2)
 
         #fem2.update_model_by_desvars(xref)
         #except Exception:
@@ -703,7 +714,12 @@ def _get_vectorized_quantity(elements: list[Any],
 def _get_nominal_quantity(elements: list[Any],
                           result_name: str,
                           log: SimpleLogger,
-                          cards_to_skip: Optional[list[str]]=None) -> dict[int, float]:
+                          cards_to_skip: Optional[list[str]]=None,
+                          ) -> dict[int, float]:
+    """
+    gets a generalized function, so:
+     - mass, density, area, volume, etc.
+    """
     if cards_to_skip is None:
         cards_to_skip = []
     eid_to_mass = {}
@@ -711,10 +727,12 @@ def _get_nominal_quantity(elements: list[Any],
     for eid, element in elements.items():
         if element.type in {'CBEND', 'CBEAM3', 'PBEND'}: # 'PBEAM3'
             continue
+
         try:
             mass_func = getattr(element, result_name)
         except AttributeError:
             if element.type not in cards_to_skip:
+                #raise
                 failed_types.add(element.type)
             continue
         mass = mass_func()
@@ -737,14 +755,10 @@ def compare_old_vs_new(fem1: BDFv, fem1_nominal: BDF_old,
         assert isinstance(fem1.pbarl.ndim, np.ndarray), fem1.pbarl.ndim
 
     log = fem1.log
-    nnodes = (
-        fem1.card_count.get('GRID', 0) +
-        fem1.card_count.get('GRIDB', 0) +
-        fem1.card_count.get('GRIDG', 0) +
-        fem1.card_count.get('EGRID', 0) +
-        fem1.card_count.get('SPOINT', 0) +
-        fem1.card_count.get('EPOINT', 0)
-    )
+    nnodes = sum([
+        fem1.card_count.get(card_name, 0) for card_name in
+        ['GRID', 'GRIDB', 'GRIDG', 'EGRID', 'SPOINT', 'EPOINT']
+    ])
     if check_nodes and nnodes > 0:
         xyz_cid0 = fem1.grid.xyz_cid0()
         nids = fem1.grid.node_id
@@ -760,20 +774,25 @@ def compare_old_vs_new(fem1: BDFv, fem1_nominal: BDF_old,
                                    f'xyz_vectorized={xyz_vectorized}\n'
                                    f'diff={xyz_nominal-xyz_vectorized}\n{cp_ref}')
 
-    solid = ['CHEXA', 'CPENTA', 'CTETRA', 'CPYRAM', 'PSOLID', 'PLSOLID']
-    shell = ['CQUAD4', 'CTRIA3', 'CQUAD8', 'CTRIA6', 'PSHELL', 'PCOMP', 'PCOMPG',
-             'PSHEAR', 'CSHEAR',
-             'CQUADX4', 'CQUADX8', 'CQUADX', 'CTRIAX', 'CTRIAX6']
-    bar = ['CBAR',  'PBAR', 'PBARL',
-           'CBEAM', 'PBEAM', 'PBEAML', 'PBCOMP']
-    spring = ['CELAS1', 'CELAS2', 'CELAS3', 'CELAS4', 'PELAS']
+    spring = ['CELAS1', 'CELAS2', 'CELAS3', 'CELAS4', 'PELAS', 'PELAST']
     damper = ['CDAMP1', 'CDAMP2', 'CDAMP3', 'CDAMP4', 'PDAMP']
+    visc = ['CVISC', 'PVISC']
+
     bush = ['CBUSH', 'CBUSH1D', 'CBUSH2D',
             'PBUSH', 'PBUSH1D', 'PBUSH2D']
-    visc = ['CVISC', 'PVISC']
-    thermal = ['CHBDYG', 'CHBDYP', 'CONV', 'PCONV']
     rod = ['CROD', 'PROD', 'CONROD', 'CTUBE', 'PTUBE']
+    bar = ['CBAR',  'PBAR', 'PBARL',
+           'CBEAM', 'PBEAM', 'PBEAML', 'PBCOMP']
+    shell = ['CTRIA3', 'CTRIAR', 'CTRIA6',
+             'CQUAD4', 'CQUAD8', 'CQUADR',
+             'PSHELL', 'PCOMP', 'PCOMPG',
+             'PSHEAR', 'CSHEAR',
+             'CQUADX4', 'CQUADX8', 'CQUADX', 'CTRIAX', 'CTRIAX6']
+    solid = ['CHEXA', 'CPENTA', 'CTETRA', 'CPYRAM', 'PSOLID', 'PLSOLID']
+    thermal = ['CHBDYG', 'CHBDYP', 'CONV', 'PCONV']
     mass = ['CMASS1', 'CMASS2', 'CMASS3', 'CMASS4', 'CONM1', 'CONM2']
+    all = (spring + damper + visc + bush +
+           rod + bar + shell + shell + mass + thermal)
 
     no_length          = spring + damper +       visc              + shell + solid + mass
     no_area            = spring + damper +       visc + bush               + solid + mass
@@ -893,8 +912,6 @@ def compare_old_vs_new(fem1: BDFv, fem1_nominal: BDF_old,
                     raise RuntimeError(msg)
 
     if compare_shell_vectors:
-        from pyNastran.dev.bdf_vectorized3.cards.elements.shell_coords import (
-            get_shell_element_coordinate_system, get_shell_material_coordinate_system)
         element_id, length, centroid, ielem, jelem = get_shell_element_coordinate_system(fem1)
         element_id, length, centroid, imat, jmat = get_shell_material_coordinate_system(fem1)
 
@@ -1098,15 +1115,15 @@ def run_nastran(bdf_model: str, nastran: str, post: int=-1,
     #bdf.idtype = 'int64'
     #bdf.read_bdf(bdf_model)
     #bdf = read_bdfv(bdf_model, debug=False)
-    if 'POST' in bdf.params:
-        param_post = bdf.params['POST']
+    if 'POST' in bdf_model.params:
+        param_post = bdf_model.params['POST']
         #print('post = %s' % post)
         param_post.update_values(value1=post)
         #print('post = %s' % post)
     else:
         card = ['PARAM', 'POST', post]
-        bdf.add_card(card, 'PARAM', is_list=True)
-    bdf.write_bdf(bdf_model2, size=size, is_double=is_double)
+        bdf_model.add_card(card, 'PARAM', is_list=True)
+    bdf_model.write_bdf(bdf_model2, size=size, is_double=is_double)
 
     #os.rename(outModel, outModel2)
     if not os.path.exists(f06_model):
@@ -1197,11 +1214,13 @@ def run_fem1(fem1: BDFs, bdf_model: str, out_model: str,
                 return None
             fem1.read_h5(bdf_model)
         elif '.pch' in bdf_model:
-            fem1.read_bdf(bdf_model, xref=False, punch=True, encoding=encoding,
-                          save_file_structure=save_file_structure)
+            fem1.read_bdf(
+                bdf_model, xref=False, punch=True, encoding=encoding,
+                save_file_structure=save_file_structure)
         else:
-            fem1.read_bdf(bdf_model, xref=False, punch=punch, encoding=encoding,
-                          save_file_structure=save_file_structure)
+            fem1.read_bdf(
+                bdf_model, xref=False, punch=punch, encoding=encoding,
+                save_file_structure=save_file_structure)
             for card in crash_cards:
                 if card in fem1.card_count:
                     raise DisabledCardError(f'card={card!r} has been disabled')
@@ -1436,13 +1455,15 @@ def _fem_xref_methods_check(fem1: BDFv) -> None:
                    consider_1d=True, consider_2d=True, consider_3d=True)
     get_dependent_nid_to_components(fem1)
 
-    fem1.get_pid_to_node_ids_and_elements_array(pids=None, etypes=None, idtype='int32',
-                                                msg=' which is required by test_bdf')
+    fem1.get_pid_to_node_ids_and_elements_array(
+        pids=None, etypes=None, idtype='int32',
+        msg=' which is required by test_bdf')
     fem1.get_property_id_to_element_ids_map(msg=' which is required by test_bdf')
     fem1.get_material_id_to_property_ids_map(msg=' which is required by test_bdf')
     fem1.get_element_ids_list_with_pids(pids=None)
-    fem1.get_element_ids_dict_with_pids(pids=None, stop_if_no_eids=False,
-                                        msg=' which is required by test_bdf')
+    fem1.get_element_ids_dict_with_pids(
+        pids=None, stop_if_no_eids=False,
+        msg=' which is required by test_bdf')
     fem1.get_node_id_to_element_ids_map()
     fem1.get_node_id_to_elements_map()
 
@@ -1940,6 +1961,20 @@ def check_case(sol: int,
         _assert_has_spc(subcase, fem2)
         ierror = check_for_optional_param(('LOAD', 'TEMPERATURE(LOAD)', 'METHOD'), subcase, msg,
                                           RuntimeError, log, ierror, nerrors)
+    elif sol is None and fem2.is_zaero:
+        zaero = fem2.zaero
+        if 'FLUTTER' in subcase:
+            flutter_id = subcase.get_parameter('FLUTTER')[0]
+            fem2.flutters[flutter_id]
+        if 'ASE' in subcase:
+            ase_id = subcase.get_parameter('ASE')[0]
+            zaero.ase[ase_id]
+        if 'MLOADS' in subcase:
+            mloads_id = subcase.get_parameter('MLOADS')[0]
+            zaero.mloads[mloads_id]
+        if 'GLOADS' in subcase:
+            gloads_id = subcase.get_parameter('GLOADS')[0]
+            zaero.mloads[gloads_id]
     else:
         msg = f'SOL = {sol!r}\n'
         msg += str(subcase)
@@ -2405,9 +2440,10 @@ def _check_case_parameters(subcase: Subcase,
         get_mpc_node_ids_c1(fem, mpc_id, consider_mpcadd=True, stop_on_failure=False)
         get_mpc_node_ids(fem, mpc_id, consider_mpcadd=True, stop_on_failure=False)
 
-    if 'NSM' in subcase and 0:
+    if 'NSM' in subcase:
         nsm_id = subcase.get_parameter('NSM')[0]
-        fem.get_reduced_nsms(nsm_id, stop_on_failure=False)
+        reduced_nsms = fem.get_reduced_nsms(nsm_id, stop_on_failure=False)
+        fem.mass_properties()
 
     if 'SDAMPING' in subcase:
         sdamping_id = subcase.get_int_parameter('SDAMPING')
@@ -2572,7 +2608,7 @@ def _check_case_parameters_aero(subcase: Subcase, fem: BDFs, sol: int,
     return ierror
 
 
-def test_get_cards_by_card_types(model: BDFs) -> None:
+def _test_get_cards_by_card_types(model: BDFs) -> None:
     """Verifies the ``model.get_cards_by_card_types`` method works"""
     # setup to remove hackish cards
     card_types = list(model.card_count.keys())
@@ -2699,7 +2735,9 @@ def check_mass(fem1: BDFs, quiet: bool=False):
 
 def compare(fem1: BDFs, fem2: BDFs, xref=True, check=True, print_stats=True, quiet=False):
     """compares two fem objects"""
-    diff_cards = compare_card_count(fem1, fem2, print_stats=print_stats, quiet=quiet)
+    diff_cards = compare_card_count(
+        fem1, fem2, skip_cards=[],
+        print_stats=print_stats, quiet=quiet)
     return
     if xref and check:
         get_element_stats(fem1, fem2, quiet=quiet)
@@ -2802,6 +2840,8 @@ def test_bdf_argparse(argv=None):
                                help='skip nodal equivalencing (default=False)')
     parent_parser.add_argument('--ifile', action='store_true',
                                help='skip loads calcuations (default=False)')
+    parent_parser.add_argument('--obj', action='store_true',
+                               help='writes an obj file (default=False)')
 
     parent_parser.add_argument('-q', '--quiet', action='store_true',
                                help='prints debug messages (default=False)')
@@ -2824,6 +2864,8 @@ def test_bdf_argparse(argv=None):
                                help='Pickles the data objects (default=False)\n')
     parent_parser.add_argument('--hdf5', action='store_true',
                                help='Save/load the BDF in HDF5 format')
+    parent_parser.add_argument('--lax', action='store_true',
+                               help='Dont use the strict card parser')
 
     usage, args, examples = get_test_bdf_usage_args_examples(encoding)
 
@@ -2906,7 +2948,7 @@ def get_test_bdf_usage_args_examples(encoding):
         '\n  [options] = [-e E] [--encoding ENCODE] [-q] [--dumplines] [--dictsort]\n'
         f'              [--crash C] [--pickle] [--profile] [--hdf5] [{formats}]\n'
         '              [--skip_nominal] [--skip_loads] [--skip_mass] [--skip_equivalence]\n'
-        '              [--lax] [--duplicate] [skip_cards CARDS]\n'
+        '              [--lax] [--duplicate] [--obj] [skip_cards CARDS]\n'
     )
     usage = (
         "Usage:\n"
@@ -2939,13 +2981,13 @@ def get_test_bdf_usage_args_examples(encoding):
         '  -l, --large    writes the BDF in large field, single precision format (default=False)\n'
         '  -d, --double   writes the BDF in large field, double precision format (default=False)\n'
         '  -L, --loads    Disables forces/moments summation for the different subcases (default=True)\n'
-        '  --skip_nominal  skip all the nominal model comparison checks (default=False)\n'
+        '  --skip_nominal       skip all the nominal model comparison checks (default=False)\n'
         '  --skip_nominal_bar  skip the nominal model bar comparison (default=False)\n'
-        '  --skip_loads   skip the loads summation calculations (default=False)\n'
-        '  --skip_mass    skip the mass properties calculations (default=False)\n'
+        '  --skip_loads        skip the loads summation calculations (default=False)\n'
+        '  --skip_mass         skip the mass properties calculations (default=False)\n'
+        '  --skip_equivalence  skips the nodal equivalencing (default=False)\n'
         '  --lax          dont be strict on float parsing\n'
         '  --duplicate    overwrite duplicate GRIDs\n'
-        '  --skip_equivalence  skips the nodal equivalencing (default=False)\n'
         '  -e E, --nerrors E  Allow for cross-reference errors (default=100)\n'
         f'  --encoding ENCODE  the encoding method (default=None -> {encoding!r})\n'
         '  -q, --quiet        prints debug messages (default=False)\n'
@@ -2962,6 +3004,8 @@ def get_test_bdf_usage_args_examples(encoding):
         '  --profile     Profiles the code (default=False)\n'
         '  --pickle      Pickles the data objects (default=False)\n'
         '  --hdf5        Save/load the BDF in HDF5 format\n'
+        '  --lax         Dont be picky about card formatting\n'
+        '  --obj          writes an obj file (default=False)\n'
         '  --msc         Assume MSC Nastran\n'
         '  --nx          Assume NX Nastran\n'
         #'  --optistruct  Assume OptiStruct\n'
@@ -3050,6 +3094,8 @@ def main(argv=None, show_args: bool=True) -> None:
             run_pickle=data['pickle'],
             safe_xref=data['safe'],
             hdf5=data['hdf5'],
+            write_obj=data['obj'],
+            is_lax_parser=data['lax'],
             version=data['version'],
             print_stats=True,
             stop_on_failure=False,
@@ -3086,6 +3132,7 @@ def main(argv=None, show_args: bool=True) -> None:
             is_double=is_double,
             sum_load=data['loads'],
             stop=data['stop'],
+            is_lax_parser=data['lax'],
             quiet=data['quiet'],
             dumplines=data['dumplines'],
             dictsort=data['dictsort'],
@@ -3101,6 +3148,7 @@ def main(argv=None, show_args: bool=True) -> None:
             run_pickle=data['pickle'],
             safe_xref=data['safe'],
             hdf5=data['hdf5'],
+            write_obj=data['obj'],
             version=data['version'],
             print_stats=True,
             stop_on_failure=False,

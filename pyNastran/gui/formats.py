@@ -1,7 +1,10 @@
 """import various codes with backup for failed imports"""
-CLASS_MAP = {}
 from pyNastran import DEV
+CLASS_MAP = {
+    'nastran_aero': None,
+}
 
+CLASS_MAP['nastran_aero'] = None
 try:
     from pyNastran.converters.dev.avus.avus_io import AvusIO
     CLASS_MAP['avus'] = AvusIO
@@ -125,8 +128,6 @@ except ModuleNotFoundError:  # pragma: no cover
 
 try:
     import tables
-
-
     IS_TABLES = True
 except ModuleNotFoundError:
     IS_TABLES = False
@@ -141,6 +142,12 @@ if IS_TABLES:
 try:
     from pyNastran.converters.fluent.fluent_io import FluentIO
     CLASS_MAP['fluent'] = FluentIO
+except ModuleNotFoundError:  # pragma: no cover
+    pass
+
+try:
+    from pyNastran.converters.vtk.vtk_io import VtkIO
+    CLASS_MAP['vtk'] = VtkIO
 except ModuleNotFoundError:  # pragma: no cover
     pass
 

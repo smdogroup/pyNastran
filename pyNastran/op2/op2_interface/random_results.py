@@ -1,10 +1,7 @@
 from typing import Any
 import numpy as np
-import scipy  # prevents confusing import error
-try:
-    from scipy.integrate import trapezoid
-except ImportError:  # pragma: no cover
-    from scipy.integrate import trapz as trapezoid
+from pyNastran.utils.mathematics import trapezoid
+
 
 class RandomObjects:
     prefix = ''
@@ -474,13 +471,25 @@ class RASCONS:
 class RAQCONS:
     """
     storage class for the RAQCONS objects
-    Constraint mode MPC force table
+    Constraint mode ply strain table
     """
     def __init__(self):
-        self.mpc_forces = {}
+        self.cquad4_composite_strain = {}
+        self.cquad8_composite_strain = {}
+        self.cquadr_composite_strain = {}
+        self.ctria3_composite_strain = {}
+        self.ctria6_composite_strain = {}
+        self.ctriar_composite_strain = {}
 
     def get_table_types(self):
-        tables = ['mpc_forces', ]
+        tables = [
+            'cquad4_composite_strain',
+            'cquad8_composite_strain',
+            'cquadr_composite_strain',
+            'ctria3_composite_strain',
+            'ctria6_composite_strain',
+            'ctriar_composite_strain',
+        ]
         return ['RAQCONS.' + table for table in tables]
 
 class RARCONS:
@@ -569,6 +578,7 @@ class RAGCONS:
     """storage class for the RAGCONS objects"""
     def __init__(self):
         self.grid_point_forces = {}
+
     def get_table_types(self):
         tables = [
             'grid_point_forces',
@@ -690,12 +700,25 @@ class RAREATC:
         return ['RAREATC.' + table for table in tables]
 
 class RAQEATC:
-    """storage class for the RAQEATC objects"""
+    """storage class for the RAQEATC objects
+    Attachment mode ply strain table
+    """
     def __init__(self):
-        self.mpc_forces = {}
+        self.cquad4_composite_strain = {}
+        self.cquad8_composite_strain = {}
+        self.cquadr_composite_strain = {}
+        self.ctria3_composite_strain = {}
+        self.ctria6_composite_strain = {}
+        self.ctriar_composite_strain = {}
+
     def get_table_types(self):
         tables = [
-            'mpc_forces',
+            'cquad4_composite_strain',
+            'cquad8_composite_strain',
+            'cquadr_composite_strain',
+            'ctria3_composite_strain',
+            'ctria6_composite_strain',
+            'ctriar_composite_strain',
         ]
         return ['RAQEATC.' + table for table in tables]
 

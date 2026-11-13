@@ -1,3 +1,4 @@
+import copy
 import numpy as np
 
 from pyNastran.utils.numpy_utils import integer_types
@@ -6,7 +7,8 @@ from pyNastran.op2.result_objects.utils_pandas import build_dataframe_transient_
 from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import (
     StressObject, StrainObject, OES_Object,
     oes_complex_data_code, get_scode,
-    set_element_case, set_freq_case, set_complex_modes_case)
+    set_element_case, set_freq_case, set_complex_modes_case,
+    slice_eids_by_index)
 from pyNastran.f06.f06_formatting import write_imag_floats_13e
 
 
@@ -30,6 +32,15 @@ class ComplexShearArray(OES_Object):
             pass
         else:
             raise NotImplementedError('SORT2')
+
+    def slice_by_element_id(self, eids: np.ndarray,
+                            assume_exists: bool=False, inplace: bool=False):
+        eids, ieid, neid2 = slice_eids_by_index(self.element, eids, assume_exists)
+        obj = self if inplace else copy.deepcopy(self)
+        obj.element = obj.element[ieid]
+        obj.data = obj.data[:, ieid, :]
+        obj.nelements = neid2
+        return obj
 
     @property
     def is_real(self) -> bool:
@@ -321,6 +332,71 @@ class ComplexShearArray(OES_Object):
         else:
             raise NotImplementedError('ComplexShearArray-sort2')
         return page_num - 1
+
+    def write_op2(self, op2_file, op2_ascii, itable, new_result, date,
+                  is_mag_phase=False, endian: bytes=b'>'):
+        """
+        writes an OP2
+
+        record = [eid_device, max_shear_r, max_shear_i, avg_shear_r, avg_shear_i]
+        (interleaved; see oes_cshear_complex_5)
+        """
+        import inspect
+        from struct import Struct
+        from pyNastran.op2.op2_interface.write_utils import view_idtype_as_fdtype
+        from pyNastran.op2.writer.utils import fdtype_from_data
+        frame = inspect.currentframe()
+        call_frame = inspect.getouterframes(frame, 2)
+        op2_ascii.write(f'{self.__class__.__name__}.write_op2: {call_frame[1][3]}\n')
+        if not self.is_sort1:  # pragma: no cover
+            raise NotImplementedError('SORT2')
+
+        if itable == -1:
+            self._write_table_header(op2_file, op2_ascii, date)
+            itable = -3
+
+        nelements = self.data.shape[1]
+        ntotali = self.num_wide
+        assert ntotali == 5, ntotali
+        ntotal = ntotali * nelements
+        op2_ascii.write(f'  ntimes = {self.ntimes}\n')
+        op2_ascii.write(f'nelements={nelements:d}\n')
+
+        eids_device = self.element * 10 + self.device_code
+        fdtype = fdtype_from_data(self.data.real, self.size)
+        eid_device_floats = view_idtype_as_fdtype(eids_device, fdtype)
+
+        struct_13i = Struct(endian + b'13i')
+        struct_i = Struct(endian + b'i')
+        for itime in range(self.ntimes):
+            self._write_table_3(op2_file, op2_ascii, new_result, itable, itime)
+
+            # record 4
+            itable -= 1
+            header = [4, itable, 4,
+                      4, 1, 4,
+                      4, 0, 4,
+                      4, ntotal, 4,
+                      4 * ntotal]
+            op2_file.write(struct_13i.pack(*header))
+            op2_ascii.write('r4 [4, 0, 4]\n')
+            op2_ascii.write(f'r4 [4, {itable:d}, 4]\n')
+            op2_ascii.write(f'r4 [4, {4 * ntotal:d}, 4]\n')
+
+            max_shear = self.data[itime, :, 0]
+            avg_shear = self.data[itime, :, 1]
+            datai = np.column_stack([
+                eid_device_floats,
+                max_shear.real, max_shear.imag,
+                avg_shear.real, avg_shear.imag]).astype(fdtype, copy=False)
+            assert ntotal == datai.size
+            op2_file.write(np.ascontiguousarray(datai).tobytes())
+
+            itable -= 1
+            op2_file.write(struct_i.pack(4 * ntotal))
+            op2_ascii.write('footer = %s\n' % [4 * ntotal])
+            new_result = False
+        return itable
 
     @property
     def headers(self) -> list[str]:

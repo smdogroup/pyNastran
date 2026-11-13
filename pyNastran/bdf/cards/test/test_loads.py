@@ -256,6 +256,17 @@ class TestLoads(unittest.TestCase):
         assert np.array_equal(moments1, moments2)
         save_load_deck(model)
 
+    def test_pload2(self):
+        """tests a PLOAD4"""
+        log = SimpleLogger(level='debug')
+        model = BDF(log=log)
+        sid = 1
+        pressure = 2.
+        eids = 3
+        pload2 = model.add_pload2(sid, pressure, eids)
+        assert 'THRU' not in str(pload2), str(pload2)
+        # print(pload2)
+
     def test_pload4_01(self):
         """tests a PLOAD4"""
         lines = ['PLOAD4  1000    1       -60.    -60.    60.             1']
@@ -506,7 +517,7 @@ class TestLoads(unittest.TestCase):
             #self.assertEqual(moments1[0], fm[3], 'm=%s mexpected=%s' % (moments1, fm[3:]))
             #self.assertEqual(moments1[1], fm[4], 'm=%s mexpected=%s' % (moments1, fm[3:]))
             #self.assertEqual(moments1[2], fm[5], 'm=%s mexpected=%s' % (moments1, fm[3:]))
-        save_load_deck(model, run_loads=False)
+        save_load_deck(model, run_loads=False, punch=False)
 
     def test_pload4_ctria3(self):
         """tests a PLOAD4 with a CTRIA3"""

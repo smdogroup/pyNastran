@@ -23,6 +23,7 @@ from pyNastran.bdf.bdf_interface.assign_type import (
 from pyNastran.bdf.cards.thermal.thermal import ThermalBC
 if TYPE_CHECKING:  # pragma: no cover
     from pyNastran.bdf.bdf import BDF
+    from pyNastran.bdf.bdf_interface.bdf_card import BDFCard
 
 
 class RADM(ThermalBC):
@@ -40,7 +41,8 @@ class RADM(ThermalBC):
         emissivity = 1.0
         return RADM(radmid, absorb, emissivity, comment='')
 
-    def __init__(self, radmid, absorb, emissivity, comment=''):
+    def __init__(self, radmid: int, absorb: float, emissivity: list[float],
+                 comment: str=''):
         ThermalBC.__init__(self)
         if comment:
             self.comment = comment
@@ -119,7 +121,7 @@ class RADM(ThermalBC):
         The writer method used by BDF.write_card()
 
         Parameters
-        -----------
+        ----------
         size : int; default=8
             the size of the card (8/16)
 
@@ -240,7 +242,7 @@ class RADBC(ThermalBC):
         The writer method used by BDF.write_card()
 
         Parameters
-        -----------
+        ----------
         size : int; default=8
             the size of the card (8/16)
 
@@ -353,7 +355,7 @@ class VIEW(BaseCard):
         The writer method used by BDF.write_card()
 
         Parameters
-        -----------
+        ----------
         size : int; default=8
             the size of the card (8/16)
 
@@ -481,7 +483,7 @@ class VIEW3D(BaseCard):
         The writer method used by BDF.write_card()
 
         Parameters
-        -----------
+        ----------
         size : int; default=8
             the size of the card (8/16)
 
@@ -602,7 +604,7 @@ class RADCAV(ThermalBC):
         The writer method used by BDF.write_card()
 
         Parameters
-        -----------
+        ----------
         size : int; default=8
             the size of the card (8/16)
 
@@ -681,7 +683,7 @@ class RADLST(ThermalBC):
         The writer method used by BDF.write_card()
 
         Parameters
-        -----------
+        ----------
         size : int; default=8
             the size of the card (8/16)
 
@@ -763,7 +765,7 @@ class RADMTX(ThermalBC):
         The writer method used by BDF.write_card()
 
         Parameters
-        -----------
+        ----------
         size : int; default=8
             the size of the card (8/16)
 

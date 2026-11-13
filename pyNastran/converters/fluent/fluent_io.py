@@ -6,14 +6,14 @@ import numpy as np
 import vtkmodules
 from pyNastran.gui.vtk_interface import vtkTriangle, vtkQuad
 
-from pyNastran.utils.convert import convert_pressure
-from pyNastran.converters.fluent.fluent import read_fluent, Fluent
+from pyNastran.utils.convert import convert_pressure, convert_length
+from pyNastran.converters.fluent.fluent import read_fluent, Fluent, compute_cp_force_moment_coefficients
 from pyNastran.gui.gui_objects.gui_result import GuiResult, NormalResult
 from pyNastran.gui.utils.vtk.vtk_utils import (
     create_vtk_cells_of_constant_element_types, numpy_to_vtk_points)
 from pyNastran.gui.utils.vtk.vectorized_geometry import (
     create_offset_arrays, build_vtk_geometry)
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # pragma: no cover
     from pyNastran.gui.main_window import MainWindow
     from vtk import vtkUnstructuredGrid
     from pyNastran.gui.gui_objects.settings import (
@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 class FluentIO:
     def __init__(self, gui: MainWindow):
         self.gui = gui
+        # (cf_total, cm_total, region_dict) from the last Cp integration
+        self.force_moment_coefficients = None
 
     def get_fluent_wildcard_geometry_results_functions(self):
         data = ('Fluent',
@@ -41,6 +43,8 @@ class FluentIO:
 
         log = gui.log
         other_settings: OtherSettings = gui.settings.other_settings
+        self.force_moment_coefficients = None
+        # ------------------------------------------------------
 
         if isinstance(fld_filename, Fluent):
             model = fld_filename
@@ -112,7 +116,14 @@ class FluentIO:
             node_id = node_id[inode_used]
             nodes = nodes[inode_used, :]
 
-        titles_list = titles #.tolist()
+        # titles includes the element id column; results does not:
+        #   titles      = ['ShellID', 'Pressure', 'Pressure Coefficient', ...]
+        #   titles_list = [           'Pressure', 'Pressure Coefficient', ...]
+        #   results     = [            Pressure,   Pressure Coefficient,  ...]
+        # so titles_list.index(name) is the results column.
+        # titles may be a numpy array (from read_daten), so make a list for .index()
+        titles_list = list(titles[1:])
+        assert len(titles_list) == results.shape[1], (titles_list, results.shape)
         nelement = len(result_element_id)
         assert len(result_element_id) == len(region), f'neids={len(result_element_id)} nregion={len(region)}'
 
@@ -121,29 +132,24 @@ class FluentIO:
         units_pressure_in = other_settings.units_model_in[-1]
         units_pressure_out = other_settings.units_pressure
 
-        if units_pressure_in != '' and 'Pressure' in titles_list:
+        if units_pressure_in not in {'', 'unitless'} and 'Pressure' in titles_list:
             ipressure = titles_list.index('Pressure')
             results[:, ipressure] = convert_pressure(
                 results[:, ipressure],
                 units_pressure_in, units_pressure_out)
 
         if 'Pressure Coefficient' in titles_list:
-            ipressure = -1  # titles_list.index('Pressure Coefficient')
-            cp = results[:, ipressure]
-            sref = 1.0
-            lref = 1.0
-            cfs = (cp*area/sref)[:, np.newaxis] * normal
-            cml = np.cross(centroid, cfs) / lref
-
-            gui.log_info(f'Sref={sref}; lref={lref} xyz_ref=[0.,0.,0.]')
-            gui.log_info(f'total: CFxyz={cfs.sum(axis=0)} CMxyz={cml.sum(axis=0)}')
-            for regioni in np.unique(region):
-                iregion = np.where(region == regioni)[0]
-                cf_xyz = cfs[iregion, :].sum(axis=0)
-                cm_xyz = cml[iregion, :].sum(axis=0)
-                assert len(cf_xyz) == 3, cxyz
-                assert len(cm_xyz) == 3, cxyz
-                gui.log_info(f'  region {regioni}: CFxyz={cf_xyz} CMxyz={cm_xyz}')
+            icp = titles_list.index('Pressure Coefficient')
+            cp = results[:, icp]
+            self.force_moment_coefficients = compute_cp_force_moment_coefficients(
+                cp, area, centroid, normal, region,
+                sref=other_settings.sref,
+                cref=other_settings.cref,
+                bref=other_settings.bref,
+                xyz_ref=other_settings.xyz_ref,
+                units_length_in=other_settings.units_model_in[0],
+                units_length_out=other_settings.units_length,
+                log_info=gui.log_info)
 
         nnodes = len(nodes)
         gui.nnodes = nnodes
@@ -155,7 +161,7 @@ class FluentIO:
 
         points = numpy_to_vtk_points(nodes)
         ugrid.SetPoints(points)
-        log.info(f'created vtk points')
+        log.info('created vtk points')
 
         xmax, ymax, zmax = nodes.max(axis=0)
         xmin, ymin, zmin = nodes.min(axis=0)
@@ -165,7 +171,7 @@ class FluentIO:
         dim_max = max(xmax-xmin, ymax-ymin, zmax-zmin)
 
         _create_elements(ugrid, node_id, tris, quads)
-        log.info(f'created vtk elements')
+        log.info('created vtk elements')
 
         gui.nid_map = {}
         gui.create_global_axes(dim_max)
@@ -183,7 +189,7 @@ class FluentIO:
         gui.isubcase_name_map[idi] = ('Fluent', '')
         form, cases = _fill_fluent_case(
             cases, idi, node_id, result_element_id,
-            region, results, titles_list, normal,
+            region, results, titles, normal,
             nnodes_array)
 
         gui.node_ids = node_id
@@ -247,17 +253,7 @@ def _create_elements(ugrid: vtkUnstructuredGrid,
         cell_type_list.append(cell_typei)
         cell_offset_list.append(cell_offseti)
 
-    if 0:  # pragma: no cover
-        nelement_total = nquad + ntri
-        n_nodes = np.hstack(n_nodes_list)
-        cell_type = np.hstack(cell_type_list)
-        cell_offset = np.hstack(cell_offset_list)
-        build_vtk_geometry(
-            nelement_total, ugrid,
-            n_nodes, cell_type, cell_offset)
-    else:
-        create_vtk_cells_of_constant_element_types(ugrid, elements_list, etypes)
-
+    create_vtk_cells_of_constant_element_types(ugrid, elements_list, etypes)
     return
 
 

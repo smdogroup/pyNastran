@@ -11,7 +11,7 @@ import numpy as np
 from numpy.testing import assert_equal, assert_array_equal
 
 import pyNastran
-from pyNastran.femutils.io import loadtxt_nice, savetxt_nice
+from pyNastran.femutils.io import loadtxt_nice
 from pyNastran.femutils.matrix3d import (
     dot_33_n33, dot_n33_33, dot_n33_n33,
     transpose3d,
@@ -446,7 +446,7 @@ class TestFemIO(unittest.TestCase):
         im = np.e
         a[:] = re - 1.0j * im
         c = BytesIO()
-        savetxt_nice(c, a, fmt='%.3e')
+        np.savetxt(c, a, fmt='%.3e')
         c.seek(0)
         lines = c.readlines()
         assert_equal(
@@ -492,8 +492,8 @@ class TestFemIO(unittest.TestCase):
         """tests that we can reimplement savetxt so it works on unicode for unicode file handlers"""
         A = np.eye(10)
         csv_filename = 'savetxt_real.csv'
-        savetxt_nice(csv_filename, A, fmt='%.18e', delimiter=',', newline='\n',
-                     header='', footer='', comments='# ')
+        np.savetxt(csv_filename, A, fmt='%.18e', delimiter=',', newline='\n',
+                   header='', footer='', comments='# ')
 
         with self.assertRaises(ValueError):
             loadtxt_nice(csv_filename, delimiter=' ', skiprows=0, comments='#',
@@ -508,8 +508,8 @@ class TestFemIO(unittest.TestCase):
 
         csv_filename = 'savetxt_complex.csv'
         B = np.eye(10, dtype='complex128') - 2 * A*1j
-        savetxt_nice(csv_filename, B, fmt='%.18e', delimiter=',', newline='\n',
-                     header='', footer='', comments='# ')
+        np.savetxt(csv_filename, B, fmt='%.18e', delimiter=',', newline='\n',
+                   header='', footer='', comments='# ')
         with self.assertRaises(ValueError):  ## TODO: mistake
             unused_B2 = loadtxt_nice(csv_filename, delimiter=',', skiprows=0, comments='#',
                                      dtype=np.float64, converters=None,

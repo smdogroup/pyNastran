@@ -413,11 +413,13 @@ class GetCard(GetMethods):
             if isinstance(ids, bool):
                 continue
 
+            #self.log.level = 'debug'
+            #self.log.warning(f'ids={ids}')
             for idi in ids:
                 try:
                     card = slot[idi]
                 except KeyError:
-                    print(slot)
+                    self.log.warning(str(slot, idi))
                     msg = 'key=%r id=%r cannot be found\n' % (key, idi)
                     msg += 'id=%s not found.  Allowed=%s' % (
                         key, np.unique(ids))
@@ -1340,15 +1342,19 @@ class GetCard(GetMethods):
         #}
         elements_without_properties = {
             'CONROD', 'CELAS2', 'CELAS4', 'CDAMP2', 'CDAMP4',
-            'CHBDYG', 'GENEL'}
+            'CHBDYG', 'GENEL',
+            # --no_similar_eid
+            'CONM1', 'CONM2', # CMASS2/4?
+            'RBAR', 'RBE2', 'RBE3',  # 'RBE1',
+        }
 
         log = self.log
         for eid, element in self.elements.items():
+            if element.type in elements_without_properties:
+                continue
             try:
                 pid = element.Pid()
             except AttributeError:
-                if element.type in elements_without_properties:
-                    continue
                 print(element)
                 raise
             if pid in pids:

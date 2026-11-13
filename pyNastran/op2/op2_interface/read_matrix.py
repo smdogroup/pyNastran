@@ -3,7 +3,8 @@ from struct import unpack
 from typing import TYPE_CHECKING
 
 import numpy as np
-import scipy  # type: ignore
+#import scipy  # type: ignore
+from pyNastran.utils.scipy_sparse_utils import coo_matrix
 
 #from pyNastran.utils.numpy_utils import integer_types
 
@@ -17,7 +18,7 @@ from pyNastran.op2.op2_interface.utils import (
 )
 
 
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # pragma: no cover
     from cpylog import SimpleLogger
     from pyNastran.op2.op2_interface.op2_reader import OP2Reader
     from pyNastran.op2.op2 import OP2
@@ -29,6 +30,9 @@ DENSE_MATRICES = [
 
     b'EFMASSS', b'EFMFACS', b'EFMFSMS',
     b'MEFMASS', b'MEFWTS', b'MPFACS', b'RBMASSS',
+
+    b'QHJL', b'QHJA', b'QHJ',
+    b'QHHL', b'QHHA',
 ]
 def read_matrix_mat(op2_reader: OP2Reader) -> None:
     """
@@ -407,7 +411,7 @@ def _cast_matrix_mat(GCi: np.ndarray, GCj: np.ndarray,
         elif tout in {1, 2}:
             # real
             real_array = np.array(reals, dtype=dtype)
-            matrix = scipy.sparse.coo_matrix(
+            matrix = coo_matrix(
                 (real_array, (GCi, GCj)),
                 shape=(mrows, ncols), dtype=dtype)
             #log.info(f'created {op2_reader.table_name} (real)')
@@ -421,7 +425,7 @@ def _cast_matrix_mat(GCi: np.ndarray, GCj: np.ndarray,
                 #op2_reader.binary_debug.write('reals = %s' % real_complex[:, 0])
                 #op2_reader.binary_debug.write('imags = %s' % real_complex[:, 1])
                 #op2_reader.binary_debug.write('real_imag = %s' % real_imag)
-            matrix = scipy.sparse.coo_matrix(
+            matrix = coo_matrix(
                 (real_imag, (GCi, GCj)),
                 shape=(mrows, ncols), dtype=dtype)
             #msg = 'created %s (complex)' % op2_reader.table_name

@@ -27,7 +27,7 @@ import copy
 from struct import Struct, pack
 from itertools import count
 import warnings
-from typing import TextIO, Optional
+from typing import TextIO, BinaryIO, Optional
 
 import numpy as np
 
@@ -46,9 +46,13 @@ from pyNastran.op2.errors import SixtyFourBitError
 from pyNastran.op2.op2_helper import polar_to_real_imag, real_imag_to_mag_phase
 from pyNastran.op2.op2_interface.write_utils import set_table3_field, view_dtype, view_idtype_as_fdtype
 from pyNastran.utils.numpy_utils import integer_types, float_types, integer_float_types
-from pyNastran.op2.writer.utils import fix_table3_types
+from pyNastran.op2.writer.utils import fix_table3_types, fdtype_from_data
+from pyNastran.op2.op2_interface.write_utils import (
+    get_title_subtitle_label)
+
 from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import (
-    set_static_case, set_modal_case, set_transient_case,
+    set_static_case, set_modal_case, set_buckling_case,
+    set_transient_case,
     set_freq_case, set_complex_modes_case)
 from pyNastran.op2.result_objects.op2_objects import combination_inplace
 
@@ -74,6 +78,21 @@ table_name_to_table_code = {
     # spc/mpc forces
     'OQG1' : 3,
 }
+
+def slice_nids_by_index(
+        nodes: np.ndarray,
+        nids: np.ndarray,
+        assume_exists: bool=True,
+        ) -> tuple[np.ndarray, np.ndarray, int]:
+    nids = np.asarray(nids)
+    nids.sort()
+    if not assume_exists:
+        nids = np.intersect1d(nodes, nids)
+    inid = np.searchsorted(nodes, nids)
+    nnid2 = len(inid)
+    assert len(inid) > 0, inid
+    return nids, inid, nnid2
+
 def append_sort1_sort2(data1, data2, to_sort1=True):
     """
     data1 : (ntimes, nnids, 6)
@@ -96,9 +115,10 @@ def append_sort1_sort2(data1, data2, to_sort1=True):
             data2,])
     return out
 
-def oug_data_code(table_name,
+def oug_data_code(table_name: str,
                   is_real: bool=False, is_complex:bool=False,
-                  is_sort1=True, is_random=False,
+                  is_sort1: bool=True, is_random: bool=False,
+                  table_code: int=0,
                   random_code=0, title='', subtitle='', label='', is_msc=True):
     sort1_sort_bit = 0 if is_sort1 else 1
     random_sort_bit = 1 if is_random else 0
@@ -121,15 +141,17 @@ def oug_data_code(table_name,
 
     if is_real:
         num_wide = 8
+        sort_code = 1  # TODO: what should this be???
     elif is_complex:
         num_wide = 14
+        sort_code = 1 # TODO: what should this be???
 
-    table_code = table_name_to_table_code[table_name]
-    sort_code = 1 # TODO: what should this be???
+    if table_code == 0:
+        table_code = table_name_to_table_code[table_name]
 
     #table_code = tCode % 1000
     #sort_code = tCode // 1000
-    tCode = table_code * 1000 + sort_code
+    tcode = table_code * 1000 + sort_code
 
     device_code = 2  # Plot
     data_code = {
@@ -139,7 +161,7 @@ def oug_data_code(table_name,
         'is_msc': is_msc,
         'format_code': 1, # real
         'table_code': table_code,
-        'tCode': tCode,
+        'tCode': tcode,
         'table_name': table_name, ## TODO: should this be a string?
         'device_code' : device_code,
         'random_code' : random_code,
@@ -314,7 +336,20 @@ class TableArray(ScalarObject):  # displacement style table
         msg.append(f'  node_gridtype.shape = {self.node_gridtype.shape}\n')
         #msg.append('  gridTypes\n  ')
         msg += self.get_data_code()
+        # from pyNastran.utils import object_stats
+        # self.data = np.zeros((0,0,6))
+        # self.node_gridtype = np.zeros((0,2))
+        # print(object_stats(self, 'all'))
         return msg
+
+    def slice_by_node_id(self, nids: np.ndarray, assume_exists: bool=False, inplace: bool=False):
+        nodes = self.node_gridtype[:, 0]
+        nids, inid, nnid2 = slice_nids_by_index(nodes, nids, assume_exists)
+        obj = self if inplace else copy.deepcopy(self)
+        obj.node_gridtype = self.node_gridtype[inid, :]
+        obj.data = self.data[:, inid, :]
+        obj.nnodes = len(inid)
+        return obj
 
     @property
     def headers(self) -> list[str]:
@@ -467,8 +502,8 @@ class TableArray(ScalarObject):  # displacement style table
 
                 names = ['NodeID', 'Item']
                 index = pd.MultiIndex.from_arrays(node_gridtype, names=names)
-                A = self.data[:, :, 0].T
-                data_frame = pd.DataFrame(A, columns=columns, index=index)
+                mat_data = self.data[:, :, 0].T
+                data_frame = pd.DataFrame(mat_data, columns=columns, index=index)
             else:
                 node_gridtype_item = []
                 node_ids = self.node_gridtype[:, 0]
@@ -651,12 +686,15 @@ class TableArray(ScalarObject):  # displacement style table
         Calls any OP2 objects that need to do any post matrix calcs
         """
         self.set_as_sort1()
-        #self.gridtype_str2 = np.chararray(nnodes, unicode=True)
+        #self.gridtype_str2 = np.zeros(nnodes, dtype='U1')
         self.gridtype_str = get_gridtype_str(self, self.node_gridtype)
         #print(self.gridtype_str, self.gridtype_str.dtype)
         #print(self.gridtype_str2, self.gridtype_str2.dtype)
         #asdf
         #del self.itotal, self.itime
+
+    def update_data_components(self):
+        return
 
     def set_as_sort1(self):
         """changes the table into SORT1"""
@@ -682,7 +720,6 @@ class TableArray(ScalarObject):  # displacement style table
         assert self.is_sort2, self.sort_method
         if grid_type in NULL_GRIDTYPE:
             grid_type = -1
-        #self
         #if node_id < 1:
             #msg = self.code_information()
             #msg += "(%s, %s) dt=%g node_id=%s v1=%g v2=%g v3=%g" % (
@@ -739,9 +776,9 @@ class TableArray(ScalarObject):  # displacement style table
         num_wide = self.num_wide
         acoustic_flag = self.acoustic_flag if hasattr(self, 'acoustic_flag') else 0
         thermal = self.thermal
-        title = b'%-128s' % self.title.encode('ascii')
-        subtitle = b'%-128s' % self.subtitle.encode('ascii')  # missing superelement_adaptivity_index
-        label = b'%-128s' % self.label.encode('ascii')
+        title, subtitle, label = get_title_subtitle_label(
+            self.title, self.subtitle, self.label,
+            self.superelement_adaptivity_index)
         oCode = 0
 
         ftable3 = b'i' * 50 + b'128s 128s 128s'
@@ -795,14 +832,9 @@ class TableArray(ScalarObject):  # displacement style table
             ftable3 = set_table3_field(ftable3, 6, b'f') # field 6
         elif self.analysis_code == 9:  # complex eigenvalues
             field5 = self.modes[itime]
-            if hasattr(self, 'eigns'):
-                field6 = self.eigns[itime]
-                ftable3 = set_table3_field(ftable3, 6, b'f') # field 6
-            #elif hasattr(self, 'eigrs'):
-                #field6 = self.eigrs[itime]
-                #ftable3 = set_table3_field(ftable3, 6, b'f') # field 6
-            #else:  # pragma: no cover
-                #raise NotImplementedError('cant find eigns or eigrs on analysis_code=9')
+            field6 = self.eigrs[itime]
+            ftable3 = set_table3_field(ftable3, 6, b'f') # field 6
+
             field7 = self.eigis[itime]
             ftable3 = set_table3_field(ftable3, 7, b'f') # field 7
         elif self.analysis_code == 10:  # nonlinear statics
@@ -866,6 +898,29 @@ class RealTableArray(TableArray):
     """
     def __init__(self, data_code, is_sort1, isubcase, dt):
         TableArray.__init__(self, data_code, is_sort1, isubcase, dt)
+
+    def h5_table_dict(self) -> dict:
+        from tables import Int64Col, Float64Col
+        h5_table_dict = {
+            'ID': Int64Col(pos=0),
+            'X': Float64Col(pos=1),
+            'Y': Float64Col(pos=2),
+            'Z': Float64Col(pos=3),
+            'RX': Float64Col(pos=4),
+            'RY': Float64Col(pos=5),
+            'RZ': Float64Col(pos=6),
+            'DOMAIN_ID': Int64Col(pos=7),
+        }
+        return h5_table_dict
+
+    def add_to_h5_array(self, arr, ntime_nnode0: int, ntime_nnode1: int, itime: int):
+        arr["ID"][ntime_nnode0:ntime_nnode1] = self.node_gridtype[:, 0]
+        arr["X"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 0]
+        arr["Y"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 1]
+        arr["Z"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 2]
+        arr["RX"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 3]
+        arr["RY"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 4]
+        arr["RZ"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 5]
 
     def set_as_static_case(self):
         analysis_code = 1 # static
@@ -956,6 +1011,80 @@ class RealTableArray(TableArray):
         #obj.mode_cycles = mode_cycles
         return obj
 
+    @classmethod
+    def add_buckling_case(cls, table_name, node_gridtype, data, isubcase,
+                          modes, eigenvalues, mode_cycles,
+                          is_sort1=True, is_random=False, is_msc=True,
+                          random_code=0, title='', subtitle='', label=''):
+
+        #elif self.analysis_code == 2:  # real eigenvalues
+            ## mode number
+            #self.mode = self.add_data_parameter(data, 'mode', b'i', 5)
+            ## eigenvalue
+            #self.eign = self.add_data_parameter(data, 'eign', b'f', 6, False)
+            ## mode or cycle .. todo:: confused on the type - F1???
+            #self.mode_cycle = self.add_data_parameter(data, 'mode_cycle', b'i', 7, False)
+            #self.update_mode_cycle('mode_cycle')
+            #self.data_names = self.apply_data_code_value('data_names', ['mode', 'eign', 'mode_cycle'])
+
+        data_code = oug_data_code(table_name,
+                                  is_real=True,
+                                  is_sort1=is_sort1, is_random=is_random,
+                                  random_code=random_code, title=title, subtitle=subtitle, label=label,
+                                  is_msc=is_msc)
+        obj = set_buckling_case(cls, is_sort1, isubcase, data_code,
+                                set_real_table, (node_gridtype, data),
+                                modes, eigenvalues, mode_cycles)
+        return obj
+
+    def envelope(self,
+                 nids: np.ndarray,
+                 result_name_tuple: tuple[str, str, str]) -> np.ndarray:
+        print(result_name_tuple)
+        tf_rm_flag, keys, func_name = result_name_tuple
+        tf_rm_flag = tf_rm_flag.lower()
+        func_name = func_name.lower()
+        is_min = (func_name == 'min')
+        func_name = 'min' if is_min else 'max'
+        max_min_func = getattr(np, func_name)
+
+        # print(''.join(self.get_stats()))
+        node_actual = self.node_gridtype[:, 0]
+        inid = np.searchsorted(node_actual, nids)
+        assert np.array_equal(node_actual[inid], nids)
+
+        ntime, nnode, _ = self.data.shape
+        if tf_rm_flag in {'t', 'f'}:
+            data = self.data[:, :, :3]
+        else:
+            assert tf_rm_flag in {'r', 'm'},tf_rm_flag
+            data = self.data[:, :, 3:]
+
+        assert len(keys), keys
+        ikeys = []
+        key_map = {'x': 0, 'y': 1, 'z': 2,}
+        for key in keys:
+            ikey = key_map[key]
+            ikeys.append(ikey)
+        data = data[:, :, ikeys]
+
+        if func_name == 'abs_max':
+            # TODO: wrong, but ok...
+            data = np.abs(data).max(axis=2)
+            assert data.shape == (ntime, nnode), data.shape
+        elif func_name == 'rss':
+            data = np.linalg.norm(data, axis=2)
+            assert data.shape == (ntime, nnode), data.shape
+        else:
+            data = max_min_func(data, axis=2)
+            assert data.shape == (ntime, nnode), data.shape
+
+        assert data.ndim == 2, (result_name_tuple, data.shape)
+
+        # eid_data = data.max(axis=0)
+        nid_data = max_min_func(data, axis=0)
+        assert nid_data.shape == (nnode, ), nid_data.shape
+        return nid_data[inid]
 
     def __pos__(self) -> RealTableArray:
         """positive; +a"""
@@ -1044,9 +1173,6 @@ class RealTableArray(TableArray):
         # if update:
         #     self.update_data_components()
 
-    def update_data_components(self):
-        return
-
     def _check_math(self, table: RealTableArray) -> None:
         """verifies that the shapes are the same"""
         assert self.ntimes == table.ntimes, f'ntimes={self.ntimes} table.times={table.ntimes}'
@@ -1118,14 +1244,7 @@ class RealTableArray(TableArray):
         if max_id > MAX_32_BIT_INT:
             raise SixtyFourBitError(f'64-bit OP2 writing is not supported; max id={max_id}')
 
-        fdtype = self.data.dtype
-        if self.size == fdtype.itemsize:
-            pass
-        else:
-            # warnings.warn(f'downcasting {self.class_name}...this is buggy')
-            #idtype = np.int32(1)
-            fdtype = np.float32(1.0)
-
+        fdtype = fdtype_from_data(self.data, self.size)
         nodedevice_gridtype = np.column_stack([nnodes_device, gridtype])
         node_gridtype_floats = view_idtype_as_fdtype(nodedevice_gridtype, fdtype)
 
@@ -1226,7 +1345,6 @@ class RealTableArray(TableArray):
             r3 = self.data[itime, :, 5]
             for node_id, gridtypei, t1i, t2i, t3i, r1i, r2i, r3i in zip(node, gridtype, t1, t2, t3, r1, r2, r3):
                 #unused_sgridtype = self.recast_gridtype_as_string(gridtypei)
-                assert is_exponent_format
                 if is_exponent_format:
                     vals2 = write_floats_13e_long([t1i, t2i, t3i, r1i, r2i, r3i])
                     (t1i, t2i, t3i, r1i, r2i, r3i) = vals2
@@ -1601,7 +1719,7 @@ class RealTableArray(TableArray):
             if isinstance(dt, float_types):
                 header[1] = ' %s = %10.4E\n' % (self.data_code['name'], dt)
             else:
-                header[1] = ' %s = %10i\n' % (self.data_code['name'], dt)
+                header[1] = ' %s = %10d\n' % (self.data_code['name'], dt)
             f06_file.write(''.join(header + words))
             for node_id, gridtypei, t1i, t2i, t3i, r1i, r2i, r3i in zip(nodes, gridtypes, t1, t2, t3, r1, r2, r3):
                 sgridtype = recast_gridtype_as_string(self, gridtypei)
@@ -1706,6 +1824,43 @@ class ComplexTableArray(TableArray):
     def __init__(self, data_code, is_sort1, isubcase, dt):
         TableArray.__init__(self, data_code, is_sort1, isubcase, dt)
 
+    def h5_table_dict(self) -> dict:
+        from tables import Int64Col, Float64Col
+        h5_table_dict = {
+            'ID': Int64Col(pos=0),
+            'XR': Float64Col(pos=1),
+            'YR': Float64Col(pos=2),
+            'ZR': Float64Col(pos=3),
+            'RXR': Float64Col(pos=4),
+            'RYR': Float64Col(pos=5),
+            'RZR': Float64Col(pos=6),
+
+            'XI': Float64Col(pos=6),
+            'YI': Float64Col(pos=7),
+            'ZI': Float64Col(pos=8),
+            'RXI': Float64Col(pos=9),
+            'RYI': Float64Col(pos=10),
+            'RZI': Float64Col(pos=11),
+            'DOMAIN_ID': Int64Col(pos=12),
+        }
+        return h5_table_dict
+
+    def add_to_h5_array(self, arr, ntime_nnode0: int, ntime_nnode1: int, itime: int):
+        arr["ID"][ntime_nnode0:ntime_nnode1] = self.node_gridtype[:, 0]
+        arr["XR"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 0].real
+        arr["YR"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 1].real
+        arr["ZR"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 2].real
+        arr["RXR"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 3].real
+        arr["RYR"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 4].real
+        arr["RZR"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 5].real
+
+        arr["XI"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 0].imag
+        arr["YI"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 1].imag
+        arr["ZI"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 2].imag
+        arr["RXI"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 3].imag
+        arr["RYI"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 4].imag
+        arr["RZI"][ntime_nnode0:ntime_nnode1] = self.data[itime, :, 5].imag
+
     @classmethod
     def add_freq_case(cls, table_name: str,
                       node_gridtype: np.ndarray,
@@ -1747,22 +1902,26 @@ class ComplexTableArray(TableArray):
         return obj
 
     @classmethod
-    def add_complex_modes_case(cls, table_name, element, data, isubcase,
-                               modes, eigrs, eigis,
-                               is_sort1=True, is_random=False, is_msc=True,
+    def add_complex_modes_case(cls, table_name, node_gridtype, data, isubcase,
+                               modes: np.ndarray,
+                               eigrs: np.ndarray,
+                               eigis: np.ndarray,
+                               is_sort1: bool=True, is_random: bool=False, is_msc: bool=True,
+                               table_code: int=0,
                                random_code=0, title='', subtitle='', label=''):
         #data_code = cls._add_case(
             #table_name, isubcase,
             #is_sort1, is_random, is_msc,
             #random_code, title, subtitle, label)
         data_code = oug_data_code(table_name,
+                                  table_code=table_code,
                                   is_complex=True,
                                   is_sort1=is_sort1, is_random=is_random,
                                   random_code=random_code, title=title, subtitle=subtitle, label=label,
                                   is_msc=is_msc)
 
         obj = set_complex_modes_case(cls, is_sort1, isubcase, data_code,
-                                     set_complex_table, (element, data),
+                                     set_complex_table, (node_gridtype, data),
                                      modes, eigrs, eigis)
         return obj
 
@@ -2002,11 +2161,10 @@ class ComplexTableArray(TableArray):
             itable = -3
 
         #print('nonlinear_factor =', self.nonlinear_factor)
-        if self.is_sort1:
-            op2_format = endian + b'2i 12f'
-        else:
+        if not self.is_sort1:
             raise NotImplementedError('SORT2')
-        s = Struct(op2_format)
+        # op2_format = endian + b'2i 12f'
+        # s = Struct(op2_format)
 
         node = self.node_gridtype[:, 0]
         max_id = node.max()
@@ -2029,7 +2187,17 @@ class ComplexTableArray(TableArray):
         #node_gridtype_floats = np.frombuffer(node_gridtype_bytes,
                                              #dtype=fdtype).reshape(nnodes, 2)
 
-        #(2+6) => (node_id, gridtypei, t1i, t2i, t3i, r1i, r2i, r3i)
+        # fdtype = self.data.dtype
+        if self.size != 4:
+            raise RuntimeError('64-bit not supported in complex eigenvectors')
+
+        fdtype = fdtype_from_data(self.data, self.size)
+        nodedevice_gridtype = np.column_stack([nnodes_device, gridtype])
+        node_gridtype_floats = view_idtype_as_fdtype(nodedevice_gridtype, fdtype)
+
+        #(2+2*6) => (node_id, gridtypei,
+        #            t1r, t2r, t3r, r1r, r2r, r3r,  # 6
+        #            t1i, t2i, t3i, r1i, r2i, r3i)  # 6
         ntotal = nnodes * (2 + 12)
 
         #print('shape = %s' % str(self.data.shape))
@@ -2065,19 +2233,13 @@ class ComplexTableArray(TableArray):
             #node_gridtype_data_bytes = node_gridtype_data.tobytes()
             #op2_file.write(node_gridtype_data_bytes)
 
-            t1 = self.data[itime, :, 0]
-            t2 = self.data[itime, :, 1]
-            t3 = self.data[itime, :, 2]
-            r1 = self.data[itime, :, 3]
-            r2 = self.data[itime, :, 4]
-            r3 = self.data[itime, :, 5]
-
-            for node_id, gridtypei, t1i, t2i, t3i, r1i, r2i, r3i in zip(nnodes_device, gridtype, t1, t2, t3, r1, r2, r3):
-                data = [node_id, gridtypei,
-                        t1i.real, t2i.real, t3i.real, r1i.real, r2i.real, r3i.real,
-                        t1i.imag, t2i.imag, t3i.imag, r1i.imag, r2i.imag, r3i.imag]
-                fascii.write('  nid, grid_type, dx, dy, dz, rx, ry, rz = %s\n' % data)
-                op2_file.write(s.pack(*data))
+            datar = view_dtype(self.data[itime, :, :].real, fdtype)
+            datai = view_dtype(self.data[itime, :, :].imag, fdtype)
+            # node_gridtype_data = np.hstack([node_gridtype_floats, datai])
+            # print(self.data.shape, ntotal)
+            node_gridtype_data = np.hstack([node_gridtype_floats, datar, datai])
+            op2_file.write(node_gridtype_data)
+            assert ntotal == node_gridtype_data.size
 
             itable -= 1
             header = [4 * ntotal,]

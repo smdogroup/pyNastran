@@ -1,13 +1,14 @@
+import copy
 from struct import pack
 import inspect
 
 import numpy as np
-from numpy import zeros, allclose
 
 from pyNastran.op2.result_objects.op2_objects import get_times_dtype
 from pyNastran.op2.result_objects.utils_pandas import build_dataframe_transient_header, build_pandas_transient_elements
-from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import StressObject, StrainObject, OES_Object
+from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import StressObject, StrainObject, OES_Object, slice_eids_by_index
 from pyNastran.f06.f06_formatting import _eigenvalue_header, write_floats_13e #, get_key0
+from pyNastran.op2.writer.utils import fdtype_from_data
 
 
 class RealFastArray(OES_Object):
@@ -20,6 +21,14 @@ class RealFastArray(OES_Object):
             #self.add_new_eid = self.add_new_eid_sort1
         #else:
             #raise NotImplementedError('SORT2')
+
+    def slice_by_element_id(self, eids: np.ndarray, assume_exists: bool=False, inplace: bool=False):
+        eids, ieid, neid2 = slice_eids_by_index(self.element, eids, assume_exists)
+        obj = self if inplace else copy.deepcopy(self)
+        obj.element = obj.element[ieid]
+        obj.data = obj.data[:, ieid, :]
+        obj.nelements = len(ieid)
+        return obj
 
     @property
     def is_real(self) -> bool:
@@ -261,13 +270,7 @@ class RealFastArray(OES_Object):
             raise NotImplementedError('SORT2')
         #struct1 = Struct(endian + b'i 6f')
 
-        fdtype = self.data.dtype
-        if self.size == fdtype.itemsize:
-            pass
-        else:
-            # print(f'downcasting {self.class_name}...')
-            #idtype = np.int32(1)
-            fdtype = np.float32(1.0)
+        fdtype = fdtype_from_data(self.data, self.size)
 
         # [eid, force_x, force_y, force_z, moment_x, moment_y, moment_z]
         data_out = np.empty((nelements, 7), dtype=fdtype)

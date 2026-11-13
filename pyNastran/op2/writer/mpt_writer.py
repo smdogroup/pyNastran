@@ -5,17 +5,21 @@ from struct import pack, Struct
 from typing import BinaryIO, TYPE_CHECKING
 
 from .geom1_writer import write_geom_header, close_geom_table
-from .geom4_writer import write_header
+from .geom2_writer import _write_end_block
+from .geom4_writer import write_header, write_header_nvalues
+
 from pyNastran.bdf.cards.dynamic import (
     TSTEPNL, NLPARM, NLPARM_CONV_MAP, NLPARM_KMETHOD_MAP, NLPARM_INT_OUT_MAP,
 ) # TSTEP
 CONV_NLPARM_MAP = {value: key for key, value in NLPARM_CONV_MAP.items()}
 KMETHOD_NLPARM_MAP = {value: key for key, value in NLPARM_KMETHOD_MAP.items()}
 INT_OUT_NLPARM_MAP = {value: key for key, value in NLPARM_INT_OUT_MAP.items()}
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # pragma: no cover
     from pyNastran.op2.op2_geom import BDF, OP2Geom
 
-def write_mpt(op2_file, op2_ascii, model, endian=b'<',
+def write_mpt(op2_file, op2_ascii, model,
+              op2_flags: dict[str, dict[str, bool]],
+              endian=b'<',
               nastran_format: str='nx'):
     """writes the MPT/MPTS table"""
     if not hasattr(model, 'materials'):
@@ -27,11 +31,11 @@ def write_mpt(op2_file, op2_ascii, model, endian=b'<',
     # not handled properly
     materials_to_skip = [
         'MATS3', 'MATS8',
-        'MATT3', 'MATT9',
+        'MATT3',
         #  other
         'NLPCI', 'MAT3D',
         'MATPOR',
-        'RADBC',
+        # 'RADBC',
     ]
     # these are specifically for material dependency objects (e.g., model.MATS1)
     # in general, materials (e.g., MAT1) just need to be removed from the
@@ -50,6 +54,15 @@ def write_mpt(op2_file, op2_ascii, model, endian=b'<',
             model.log.warning(f'skipping MPT-{mtype}')
             continue
         out[mtype] = list(mat_dict.keys())
+
+    for bc_id, bcs in model.bcs.items():
+        # CONV, CONVM, RADBC, RADM
+        for bc in bcs:
+            if bc.type == 'RADBC':
+                continue
+            if bc.type == 'RADM':
+                out[bc.type].append(bc)
+            # bc_dict[bc.type].append(bc)
 
     card_name_attrs = [
         ('NLPARM', model.nlparms),
@@ -70,7 +83,9 @@ def write_mpt(op2_file, op2_ascii, model, endian=b'<',
             if isinstance(objs, list):
                 for i, obji in enumerate(objs):
                     if obji.type == 'RADBC':
-                        out[obji.type].append((key, i))
+                        continue
+                    # if obji.type == 'RADBC':
+                    #     out[obji.type].append((key, i))
             else:
                 raise TypeError(objs)  # weird...was this happening or was I messing with things wrong...
                 #print('obj...')
@@ -93,14 +108,16 @@ def write_mpt(op2_file, op2_ascii, model, endian=b'<',
         #model.log.debug('MPT %s %s' % (name, mids))
         nmaterials = len(mids)
         if name in materials_to_skip:
-            model.log.warning(f'skipping MPT-{name}')
+            if nmaterials:
+                model.log.warning(f'skipping MPT-{name}')
             continue
 
         #if nmaterials == 0:
             #continue
         func = MATERIAL_MAP[name]
+        flags = op2_flags.get(name, {})
         nbytes = func(model, name, mids, nmaterials,
-                      op2_file, op2_ascii, endian)
+                      op2_file, op2_ascii, endian, **flags)
 
         op2_file.write(pack('i', nbytes))
         itable -= 1
@@ -134,7 +151,7 @@ def write_tstepnl(model: BDF, name: str, tstepnl_ids, nmaterials,
     spack = Struct(endian + b'iif5i3f3if3i4f 4if')
     nbytes = write_header(name, nfields, nmaterials, key, op2_file, op2_ascii)
     for tstepnl_id in sorted(tstepnl_ids):
-        print('tstepnl_id =', tstepnl_id)
+        # print('tstepnl_id =', tstepnl_id)
         tstep = model.tstepnls[tstepnl_id]
         #(sid, ndt, dt, no, method_int, kstep, max_iter, conv_int, eps_u, eps_p, eps_w,
         #     max_div, max_qn, max_ls, fstress, max_bisect,
@@ -426,16 +443,25 @@ def write_mat9(model: BDF, name, mids, nmaterials,
     return nbytes
 
 def write_mat10(model: BDF, name, mids, nmaterials,
-                op2_file, op2_ascii, endian):
+                op2_file, op2_ascii, endian: bytes,
+                include_alpha: bool=False):
     """writes the MAT10"""
     key = (2801, 28, 365)
-    nfields = 5
-    spack = Struct(endian + b'i4f')
+    if include_alpha:
+        nfields = 6
+        spack = Struct(endian + b'i4ff')
+    else:
+        nfields = 5
+        spack = Struct(endian + b'i4f')
     nbytes = write_header(name, nfields, nmaterials, key, op2_file, op2_ascii)
     for mid in sorted(mids):
         mat = model.materials[mid]
         #(mid, bulk, rho, c, ge) = out
         data = [mid, mat.bulk, mat.rho, mat.c, mat.ge]
+        if include_alpha:
+            # alpha = gamma
+            gamma = 0.0 if mat.gamma is None else mat.gamma
+            data.append(gamma)
         assert len(data) == nfields
 
         #print('MAT10 -', data, len(data))
@@ -711,6 +737,86 @@ def write_matt8(model: BDF, name, mids, nmaterials,
     return nbytes
 
 
+def write_matt9(model: BDF, name, mids, nmaterials,
+                op2_file, op2_ascii, endian):
+    """writes the MATT9"""
+    key = (2703, 27, 301)
+    nfields = 35
+    # nx?
+
+    # Word Name Type Description
+    # 1 MID    I Material identification number
+    # 2 TC(21) I TABLEMi identification numbers for material property matrix
+    # 23 TRHO  I TABLEMi identification number for mass density
+    # 24 TA(6) I TABLEMi identification numbers for thermal expansion coefficients
+    # 30 UNDEF None
+    # 31 TGE   I TABLEMi identification number for structural damping coefficient
+    # 32 UNDEF(4) None
+
+    spack = Struct(endian + b'35i')
+    nbytes = write_header(name, nfields, nmaterials, key, op2_file, op2_ascii)
+    for mid in sorted(mids):
+        mat = model.MATT9[mid]
+        #mat.uncross_reference()
+        #print(mat.get_stats())
+        a = b = c = d = e = 0
+        
+        g_tables = [mat.g11_table, mat.g12_table, mat.g13_table,
+          mat.g14_table, mat.g15_table, mat.g16_table,
+          mat.g22_table, mat.g23_table, mat.g24_table,
+          mat.g25_table, mat.g26_table,
+          mat.g33_table, mat.g34_table, mat.g35_table, mat.g36_table,
+          mat.g44_table, mat.g45_table, mat.g46_table,
+          mat.g55_table, mat.g56_table, mat.g66_table,]
+        assert None not in g_tables, g_tables
+        data = [
+            mid, *g_tables, mat.rho_table,
+            mat.a1_table, mat.a2_table, mat.a3_table,
+            mat.a4_table, mat.a5_table, mat.a6_table,
+            a, mat.ge_table, b, c, d, e]
+        assert None not in data, f'MATT9 data={data}'
+
+        assert len(data) == nfields
+        op2_ascii.write('  mid=%s data=%s\n' % (mid, data[1:]))
+        op2_file.write(spack.pack(*data))
+    return nbytes
+
+
+def write_radm(model, name: str, elems, nelements: int,
+               op2_file: BinaryIO, op2_ascii, endian: bytes) -> int:
+    """
+    RADM(8802, 88, 413)
+
+    Word Name Type Description
+    1 EID      I Element identification number
+    2 FAMB    RS Radiation view factor between the face and the ambient point
+    3 CONTROL_NODE  I Control point for radiation boundary condition
+    4 NODAMB   I
+    """
+    nradm = len(elems)
+    nfields = 1
+    for elem in elems:
+        nemissivity = len(elem.emissivity)
+        nfieldsi = 2 + nemissivity
+        nfields += nfieldsi
+
+    key = (8802, 88, 413)
+    nbytes = write_header_nvalues(name, nfields, key, op2_file, op2_ascii)
+
+    structi = Struct(endian + b'i')
+    op2_file.write(structi.pack(nradm))
+    for elem in elems:
+        nemissivity = len(elem.emissivity)
+        data = [elem.radmid, elem.absorb] + list(elem.emissivity)
+        assert None not in data, data
+        fmt = f'if {nemissivity:d}f'
+        structi = Struct(endian + fmt.encode('ascii'))
+        op2_file.write(structi.pack(*data))
+        # print(f'  RADM radmid={elem.radmid} absorb={elem.absorb} emissivity={elem.emissivity}')
+        op2_ascii.write(f'  RADM radmid={elem.radmid} absorb={elem.absorb} emissivity={elem.emissivity}\n')
+    return nbytes
+
+
 MATERIAL_MAP = {
     'MAT1': write_mat1,
     'MAT2': write_mat2,
@@ -727,6 +833,9 @@ MATERIAL_MAP = {
     'MATT4': write_matt4,
     'MATT5': write_matt5,
     'MATT8': write_matt8,
+    'MATT9': write_matt9,
     'TSTEPNL': write_tstepnl,
     'NLPARM': write_nlparm,
+    #'NLPCI': write_nlpci,
+    'RADM': write_radm,
 }

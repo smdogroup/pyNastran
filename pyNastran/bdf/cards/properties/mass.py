@@ -218,6 +218,7 @@ class NSM1x(Property):
             raise TypeError('nsm_type=%r must be in [%s]' % (
                 self.nsm_type, ', '.join(self.valid_properties)))
         assert isinstance(ids, list), f'ids={ids} is not a list'
+        self.ids_ref = None
 
     @property
     def Type(self):
@@ -262,13 +263,17 @@ class NSM1x(Property):
         return cls(sid, nsm_type, value, ids, comment=comment)
 
     def cross_reference(self, model: BDF) -> None:
-        pass
+        self.ids_ref = _xref_nsm(self, model, stop_on_failure=True)
 
     def safe_cross_reference(self, model: BDF, xref_errors) -> None:
-        self.cross_reference(model)
+        self.ids_ref = _xref_nsm(self, model, stop_on_failure=False)
+
+    def get_ids(self):
+        return nsm_ids(self)
 
     def raw_fields(self):
-        list_fields = [self.type, self.sid, self.nsm_type, self.value] + self.ids
+        ids = self.get_ids()
+        list_fields = [self.type, self.sid, self.nsm_type, self.value] + ids
         return list_fields
 
     def repr_fields(self):
@@ -299,7 +304,7 @@ class NSM1(NSM1x):
     def _init_from_empty(cls):
         sid = 1
         nsm_type = 'PSHELL'
-        pid_eid = 42
+        pid_eid = [42]
         value = 1.
         return NSM1(sid, nsm_type, value, pid_eid)
 
@@ -918,5 +923,166 @@ class PMASS(Property):
             return self.comment + print_card_8(card)
         return self.comment + print_card_16(card)
 
+
+PROPERTIES_XREF = {'PSHELL', 'PCOMP', 'PCOMPG', 'PBAR', 'PBEAM', 'PBUSH', 'PTUBE', 'PROD',
+                   'PBARL', 'PBEAML'}
+
+def xref_nsm(self, model: BDF) -> None:
+    _xref_nsm(self, model, stop_on_failure=True)
+
+# def _xref_nsm(self, model: BDF, stop_on_failure) -> None:
+#     msg = f', which is required by {self.type}={self.sid}'
+#     missing_ids = []
+#     if self.nsm_type == 'ELEMENT':
+#         ids = self.ids
+#         if ids == ['ALL']:
+#             ids = list(model.elements)
+#         assert len(ids) > 0, ids
+#
+#         elements = []
+#         for eid in ids:
+#             try:
+#                 elem = model.Element(eid, msg=msg)
+#             except KeyError:
+#                 missing_ids.append(eid)
+#                 continue
+#             elements.append(elem)
+#         if missing_ids:
+#             missing_ids.sort()
+#             element_ids = np.array(list(model.elements), dtype='int32')
+#             element_ids.sort()
+#             raise KeyError(f'Missing elements on {self.type}={self.sid}: {missing_ids}; element_ids={element_ids}')
+#         assert len(elements) > 0, elements
+#         self.ids_ref = elements
+#
+#     elif self.nsm_type in PROPERTIES_XREF:
+#         properties = []
+#         ids = self.ids
+#         if ids == ['ALL']:
+#             ids = list(model.properties)
+#         assert len(ids) > 0, ids
+#
+#         for pid in ids:
+#             try:
+#                 prop = model.Property(pid, msg=msg)
+#             except KeyError:
+#                 missing_ids.append(pid)
+#                 continue
+#             properties.append(prop)
+#         if missing_ids:
+#             missing_ids.sort()
+#             raise KeyError(f'Missing properties on {self.type}={self.sid}: {missing_ids}')
+#         assert len(properties) > 0, properties
+#         self.ids_ref = properties
+#     else:  # pragma: no cover
+#         model.log.error(f'nsm_type={self.nsm_type!r} is not supported for {self.type}={self.sid}')
+#         return
+#         # raise NotImplementedError(self.nsm_type)
+#     assert len(self.ids_ref) > 0, self.ids_ref
+#
+# def safe_xref_nsm(self, model: BDF) -> None:
+#     _xref_nsm(self, model, stop_on_failure=False)
+
+
+def _xref_nsm(self, model: BDF, stop_on_failure: bool=True) -> list:  # old
+    msg = f', which is required by {self.type}={self.sid}'
+    log = model.log
+    missing_ids = []
+    # if self.nsm_type in {'CROD', 'CONROD'}:
+    #     return
+    ids = self.ids
+
+    ELEMENTS_REF = ['CONROD', 'CROD', 'CTUBE']
+    if self.nsm_type == 'ELEMENT':
+        if ids == ['ALL']:
+            ids = list(model.elements)
+        assert len(ids) > 0, ids
+
+        elements = []
+        for eid in ids:
+            try:
+                elem = model.Element(eid, msg=msg)
+            except KeyError:
+                missing_ids.append(eid)
+                elements.append(eid)
+                continue
+            elements.append(elem)
+        if missing_ids:
+            missing_ids.sort()
+            element_ids = np.array(list(model.elements), dtype='int32')
+            element_ids.sort()
+            if stop_on_failure:
+                raise RuntimeError(f'Missing elements on {self.type}={self.sid}: {missing_ids}')
+            log.warning(f'Missing elements on {self.type}={self.sid}: {missing_ids}')
+        assert len(elements) > 0, elements
+        ids_ref = elements
+
+    elif self.nsm_type in ELEMENTS_REF:
+        elements = []
+        if ids == ['ALL']:
+            ids = list(model.elements)
+        assert len(ids) > 0, ids
+        for eid in ids:
+            try:
+                prop = model.Element(eid, msg=msg)
+            except KeyError:
+                missing_ids.append(eid)
+                elements.append(eid)
+                continue
+            elements.append(prop)
+        if missing_ids:
+            missing_ids.sort()
+            if stop_on_failure:
+                raise RuntimeError(f'Missing {self.nsm_type} elements on {self.type}={self.sid}: {missing_ids}')
+            log.warning(f'Missing {self.nsm_type} elements on {self.type}={self.sid}: {missing_ids}')
+        assert len(elements) > 0, elements
+        ids_ref = elements
+
+    elif self.nsm_type in PROPERTIES_XREF:
+        properties = []
+        if ids == ['ALL']:
+            ids = list(model.properties)
+        assert len(ids) > 0, ids
+
+        for pid in ids:
+            try:
+                prop = model.Property(pid, msg=msg)
+            except KeyError:
+                missing_ids.append(pid)
+                properties.append(pid)
+                continue
+            properties.append(prop)
+        if missing_ids:
+            missing_ids.sort()
+            # if stop_on_failure:
+            #     raise RuntimeError(f'Missing properties on {self.type}={self.sid}: {missing_ids}')
+            log.warning(f'Missing properties on {self.type}={self.sid}: {missing_ids}')
+        assert len(properties) > 0, properties
+        ids_ref = properties
+    else:  # pragma: no cover
+        if stop_on_failure:
+            raise RuntimeError(f'nsm_type={self.nsm_type!r} is not supported for {self.type}={self.sid}')
+        log.error(f'nsm_type={self.nsm_type!r} is not supported for {self.type}={self.sid}')
+        return []
+    assert len(ids_ref) > 0, ids_ref
+    return ids_ref
+
+
+def nsm_ids(self) -> list[int]:
+    if self.ids_ref is None:
+        return self.ids
+    assert len(self.ids_ref) > 0, self.ids_ref
+    ids = []
+    for id_ref in self.ids_ref:
+        if isinstance(id_ref, integer_types):
+            ids.append(id_ref)
+        elif hasattr(id_ref, 'eid'):
+            ids.append(id_ref.eid)
+        elif hasattr(id_ref, 'pid'):
+            ids.append(id_ref.pid)
+        else:
+            raise RuntimeError(f'id_ref {id_ref!r} is not a number')
+    assert len(ids) > 0, f'ids={ids} self.ids={self.ids}'
+    return ids
 
 NSMs = NSM | NSM1 | NSML | NSML1

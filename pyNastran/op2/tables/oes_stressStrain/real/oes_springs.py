@@ -1,3 +1,4 @@
+import copy
 from itertools import count
 from typing import TextIO
 
@@ -10,10 +11,12 @@ from pyNastran.op2.result_objects.op2_objects import (
 from pyNastran.op2.result_objects.utils_pandas import build_dataframe_transient_header, build_pandas_transient_elements
 from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import (
     StressObject, StrainObject, OES_Object,
+    slice_eids_by_index,
     oes_real_data_code, set_static_case, set_modal_case,
     set_transient_case, set_post_buckling_case, set_element_case)
 from pyNastran.f06.f06_formatting import write_float_13e, write_float_13e_long, _eigenvalue_header
 from pyNastran.op2.op2_interface.write_utils import set_table3_field, view_dtype, view_idtype_as_fdtype
+from pyNastran.op2.writer.utils import fdtype_from_data
 
 ELEMENT_NAME_TO_ELEMENT_TYPE = {
     'CELAS1': 11,
@@ -116,6 +119,14 @@ class RealSpringArray(OES_Object):
         obj = set_post_buckling_case(cls, is_sort1, isubcase, data_code,
                                      set_element_case, (element, data),
                                      modes, eigrs, eigis)
+        return obj
+
+    def slice_by_element_id(self, eids: np.ndarray, assume_exists: bool=False, inplace: bool=False):
+        eids, ieid, neid2 = slice_eids_by_index(self.element, eids, assume_exists)
+        obj = self if inplace else copy.deepcopy(self)
+        obj.element = obj.element[ieid]
+        obj.data = obj.data[:, ieid, :]
+        obj.nelements = len(ieid)
         return obj
 
     @property
@@ -526,14 +537,7 @@ class RealSpringArray(OES_Object):
             raise NotImplementedError('SORT2')
         #struct1 = Struct(endian + b'if')
 
-        fdtype = self.data.dtype
-        if self.size == fdtype.itemsize:
-            pass
-        else:
-            # print(f'downcasting {self.class_name}...')
-            #idtype = np.int32(1)
-            fdtype = np.float32(1.0)
-
+        fdtype = fdtype_from_data(self.data, self.size)
         # [eid, stress]
         data_out = np.empty((nelements, 2), dtype=fdtype)
         data_out[:, 0] = view_idtype_as_fdtype(eids_device, fdtype)
@@ -695,7 +699,6 @@ class RealNonlinearSpringStressArray(OES_Object):
         _times = np.zeros(self.ntimes, dtype=self.analysis_fmt)
         element = np.zeros(self.nelements, dtype=idtype)
 
-
         #[force, stress]
         data = np.zeros((self.ntimes, self.nelements, 2), dtype=fdtype)
 
@@ -710,6 +713,54 @@ class RealNonlinearSpringStressArray(OES_Object):
             self._times = _times
             self.element = element
             self.data = data
+
+    def build_dataframe(self):
+        """creates a pandas dataframe
+
+        v 0.24
+        Static                     0
+        ElementID Item
+        30        spring_stress  0.0
+        31        spring_stress  0.0
+        32        spring_stress  0.0
+        33        spring_stress  0.0
+
+        v 0.25 for test_bdf_op2_elements_01
+        Static  ElementID  spring_stress
+        0              30            0.0
+        1              31            0.0
+        2              32            0.0
+        3              33            0.0
+        ...
+        """
+        import pandas as pd
+
+        headers = self.get_headers()
+        if self.nonlinear_factor not in (None, np.nan):
+            # Mode                                1             2             3
+            # Freq                     1.482246e-10  3.353940e-09  1.482246e-10
+            # Eigenvalue              -8.673617e-19  4.440892e-16  8.673617e-19
+            # Radians                  9.313226e-10  2.107342e-08  9.313226e-10
+            # ElementID Item
+            # 30        spring_stress           0.0          -0.0          -0.0
+            # 31        spring_stress           0.0          -0.0          -0.0
+            # 32        spring_stress           0.0           0.0           0.0
+            # 33        spring_stress           0.0           0.0           0.0
+            column_names, column_values = build_dataframe_transient_header(self)
+            data_frame = build_pandas_transient_elements(
+                self, column_values, column_names,
+                headers, self.element, self.data)
+        else:
+            #Static     spring_stress      spring_force
+            #ElementID
+            #30                   0.0               0.0
+            #31                   0.0               0.0
+            #32                   0.0               0.0
+            #33                   0.0               0.0
+            data_frame = pd.DataFrame(self.data[0], columns=headers, index=self.element)
+            data_frame.index.name = 'ElementID'
+            data_frame.columns.names = ['Static']
+        self.data_frame = data_frame
 
     def __eq__(self, table):  # pragma: no cover
         self._eq_header(table)

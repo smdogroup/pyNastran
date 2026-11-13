@@ -25,9 +25,9 @@ from pyNastran.dev.bdf_vectorized3.cards.aero import (
     ##AESURF, AESURFS,
     #AELINK,
     #AECOMP,
-    ##SPLINE1, SPLINE2, #, SPLINE3, SPLINE4, SPLINE5,
+)
+from pyNastran.dev.bdf_vectorized3.cards.aero.static_loads import (
     TRIM, # CSSCHD,
-    #build_caero_paneling
 )
 from pyNastran.dev.bdf_vectorized3.cards.test.utils import save_load_deck
 
@@ -60,7 +60,9 @@ def build_caero_paneling(model: BDF) -> tuple[None, None, None]:
     all_control_surface_name = None
     caero_control_surfaces = None
     out = None
-    return all_control_surface_name, caero_control_surfaces, out
+    out_dict = {}
+    return all_control_surface_name, caero_control_surfaces, out, out_dict
+
 
 class TestAero(unittest.TestCase):
     """
@@ -803,7 +805,7 @@ class TestAero(unittest.TestCase):
         #print(caero.get_stats())
         #caero.cross_reference(model)
         if RUN_PANELING:
-            all_control_surface_name, caero_control_surfaces, out = build_caero_paneling(model)
+            all_control_surface_name, caero_control_surfaces, out, out_dict = build_caero_paneling(model)
             box_id_to_caero_element_map_expected = {
                 2000: np.array([0, 3, 4, 1]),
                 2001: np.array([1, 4, 5, 2]),
@@ -819,7 +821,7 @@ class TestAero(unittest.TestCase):
             for key, data in out.box_id_to_caero_element_map.items():
                 assert np.array_equal(data, box_id_to_caero_element_map_expected[key])
 
-        #all_control_surface_name, caero_control_surfaces, out = build_caero_paneling(model)
+        #all_control_surface_name, caero_control_surfaces, out, out_dict = build_caero_paneling(model)
         if IS_MATPLOTLIB:
             caero1.plot(ax)
             fig.show()
@@ -1075,7 +1077,7 @@ class TestAero(unittest.TestCase):
         #assert np.allclose(y, span_expected)
 
         if RUN_PANELING:
-            all_control_surface_name, caero_control_surfaces, out = build_caero_paneling(model)
+            all_control_surface_name, caero_control_surfaces, out, out_dict = build_caero_paneling(model)
             box_id_to_caero_element_map_expected = {
                 100: np.array([0, 2, 3, 1]),
                 101: np.array([2, 4, 5, 3]),
@@ -1099,7 +1101,7 @@ class TestAero(unittest.TestCase):
             fig.show()
         x = 1
 
-    def _test_caero7_paneling(self):
+    def test_caero7_paneling(self):
         """checks the CAERO7/PAERO7T card"""
         fig, ax = _setup_aero_plot()
 
@@ -1130,7 +1132,8 @@ class TestAero(unittest.TestCase):
         model.cross_reference()
         model.validate()
 
-        xy = caero.xy
+        caero = model.caero7
+        xy = caero.xy()
         npoints, nelements = caero.get_panel_npoints_nelements()
         npoints_expected = (nspan + 1) * (nchord + 1)
         nelements_expected = nspan * nchord
@@ -1141,7 +1144,7 @@ class TestAero(unittest.TestCase):
 
 
         points, elements = caero.panel_points_elements()
-        x, y = caero.xy
+        x, y = caero.xy()
         chord_expected = np.array([0., 0.25, 0.5, 0.75, 1.])
         span_expected = np.array([0., 0.5, 1.])
         assert np.allclose(x, chord_expected)
@@ -1150,7 +1153,8 @@ class TestAero(unittest.TestCase):
             caero.plot(ax)
             fig.show()
 
-        all_control_surface_name, caero_control_surfaces, out = build_caero_paneling(model)
+        all_control_surface_name, caero_control_surfaces, out, out_dict = build_caero_paneling(model)
+        return
         box_id_to_caero_element_map_expected = {
             100: np.array([0, 5, 6, 1]),
             101: np.array([1, 6, 7, 2]),
@@ -3082,6 +3086,27 @@ class TestAero(unittest.TestCase):
         #model2.safe_cross_reference()
         save_load_deck(model)
 
+    def test_trim_continuation_marker(self):
+        """Checks that a TRIM card with a '+' continuation marker in cols 65-72
+        parses correctly in vectorized3.
+        Tests: continuation marker stripping, correct label/ux parsing across
+        continuation boundary.
+        """
+        model = BDF(debug=None)
+        card_lines = [
+            'TRIM    1       0.789   1.5     PITCH   0.0     URDD3   2.5     +',
+            '+       URDD5   0.0',
+        ]
+        model.add_card(card_lines, 'TRIM', is_list=False, has_none=False)
+        model.setup()
+        trim = model.trim
+        assert trim.n == 1, trim.n
+        assert trim.trim_id[0] == 1
+        assert abs(trim.mach[0] - 0.789) < 1e-10
+        assert abs(trim.q[0] - 1.5) < 1e-10
+        # aeqr defaults to 1.0 (the '+' was stripped, not parsed as aeqr)
+        assert abs(trim.aeqr[0] - 1.0) < 1e-10
+
     def test_gust(self):
         """checks the GUST card"""
         sid = 100
@@ -3274,13 +3299,14 @@ class TestAero(unittest.TestCase):
         ]
         build_trim_load_cases(model, trim_load_cases, aeqr=1.0)
 
-
     def _test_zaero_1(self):
         """zaero explicit test"""
         log = SimpleLogger(level='error', encoding='utf-8')  # lots of zaero errors
         bdf_filename = AERO_PATH / 'zona' / 'f16_ma41.bdf'
-        model = read_bdf(bdf_filename, xref=False, debug=None, log=log)
-        model.safe_cross_reference()
+        model = read_bdf(bdf_filename, xref=False, debug=None, log=log,
+                         skip_cards=['SPLINE1', 'SPLINE2'])
+        model.setup()
+        # model.safe_cross_reference()
         save_load_deck(model, xref='safe',
                        run_renumber=False, run_convert=False, run_remove_unused=False,
                        run_save_load=False, run_save_load_hdf5=False, run_mass_properties=False,

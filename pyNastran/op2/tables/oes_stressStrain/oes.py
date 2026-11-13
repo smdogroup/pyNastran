@@ -343,16 +343,20 @@ class OES:
             228,  # CQUADR
             232,  # CQUADR-composite
             243,  # CQUADX4
-            189,  # VUQUAD
-            190,  # VUTRIA
-            191,  # VUBEAM
             256,  # CPYRAM
             227,  # CTRIAR
             233, # CTRIAR-composite
             275,  # CPLSTS3
         ]
+        elements_to_skip = [
+            189,  # VUQUAD
+            190,  # VUTRIA
+            191,  # VUBEAM
+        ]
         if op2.element_type in elements_to_read:
             n = self._read_oes_4_sort(data, ndata)
+        elif op2.element_type in elements_to_skip:
+            n = ndata
         else:
             msg = op2.code_information()
             n = op2._not_implemented_or_skip(data, ndata, msg)
@@ -363,6 +367,8 @@ class OES:
         Reads the Stress Table 4
         """
         op2 = self.op2
+        # if op2.analysis_code != 1:
+        #     asdf
         if op2.table_name in NX_TABLES_BYTES:
             op2.to_nx(f' because table_name={op2.table_name}')
         #assert self.isubtable == -4, self.isubtable
@@ -1189,15 +1195,15 @@ class OES:
 
         table_name_bytes = op2.table_name
         assert isinstance(table_name_bytes, bytes), table_name_bytes
-        is_sort1 = table_name_bytes in SORT1_TABLES_BYTES
 
+        is_sort1 = table_name_bytes in SORT1_TABLES_BYTES
         if table_name_bytes in [b'OES1X1', b'OES1X',
-                                b'OES1C', b'OES1']:
+                                b'OES1C', b'OES1', b'OES1XMC',]:
             prefix = 'stress.'
             self._set_as_sort1()
         elif table_name_bytes == b'OES1A':
             prefix = 'stressa.'
-        elif table_name_bytes in [b'OSTR1X', b'OSTR1', b'OSTR1C']:
+        elif table_name_bytes in [b'OSTR1X', b'OSTR1', b'OSTR1C', b'OSTR1XMC']:
             prefix = 'strain.'
             self._set_as_sort1()
         elif table_name_bytes in [b'OES2', b'OSTR2', b'OES2C', b'OSTR2C']:
@@ -1209,9 +1215,9 @@ class OES:
             assert op2.thermal in {0, 2, 4, 8}, op2.code_information()
             prefix, postfix = get_shock_prefix_postfix(op2.thermal)
         elif table_name_bytes in [b'OESNLXD', b'OESNL1X', b'OESNLXR', b'OESNL2']:
-            prefix = 'nonlinear_'
+            prefix = 'nonlinear.'
         elif table_name_bytes in [b'OESNLXR2']:
-            prefix = 'nonlinear_'
+            prefix = 'nonlinear.'
         elif table_name_bytes == b'OESNLBR':
             prefix = 'sideline_'
         elif table_name_bytes == b'OESRT':
@@ -1295,10 +1301,17 @@ class OES:
             self._set_as_random()
             prefix = 'no.'
         elif table_name_bytes in [b'OESNO2', b'OSTRNO2']:
-            self._set_as_random()
-            self._set_as_sort1()
-            op2.data_code['nonlinear_factor'] = None
+            # same as OESRMS2/OSTRRMS2
             op2._analysis_code_fmt = b'i'
+            self._set_as_random()
+            self._set_as_sort1()  # it's not really SORT2...
+            op2.sort_method = 1
+            if table_name_bytes == b'OESNO2':
+                op2.table_name = b'OESNO1'
+            elif table_name_bytes == b'OSTRNO2':
+                op2.table_name = b'OSTRNO1'
+            else:
+                raise NotImplementedError(table_name_bytes)
             prefix = 'no.'
         #----------------------------------------------------------------
 
@@ -1364,6 +1377,10 @@ class OES:
             op2.format_code = 1
             op2.sort_bits[0] = 0 # real
             prefix = 'RAPCONS.'
+        elif table_name_bytes in [b'RAQCONS']:
+            op2.format_code = 1
+            op2.sort_bits[0] = 0 # real
+            prefix = 'RAQCONS.'
 
         elif table_name_bytes in [b'RASEATC']: #, b'OSTRMS1C']:
             self._set_as_real()
@@ -1374,6 +1391,9 @@ class OES:
         elif table_name_bytes in [b'RAPEATC']: #, b'OSTRMS1C']:
             self._set_as_real()
             prefix = 'RAPEATC.'
+        elif table_name_bytes in [b'RAQEATC']:
+            self._set_as_real()
+            prefix = 'RAQEATC.'
         elif table_name_bytes in [b'OESMC1', b'OSTRMC1']:
             prefix = 'modal_contribution.'
         elif table_name_bytes in [b'OESC1']:  # NX
@@ -1457,7 +1477,8 @@ class OES:
         dt = op2.nonlinear_factor
 
         if prefix and prefix.endswith('.') and op2._results.is_not_saved(prefix.strip('.')):
-            #op2.log.debug(f'returning on prefix={prefix}')
+            # op2.log.warning(f'returning on prefix={prefix}')
+            # op2.log.debug(f'returning on prefix={prefix}')
             return ndata
 
         #flag = 'element_id'
@@ -1475,6 +1496,8 @@ class OES:
 
         if op2._results.is_not_saved(result_name):
             return ndata
+
+        # print(f'prefix = {prefix}; element_type={op2.element_type}')
         if op2.element_type in [1, 3, 10]:  # rods
             # 1-CROD
             # 3-CTUBE
@@ -2094,7 +2117,6 @@ class OES:
                 floats1 = floats.reshape(nelements * nnodes_expected, 8)[:, 1:] # drop grid_device
 
                 # o1/o2/o3 is not max/mid/min.  They are not consistently ordered, so we force it.
-
                 obj.data[obj.itime, itotal:itotal2, :] = floats1
                 obj.itotal = itotal2
                 obj.ielement = itotali
@@ -3269,7 +3291,7 @@ class OES:
         return n, nelements, ntotal
 
     def _oes_shells_nonlinear(self, data, ndata, dt, is_magnitude_phase,
-                              result_type, prefix, postfix):
+                              result_type, prefix: str, postfix: str):
         """
         reads stress/strain for element type:
          - 88 : CTRIA3NL
@@ -3500,7 +3522,7 @@ class OES:
             raise NotImplementedError(op2.code_information())
 
         if op2.is_stress:
-            result_name = prefix + f'{prefix}{etype}_stress{postfix}' # nonlinear_
+            result_name = f'{prefix}{etype}{postfix}' # nonlinear.celas3_stress
         else:  # pragma: no cover
             raise NotImplementedError('NonlinearSpringStrain')
 
@@ -3888,12 +3910,19 @@ class OES:
         return n, nelements, ntotal
 
     def _oes_plate_stress_34(self, data, ndata, unused_dt, unused_is_magnitude_phase,
-                             unused_stress_name, unused_prefix, unused_postfix):
+                             unused_stress_name: str, prefix: str, postfix: str):
         """
         271-CPLSTN3
         275-CPLSTS3
         """
         op2 = self.op2
+        stress_strain = 'stress' if op2.is_stress else 'strain'
+        element_name = op2.element_name.lower()
+        result_name = f'{prefix}{element_name}_{stress_strain}{postfix}'
+        is_saved, slot = get_is_slot_saved(op2, result_name)
+        if not is_saved:
+            return ndata, None, None
+
         msg = op2.code_information()
         return op2._not_implemented_or_skip(data, ndata, msg), None, None
         #if op2.element_type == 271:
@@ -3953,11 +3982,18 @@ class OES:
             #return op2._not_implemented_or_skip(data, ndata, msg), None, None
 
     def _oes_plate_stress_68(self, data, ndata, unused_dt, unused_is_magnitude_phase,
-                             unused_stress_name, unused_prefix, unused_postfix):
+                             unused_stress_name: str, prefix: str, postfix: str):
         # 276-CPLSTS4
         # 277-CPLSTS6
         # 278-CPLSTS8
         op2 = self.op2
+        stress_strain = 'stress' if op2.is_stress else 'strain'
+        element_name = op2.element_name.lower()
+        result_name = f'{prefix}{element_name}_{stress_strain}{postfix}'
+        is_saved, slot = get_is_slot_saved(op2, result_name)
+        if not is_saved:
+            return ndata, None, None
+
         msg = op2.code_information()
         return op2._not_implemented_or_skip(data, ndata, msg), None, None
         #if op2.element_type == 276:

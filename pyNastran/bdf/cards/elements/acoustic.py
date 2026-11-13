@@ -11,6 +11,7 @@ All superelements are defined in this file.  This includes:
 
 """
 from __future__ import annotations
+import copy
 from typing import TYPE_CHECKING
 
 from pyNastran.bdf.cards.base_card import BaseCard, Element, Property
@@ -543,7 +544,7 @@ class PACABS(Element):
             a comment for the card
         """
         pid = integer(card, 1, 'pid')
-        synth = string_or_blank(card, 2, 'synth', 'YES')
+        synth = string_or_blank(card, 2, 'synth', default='YES')
         tid_resistance = integer(card, 3, 'tid_resistance')
         tid_reactance = integer(card, 4, 'tid_reactance')
         tid_weight = integer(card, 5, 'tid_weight')
@@ -555,7 +556,7 @@ class PACABS(Element):
         assert len(card) <= 11, f'len(PACABS card) = {len(card):d}\ncard={card}'
 
         assert synth in ['YES', 'NO'], synth
-        is_synth = synth == 'YES'
+        is_synth = (synth == 'YES')
         return PACABS(pid, cutfr, b, k, m, synth=is_synth,
                       tid_resistance=tid_resistance, tid_reactance=tid_reactance, tid_weight=tid_weight,
                       comment=comment)
@@ -697,6 +698,14 @@ class AMLREG(BaseCard):
         infid = [1]
         return AMLREG(rid, sid, name, infid)
 
+    def __deepcopy__(self, memo_dict: dict[int, Any]):
+        card = AMLREG(self.rid, self.sid, self.name,
+                      infid=copy.deepcopy(self.infid),
+                      nlayers=self.nlayers, radsurf=self.radsurf,
+                      comment=self.comment)
+        memo_dict[id(self)] = card
+        return card
+
     def __init__(self, rid: int, sid: int, name: str,
                  infid: list[int],
                  nlayers: int=5,
@@ -810,6 +819,11 @@ class MICPNT(BaseCard):
         name = 'MICPNT'
         return MICPNT(eid, nid, name)
 
+    def __deepcopy__(self, memo_dict: dict[int, Any]):
+        card = MICPNT(self.eid, self.nid, self.name, comment=self.comment)
+        memo_dict[id(self)] = card
+        return card
+
     def __init__(self, eid: int, nid: int, name: str,
                  comment: str=''):
         """
@@ -901,13 +915,26 @@ class ACMODL(Element):
         sset = 1
         return ACMODL(infor, fset, sset)
 
+    def __deepcopy__(self, memo_dict):
+        card = ACMODL(self.infor, self.fset, self.sset,
+                      # msc
+                      inter=self.inter, method=self.method,
+                      sk_neps=self.sk_neps, dsk_neps=self.dsk_neps, all_set=self.all_set,
+                      # nx
+                      normal=self.normal, olvpang=self.olvpang,
+                      search_unit=self.search_unit, intol=self.intol,
+                      area_op=self.area_op, ctype=self.ctype,
+                      nastran_version=self.nastran_version, comment=self.comment)
+        memo_dict[id(self)] = card
+        return card
+
     def __init__(self, infor: str, fset: int, sset: int,
-                 normal=0.5, olvpang=60., search_unit='REL',
-                 intol=0.2, area_op=0, ctype='STRONG',
-                 method='BW',
-                 sk_neps=0.5, dsk_neps=0.75, all_set='NO',
-                 inter='DIFF',
-                 nastran_version='nx', comment=''):
+                 normal: float=0.5, olvpang: float=60., search_unit: str='REL',
+                 intol: float=0.2, area_op: int=0, ctype: str='STRONG',
+                 method: str='BW',
+                 sk_neps: float=0.5, dsk_neps: float=0.75, all_set: str='NO',
+                 inter: str='DIFF',
+                 nastran_version: str='nx', comment: str=''):
         """
         Creates a ACMODL card
 
@@ -1118,6 +1145,23 @@ class PMIC(Property):
         return self.cross_reference(model)
     def uncross_reference(self) -> None:
         return
+
+    # PMIC (microphone) is massless; it may be used by CROD, CTRIA3,
+    # CQUAD4, CHEXA, CPENTA, CTETRA, and CPYRAM
+    def Rho(self) -> float:
+        return 0.0
+
+    def Area(self) -> float:
+        return 0.0
+
+    def Nsm(self) -> float:
+        return 0.0
+
+    def MassPerLength(self) -> float:
+        return 0.0
+
+    def MassPerArea(self, *args, **kwargs) -> float:
+        return 0.0
 
     def raw_fields(self):
         return ['PMIC', self.pid]

@@ -182,7 +182,7 @@ class BDFInputPy:
         if replace_includes is None:
             replace_includes = {}
 
-        # not used
+        self.bdf_filename = ''
         self.replace_includes: dict[str, str] = replace_includes
 
         self.dumplines: bool = dumplines
@@ -202,6 +202,9 @@ class BDFInputPy:
         self.log = get_logger(log, debug)
         self.use_new_parser: bool = False
         self.heavy_debug = False
+
+        # nlevels, list[files]
+        self._files_trace = {}
 
     def get_lines(self, bdf_filename: PathLike | StringIO,
                   punch: Optional[bool]=False,
@@ -453,7 +456,21 @@ class BDFInputPy:
             try:
                 lines = bdf_file.readlines()
             except UnicodeDecodeError:
-                _show_bad_file(self, bdf_filename, encoding=self.encoding)
+                encodings = [self.encoding, 'utf8', 'latin1', 'cp1252']
+                found_encodings = []
+                for encoding in encodings:
+                    try:
+                        with open(bdf_filename, encoding=encoding) as bdf_file_temp:
+                            lines = bdf_file_temp.readlines()
+                    except UnicodeDecodeError:
+                        continue
+                    found_encodings.append(encoding)
+                if len(found_encodings) > 1:
+                    raise RuntimeError(f'encoding={self.encoding} and should be one of {found_encodings}')
+                elif len(found_encodings):
+                    _show_bad_file(self, bdf_filename, encoding=found_encodings[0])
+                else:
+                    raise RuntimeError(f'Invalid encoding={self.encoding!r}; could not determine encoding from [latin1, cp1252, utf8].')
         return lines
 
     def lines_to_deck_lines(self, lines: list[str]) -> tuple[list[str], np.ndarray]:
@@ -480,7 +497,8 @@ class BDFInputPy:
         #bdf_filenames = [self.bdf_filename]
 
         make_ilines = True
-        ilines = _make_ilines(nlines, ifile=0)
+        # use a Python list during include-resolution to avoid O(n^2) np.vstack
+        ilines = [[0, iline] for iline in range(nlines)]
 
         i = 0
         ifile = 1
@@ -493,9 +511,11 @@ class BDFInputPy:
             if line_upper.startswith('INCLUDE'):
                 j, include_lines = self._get_include_lines(lines, line, i, nlines)
 
-                jfile = ilines[i, 0]
-                jline = ilines[i, 1]
+                jfile = ilines[i][0]
+                jline = ilines[i][1]
                 source_filename = os.path.abspath(self.loaded_filenames[jfile])
+                spaces = self._get_trace_spaces(source_filename)
+
                 include_dir = os.path.abspath(os.path.dirname(source_filename))
                 if self.debug and 0:  # pragma: no cover
                     print(f'jfile={jfile} jline={jline}')
@@ -513,6 +533,7 @@ class BDFInputPy:
                         include_dirs=include_dirs,
                         replace_includes=replace_includes,
                         source_filename=source_filename,
+                        spaces=spaces,
                         write_env_on_error=False,
                     )
                     if bdf_filename2 == '':
@@ -531,19 +552,15 @@ class BDFInputPy:
                         include_lines, bdf_filename2, i, j, ifile, source_file_line)
                     ifile += 1
                 else:
-                    bdf_filename2 = parse_include_lines(include_lines)
+                    bdf_filename2 = parse_include_lines(include_lines, log, spaces=spaces)
 
                     # these are the lines associated with the 1st/2nd include file found
                     self.include_lines[jfile].append((include_lines, bdf_filename2))
 
-                    # remove the include lines
-                    lines = lines[:i] + lines[j:]
+                    # remove the include lines (in-place splice)
+                    del lines[i:j]
                     if make_ilines:
-                        ilines = np.vstack([
-                            ilines[:i, :],
-                            ilines[j:, :],
-                        ])
-                        #assert len(ilines[:, 1]) == len(np.unique(ilines[:, 1]))
+                        del ilines[i:j]
                     # we have to reprocess the line just in case there is
                     # an include on the current line
                     i -= 1
@@ -556,15 +573,14 @@ class BDFInputPy:
             _dump_file(bdf_dump_filename, lines, i, self.encoding)
 
         #print(bdf_filenames)
-        #if make_ilines:
-            #nilines = ilines.shape[0]
-            #assert nlines == ilines.shape[0], 'nlines=%s nilines=%s' % (nlines, nilines)
+        # convert list-based ilines back to numpy array for downstream consumers
+        ilines = np.array(ilines, dtype='int32')
         return lines, ilines
 
-    def _update_include(self, lines: list[str], nlines: int, ilines: np.ndarray,
+    def _update_include(self, lines: list[str], nlines: int, ilines: list,
                         include_lines: list[str], bdf_filename2: str,
                         i: int, j: int, ifile: int,
-                        source_file_line: tuple[str, int]) -> tuple[list[str], int, np.ndarray]:
+                        source_file_line: tuple[str, int]) -> tuple[list[str], int, list]:
         """incorporates an include file into the lines
 
         Parameters
@@ -596,6 +612,7 @@ class BDFInputPy:
         ilines : (nlines, 2) int np.ndarray
            [ifile, iline] array
         """
+        source_filename, source_line = source_file_line
         try:
             self._open_file_checks(bdf_filename2)
         except IOError:
@@ -606,8 +623,8 @@ class BDFInputPy:
                 f'  Check the end of {crash_name!r}\n'
                 f'  bdf_filename2 = {bdf_filename2!r}\n'
                 f'  abs_filename2 = {os.path.abspath(bdf_filename2)!r}\n'
-                f'  source_filename = {source_file_line[0]!r}\n'
-                f'  source_line     = {source_file_line[1]}\n'
+                f'  source_filename = {source_filename!r}\n'
+                f'  source_line     = {source_line}\n'
                 f'  include_lines = {include_lines}')
             self.log.error('\n\n'+msg)
             #msg += 'len(bdf_filename2) = %s' % len(bdf_filename2)
@@ -616,7 +633,8 @@ class BDFInputPy:
             #raise IOError(msg)
 
         read_again = False
-        with self._open_file(bdf_filename2, basename=False, is_file0=False) as bdf_file:
+        with self._open_file(bdf_filename2, source_filename=source_filename,
+                             basename=False, is_file0=False) as bdf_file:
             #print('bdf_file.name = %s' % bdf_file.name)
             try:
                 lines2 = bdf_file.readlines()
@@ -678,39 +696,14 @@ class BDFInputPy:
 
         nlines2 = len(lines2)
         if 1:  # make_ilines:
-            ilines2 = _make_ilines(nlines2, ifile)
-            #n_ilines = ilines.shape[0]
-            #print(ilines[j:, :])
-            #assert len(lines[:i]) == ilines[:i+1, :].shape[0] - ifile, 'A: nlines=%s nilines=%s' % (len(lines[:i]), ilines[:i+1, :].shape[0])
-            #assert len(lines[j:]) == ilines[j:, :].shape[0],           'B: nlines=%s nilines=%s' % (len(lines[j:]), ilines[j:, :].shape[0])
-            #assert len(lines2) == ilines2.shape[0],                    'C: nlines=%s nilines=%s' % (len(lines2),    ilines2.shape[0])
-            #assert nlines == ilines.shape[0], 'B: nlines=%s nilines=%s' % (nlines, nilines)
-            #assert nlines == ilines.shape[0], 'C: nlines=%s nilines=%s' % (nlines, nilines)
-
-            #print(nlines-ifile+1, nlines2)
-            #print(
-                #len(lines[:i]),
-                #len([include_comment]),
-                #len(lines2),
-                #len(lines[j:]),
-            #)
-            #print(
-                #ilines[:i+1, :].shape[0],
-                #ilines2.shape[0],
-                #ilines[j:, :].shape[0],
-            #)
-            #print('ilines:\n%s' % ilines)
-            #print('ilines2:\n%s' % ilines2)
-            #print('lines2:\n%s' % ''.join(lines2))
-            ilines = np.vstack([
-                ilines[:i+1, :],
-                ilines2,
-                ilines[j:, :],
-            ])
+            ilines2_list = [[ifile, iline] for iline in range(nlines2)]
+            # in-place splice of ilines list
+            ilines[i+1:j] = ilines2_list
             #dij = j - i
 
         nlines += nlines2
-        lines = lines[:i] + [include_comment] + lines2 + lines[j:]
+        # in-place splice: replace lines[i:j] with [include_comment] + lines2
+        lines[i:j] = [include_comment] + lines2
         #print('*lines:\n%s' % ''.join(lines))
         #for ifile_iline, line in zip(ilines, lines):
             #print(ifile_iline, line.rstrip())
@@ -821,7 +814,52 @@ class BDFInputPy:
             log.error(msg)
             raise IOError(msg)
 
+    def _get_ilevel(self, source_filename: str | StringIO) -> int:
+        if not source_filename:
+            return 0
+
+        # self.log.debug(f'looking for {source_filename}')
+        for ilevel, source_filenames in self._files_trace.items():
+            for source_filenamei in source_filenames:
+                # self.log.debug(source_filenamei)
+                if source_filenamei == source_filename:
+                    return ilevel + 1
+        raise RuntimeError(f'could not find source filename={source_filename!r}')
+
+    def _get_trace_spaces(self, source_filename: str,
+                          bdf_filename_inc: str='') -> str:
+        """
+        Gets the spaces to properly indent files in the tree
+
+        Parameters
+        ----------
+        source_filename : str
+            the path to the main file
+        bdf_filename_inc : str; default=''
+            The filename to include.
+            If we haven't determined the bdf_filename_inc yet, this will be
+            empty. It's used for writing better warning messages.
+
+        Returns
+        -------
+        spaces : str
+            the indentation level as a string
+
+        """
+        ilevel = self._get_ilevel(source_filename)
+        spaces = ' ' * ilevel
+
+        if bdf_filename_inc:
+            bdf_filename_inc = os.path.abspath(bdf_filename_inc)
+            # self.log.debug(f'adding {bdf_filename_inc}')
+            if ilevel not in self._files_trace:
+                self._files_trace[ilevel] = [bdf_filename_inc]
+            else:
+                self._files_trace[ilevel].append(bdf_filename_inc)
+        return spaces
+
     def _open_file(self, bdf_filename: str | StringIO,
+                   source_filename: str='',
                    basename: bool=False, check: bool=True,
                    encoding: Optional[str]=None,
                    is_file0: bool=False) -> Any:
@@ -845,19 +883,23 @@ class BDFInputPy:
         """
         if encoding is None:
             encoding = self.encoding
+
         if basename:
             bdf_filename_inc = os.path.join(self.include_dir, os.path.basename(bdf_filename))
         else:
             bdf_filename_inc = os.path.join(self.include_dir, bdf_filename)
+
+        spaces = self._get_trace_spaces(source_filename, bdf_filename_inc)
 
         # bdf_filename
         self._validate_open_file(bdf_filename_inc, check)
 
         #ifile = len(self.active_filenames)
         if is_file0 or is_file_case_sensitive(bdf_filename_inc):
-            self.log.debug(f'opening {bdf_filename_inc!r}')
+            # we don't need to verify the case on the input file
+            self.log.debug(f'{spaces}- {bdf_filename_inc!r}')
         else:
-            self.log.warning(f'opening {bdf_filename_inc!r} (not case sensitive)')
+            self.log.warning(f'{spaces}- {bdf_filename_inc!r} (not case sensitive)')
 
         self.active_filenames.append(bdf_filename_inc)
         self.loaded_filenames.append(bdf_filename_inc)
@@ -2166,6 +2208,7 @@ def lines_to_decks2(lines: list[str],
         ilines = np.zeros((nlines, 2), dtype='int32')
         ilines[:, 1] = np.arange(nlines)
     assert ilines is not None, ilines
+    ilines_list = ilines.tolist() if isinstance(ilines, np.ndarray) else ilines
 
     system_lines: list[str] = []
     executive_control_lines: list[str] = []   # flag = 1
@@ -2219,7 +2262,7 @@ def lines_to_decks2(lines: list[str],
     save_comment_flag = False
     for i, line in enumerate(lines):
         # handle empty comments
-        file_iline = ilines[i]
+        file_iline = ilines_list[i]
         line = line.rstrip()
         if '$' in line:
             idollar = line.index('$')
@@ -2339,7 +2382,7 @@ def lines_to_decks2(lines: list[str],
 
     bulk_data_ilines = np.zeros((0, 2), dtype='int32')
     if len(bulk_data_ilines_list):
-        bulk_data_ilines = np.vstack(bulk_data_ilines_list)
+        bulk_data_ilines = np.array(bulk_data_ilines_list, dtype='int32')
         assert len(bulk_data_lines) == len(bulk_data_ilines)
         del bulk_data_ilines_list
 

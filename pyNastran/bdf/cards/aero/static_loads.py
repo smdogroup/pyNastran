@@ -6,6 +6,8 @@ All trim aero cards are defined in this file.  This includes:
  * CSSCHD
  * DIVERG
  * TRIM
+ * AEFORCE
+ * AEPRESS
 
 All cards are BaseCard objects.
 
@@ -483,8 +485,10 @@ class CSSCHD(Aero):
         """
         msg = ', which is required by CSSCHD sid=%s' % self.sid
         self.aesurf_ref = model.AESurf_int(self.aesurf_id, msg=msg)
-        self.lalpha_ref = model.AEFact(self.lalpha, msg=msg)
-        self.lmach_ref = model.AEFact(self.lmach, msg=msg)
+        if self.lalpha is not None:
+            self.lalpha_ref = model.AEFact(self.lalpha, msg=msg)
+        if self.lmach is not None:
+            self.lmach_ref = model.AEFact(self.lmach, msg=msg)
         self.lschd_ref = model.AEFact(self.lschd, msg=msg)
 
     def safe_cross_reference(self, model: BDF, xref_errors):
@@ -494,8 +498,10 @@ class CSSCHD(Aero):
         except KeyError:
             pass
 
-        self.lalpha_ref = model.safe_aefact(self.lalpha, self.sid, xref_errors, msg=msg)
-        self.lmach_ref = model.safe_aefact(self.lmach, self.sid, xref_errors, msg=msg)
+        if self.lalpha is not None:
+            self.lalpha_ref = model.safe_aefact(self.lalpha, self.sid, xref_errors, msg=msg)
+        if self.lmach is not None:
+            self.lmach_ref = model.safe_aefact(self.lmach, self.sid, xref_errors, msg=msg)
         self.lschd_ref = model.safe_aefact(self.lschd, self.sid, xref_errors, msg=msg)
 
     def uncross_reference(self) -> None:
@@ -952,6 +958,7 @@ class TRIM(BaseCard):
         nminus = ntrim + naelink + nsuport_dofs + nsuport1_dofs
 
         ndelta = nplus - nminus + 0*2*ntrim_aesurfs
+        unused_names = list(set(labels) - set(trim_labels) - set(aelink_labels))
         if ndelta != 0:
             # msg = (
             #     '(naestat + naesurf + naeparm) - (ntrim + ntrim_aesurf? + naelink + '
@@ -978,6 +985,7 @@ class TRIM(BaseCard):
                 f'  -naelink = {naelink}; {aelink_labels}\n'
                 f'  -nsuport_dofs = {nsuport_dofs}\n'
                 f'  -nsuport1_dofs = {nsuport1_dofs}\n'
+                f'  unused = {unused_names}\n'
                 f'{suport_dof_msg2}\n\n'
             )
             msg += str(self)
@@ -1245,10 +1253,360 @@ class UXVEC(BaseCard):
             list_fields += [label, ux]
         return list_fields
 
+    def write_card(self, size: int=8, is_double: bool=False) -> str:
+        card = self.repr_fields()
+        return self.comment + print_card_8(card)
+
     # def repr_fields(self):
     #     # fixes a Nastran bug
     #     list_fields = self.raw_fields()
     #     return list_fields
+
+
+class AEFORCE(BaseCard):
+    """
+    Parametric Force for Aerodynamics
+
+    Defines a vector of absolute forces (not scaled by dynamic
+    pressure) associated with a particular control vector.
+    This force vector may be defined on either the aerodynamic
+    mesh (ks-set) or the structural mesh (g-set). The force
+    vector will be used in nonlinear static aeroelastic trim.
+
+    +---------+------+--------+-------+------+------+-------+------+
+    |    1    |   2  |    3   |   4   |   5  |  6   |   7   |  8   |
+    +=========+======+========+=======+======+======+=======+======+
+    | AEFORCE | MACH |  SYMXZ | SYMXY | UXID | MESH | FORCE | DMIK |
+    +---------+------+--------+-------+------+------+-------+------+
+    | AEFORCE | 0.90 |  SYMM  | ASYMM |  101 | AERO |       | BETA |
+    +---------+------+--------+-------+------+------+-------+------+
+
+    Note: NX uses absolute forces, MSC is per q
+          Siemens and MSC: Add a flag please.
+    """
+    type = 'AEFORCE'
+
+    @classmethod
+    def _init_from_empty(cls):
+        mach = 0.0
+        sym_xz = 'ASYM'
+        sym_xy = 'ASYM'
+        uxid = 1
+        mesh = 'STRUCT'
+        force = 2
+        dmik = 0
+        return AEFORCE(mach, sym_xz, sym_xy, uxid, mesh, force, dmik)
+
+    def __init__(self, mach: float, sym_xz: str, sym_xy: str,
+                 uxid: int, mesh: str,
+                 force: int=0,
+                 dmik: str='', perq: str='', comment: str=''):
+        """
+        Creates an AEFORCE card.
+
+        Attributes
+        ----------
+        mach : float
+            Mach number for this force. See Remark 2 (0.0 <= mach < 1.0).
+        sym_xz, sym_xy : str
+            The symmetry of this force vector. One of SYMM, ASYMM or ANTI.
+        uxid : int
+            The identification number of a UXVEC entry that defines the
+            control parameter vector associated with this downwash vector.
+        mesh : str
+            AERO or STRUCT that declares whether the force vector
+            is defined on the aerodynamic ks-set mesh or the structural
+            g-set mesh.
+        force : int=0
+            ID of a FORCE/MOMENT set that defines the vector.
+            Required if mesh='STRUCT'.
+        dmik: str=''
+            Name of a DMIK entry that defines the aerodynamic force
+            vector.  Required if mesh='AERO'.
+        """
+        BaseCard.__init__(self)
+        if comment:
+            self.comment = comment
+        self.mach = mach
+        self.sym_xz = sym_xz
+        self.sym_xy = sym_xy
+        self.uxid = uxid
+        self.mesh = mesh
+        self.force = force
+        self.dmik = dmik
+        assert isinstance(force, integer_types), f'force={force}'
+        assert isinstance(dmik, str), f'dmik={dmik!r}'
+        self.uxid_ref = None
+        self.force_ref = None
+        self.dmik_ref = None
+
+    @classmethod
+    def add_card(cls, card: BDFCard, comment: str=''):
+        """
+        Adds a AEFORCE card from ``BDF.add_card(...)``
+
+        Parameters
+        ----------
+        card : BDFCard()
+            a BDFCard object
+        comment : str; default=''
+            a comment for the card
+
+        """
+        mach = double(card, 1, 'mach')
+        sym_xz = string(card, 2, 'sym_xz')
+        sym_xy = string(card, 3, 'sym_xy')
+        uxid = integer(card, 4, 'uxid')
+        mesh = string(card, 5, 'mesh')
+        assert mesh in {'STRUCT', 'AERO'}, f'mesh={mesh!r}'
+        force = integer_or_blank(card, 6, 'force', default='')
+        dmik = string_or_blank(card, 7, 'dmik', default='')
+        assert len(card) <= 8, f'len(AEFORCE card) = {len(card):d}\ncard={card}'
+        return AEFORCE(mach, sym_xz, sym_xy, uxid, mesh, force, dmik, comment=comment)
+
+    def cross_reference(self, model: BDF) -> None:
+        msg = f', which is required by {self.type} for mach={self.mach}'
+        self.uxid_ref = model.UXVEC(self.uxid, msg=msg)
+        if self.force:
+            self.force_ref = model.Load(self.force, msg=msg)
+        if self.dmik:
+            self.force_ref = model.DMIK(self.dmik, msg=msg)
+
+    #def uncross_reference(self) -> None:
+        #pass
+
+    def raw_fields(self):
+        list_fields = [
+            'AEFORCE', self.mach, self.sym_xz, self.sym_xy, self.uxid,
+            self.mesh, self.force, self.dmik]
+        return list_fields
+
+    def write_card(self, size: int=8, is_double: bool=False) -> str:
+        card = self.repr_fields()
+        return self.comment + print_card_8(card)
+
+
+class AEPRESS(BaseCard):
+    """
+    Parametric Pressure Loading for Aerodynamics
+    
+    Defines a vector of pressure/unit dynamic pressure
+    associated with a particular control vector. From
+    this pressure vector, a force vector on the
+    aerodynamic grids will be defined for use in
+    nonlinear static aeroelastic trim.
+
+    +---------+------+-------+-------+------+------+-------+
+    |    1    |   2  |   3   |   4   |   5  |  6   |   7   |
+    +=========+======+=======+=======+======+======+=======+
+    | AEPRESS | MACH | SYMXZ | SYMXY | UXID | DMIJ | DMIJI |
+    +---------+------+-------+-------+------+------+-------+
+    | AEPRESS | 0.90 | SYMM  | ASYMM | 101  | ALP1 |       |
+    +---------+------+-------+-------+------+------+-------+
+
+    """
+    type = 'AEPRESS'
+
+    @classmethod
+    def _init_from_empty(cls):
+        mach = 0.0
+        sym_xz = 'ASYM'
+        sym_xy = 'ASYM'
+        uxid = 1
+        dmij = 'CAT'
+        dmiji = ''
+        return AEPRESS(mach, sym_xz, sym_xy, uxid, dmij, dmiji)
+
+    def __init__(self, mach: float, sym_xz: str, sym_xy: str,
+                 uxid: int,
+                 dmij: str='',
+                 dmiji: str='', comment: str=''):
+        """
+        Creates an AEPRESS card.
+
+        Attributes
+        ----------
+        mach : float
+            Mach number for this force. See Remark 2 (0.0 <= mach < 1.0).
+        sym_xz, sym_xy : str
+            The symmetry of this force vector. One of SYMM, ASYMM or ANTI.
+        uxid : int
+            The identification number of a UXVEC entry that defines the
+            control parameter vector associated with this downwash vector.
+        dmij : str; default=''
+            Name of a DMI or DMIJ entry that defines the pressure per
+            unit dynamic pressure.
+        dmiji : str; default=''
+            The name of a DMIJI entry that defines the CAERO2
+            interference element downwashes.
+        """
+        BaseCard.__init__(self)
+        if comment:
+            self.comment = comment
+        self.mach = mach
+        self.sym_xz = sym_xz
+        self.sym_xy = sym_xy
+        self.uxid = uxid
+        self.dmij = dmij
+        self.dmiji = dmiji
+        self.uxid_ref = None
+        self.dmij_ref = None
+        self.dmiji_ref = None
+
+    @classmethod
+    def add_card(cls, card: BDFCard, comment: str=''):
+        """
+        Adds a AEPRESS card from ``BDF.add_card(...)``
+
+        Parameters
+        ----------
+        card : BDFCard()
+            a BDFCard object
+        comment : str; default=''
+            a comment for the card
+
+        """
+        mach = double(card, 1, 'mach')
+        sym_xz = string(card, 2, 'sym_xz')
+        sym_xy = string(card, 3, 'sym_xy')
+        uxid = integer(card, 4, 'uxid')
+        dmij = string_or_blank(card, 5, 'dmij', default='')
+        dmiji = string_or_blank(card, 6, 'dmiji', default='')
+        assert len(card) <= 7, f'len(AEPRESS card) = {len(card):d}\ncard={card}'
+        return AEPRESS(mach, sym_xz, sym_xy, uxid, dmij, dmiji, comment=comment)
+
+    def cross_reference(self, model: BDF) -> None:
+        msg = f', which is required by {self.type} for mach={self.mach}'
+        self.uxid_ref = model.UXVEC(self.uxid, msg=msg)
+        if self.dmij:
+            self.dmij_ref = model.DMIJ(self.dmij, msg=msg)
+        if self.dmiji:
+            self.dmiji_ref = model.DMIJI(self.dmiji, msg=msg)
+
+    #def uncross_reference(self) -> None:
+        #pass
+
+    def raw_fields(self):
+        list_fields = [
+            'AEPRESS', self.mach, self.sym_xz, self.sym_xy, self.uxid,
+            self.dmij, self.dmiji]
+        return list_fields
+
+    def write_card(self, size: int=8, is_double: bool=False) -> str:
+        card = self.repr_fields()
+        return self.comment + print_card_8(card)
+
+
+class AEDW(BaseCard):
+    """
+    Parametric Normal Wash Loading for Aerodynamics
+
+    Defines a downwash vector associated with a particular
+    control vector of the associated aerodynamic
+    configuration (AECONFIG). From this downwash vector,
+    a force vector on the aerodynamic grids will be
+    defined for use in nonlinear static aeroelastic trim.
+
+    +------+------+-------+-------+------+------+-------+
+    |  1   |   2  |   3   |   4   |   5  |  6   |   7   |
+    +======+======+=======+=======+======+======+=======+
+    | AEDW | MACH | SYMXZ | SYMXY | UXID | DMIJ | DMIJI |
+    +------+------+-------+-------+------+------+-------+
+    | AEDW | 0.90 | SYMM  | ASYMM | 101  | ALP1 |       |
+    +------+------+-------+-------+------+------+-------+
+
+    """
+    type = 'AEDW'
+
+    @classmethod
+    def _init_from_empty(cls):
+        mach = 0.0
+        sym_xz = 'ASYM'
+        sym_xy = 'ASYM'
+        uxid = 1
+        dmij = 2
+        dmiji = 0
+        return AEPRESS(mach, sym_xz, sym_xy, uxid, dmij, dmiji)
+
+    def __init__(self, mach: float, sym_xz: str, sym_xy: str,
+                 uxid: int,
+                 dmij: str='',
+                 dmiji: str='', comment: str=''):
+        """
+        Creates an AEDW card.
+
+        Attributes
+        ----------
+        mach : float
+            Mach number for this force. See Remark 2 (0.0 <= mach < 1.0).
+        sym_xz, sym_xy : str
+            The symmetry of this force vector. One of SYMM, ASYMM or ANTI.
+        uxid : int
+            The identification number of a UXVEC entry that defines the
+            control parameter vector associated with this downwash vector.
+        dmij : str; default=''
+            Name of a DMI or DMIJ entry that defines the pressure per
+            unit dynamic pressure.
+        dmiji : str; default=''
+            The name of a DMIJI entry that defines the CAERO2
+            interference element downwashes.
+        """
+        BaseCard.__init__(self)
+        if comment:
+            self.comment = comment
+        self.mach = mach
+        self.sym_xz = sym_xz
+        self.sym_xy = sym_xy
+        self.uxid = uxid
+        self.dmij = dmij
+        self.dmiji = dmiji
+        self.uxid_ref = None
+        self.dmij_ref = None
+        self.dmiji_ref = None
+
+    @classmethod
+    def add_card(cls, card: BDFCard, comment: str=''):
+        """
+        Adds a AEDW card from ``BDF.add_card(...)``
+
+        Parameters
+        ----------
+        card : BDFCard()
+            a BDFCard object
+        comment : str; default=''
+            a comment for the card
+
+        """
+        mach = double(card, 1, 'mach')
+        sym_xz = string(card, 2, 'sym_xz')
+        sym_xy = string(card, 3, 'sym_xy')
+        uxid = integer(card, 4, 'uxid')
+        dmij = string_or_blank(card, 5, 'dmij', default='')
+        dmiji = string_or_blank(card, 6, 'dmiji', default='')
+        assert len(card) <= 7, f'len(AEDW card) = {len(card):d}\ncard={card}'
+        return AEDW(mach, sym_xz, sym_xy, uxid, dmij, dmiji, comment=comment)
+
+    def cross_reference(self, model: BDF) -> None:
+        msg = f', which is required by {self.type} for mach={self.mach}'
+        self.uxid_ref = model.UXVEC(self.uxid, msg=msg)
+        if self.dmij:
+            self.dmij_ref = model.DMIJ(self.dmij, msg=msg)
+        if self.dmiji:
+            self.dmiji_ref = model.DMIJI(self.dmiji, msg=msg)
+
+    #def uncross_reference(self) -> None:
+        #pass
+
+    def raw_fields(self):
+        list_fields = [
+            'AEDW', self.mach, self.sym_xz, self.sym_xy, self.uxid,
+            self.dmij, self.dmiji]
+        return list_fields
+
+    def write_card(self, size: int=8, is_double: bool=False) -> str:
+        card = self.repr_fields()
+        return self.comment + print_card_8(card)
+
 
 def get_suport_dofs(suport: list[SUPORT],
                     suport_nid_dofs: set[tuple[int, str]],

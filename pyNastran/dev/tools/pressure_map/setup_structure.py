@@ -3,12 +3,13 @@ import numpy as np
 
 from pyNastran.utils import PathLike, print_bad_path
 from pyNastran.bdf.bdf import BDF
+from .utils import log_range
 
 
 def get_structural_eids_from_csv_load_id(structure_model: BDF,
                                          eids_structure: np.ndarray,
-                                         csv_filename: PathLike='',
-                                         load_id: int=0,
+                                         eid_csv_filename: PathLike='',
+                                         eid_load_id: int=0,
                                          idtype: str='int32') -> np.ndarray:
     """
     Parameters
@@ -17,49 +18,55 @@ def get_structural_eids_from_csv_load_id(structure_model: BDF,
         ???
     eids_structure : np.ndarray
         the direct method to specify eids
-    csv_filename : PathLike; default=''
-        ???
-    load_id : int; default=0
-        ???
+    eid_csv_filename : PathLike; default=''
+        a csv of the element ids
+    eid_load_id : int; default=0
+        -1: use all elements
+        1+: grab the eids defined on the PLOAD, PLOAD2, or PLOAD4
     idtype : str; default='int32'
         the integer type
 
     Returns
     -------
+    structural_eids_out : int np.ndarray
+        the element ids
     """
     nelements = len(eids_structure)
     # one must be true
     is_nelements = (nelements > 0)
-    is_csv = len(csv_filename) > 0
-    is_load_id = (abs(load_id) > 0)
+    is_csv = len(eid_csv_filename) > 0
+    is_load_id = (abs(eid_load_id) > 0)
     # exclusive or / XOR
     is_passed = (is_nelements ^ is_csv) or (is_csv ^ is_load_id)
     if not is_passed:
-        raise RuntimeError(f'is_nelements={is_nelements}, is_csv={is_csv}, csv_filename={csv_filename!r} load_id={load_id}, is_load_id={is_load_id}')
+        raise RuntimeError(f'is_nelements={is_nelements}, is_csv={is_csv}, eid_csv_filename={eid_csv_filename!r} eid_load_id={eid_load_id}, is_load_id={is_load_id}')
 
-    assert nelements == '' or csv_filename == '' or load_id == 0, (nelements, csv_filename, load_id)
-    assert nelements or abs(load_id) > 0, (nelements, csv_filename, load_id)
+    assert nelements == '' or eid_csv_filename == '' or eid_load_id == 0, (nelements, eid_csv_filename, eid_load_id)
+    assert nelements or abs(eid_load_id) > 0, (nelements, eid_csv_filename, eid_load_id)
 
     if nelements:
         structural_eids_out = eids_structure
-    elif csv_filename:
-        structural_eids_out = _load_structural_eids_from_csv(csv_filename, idtype=idtype)
-    elif load_id == -1:
+    elif eid_csv_filename:
+        structural_eids_out = _load_structural_eids_from_csv(
+            eid_csv_filename, idtype=idtype)
+    elif eid_load_id == -1:
         ids = list(structure_model.elements)
         structural_eids_out = np.array(ids, dtype=idtype)
         del ids
-    elif load_id > 0:
+    elif eid_load_id > 0:
         # load_id
-        structural_eids_out = get_element_ids_by_sid(structure_model, load_id, idtype=idtype)
+        structural_eids_out = get_element_ids_by_sid(
+            structure_model, eid_load_id, idtype=idtype)
     else:  # pragma: no cover
-        raise RuntimeError('failed to load eids')
+        raise RuntimeError('failed to load eids; use eids_structure, eid_csv_filename, eid_load_id')
     structural_eids_out.sort()
     return structural_eids_out
 
 
-def _load_structural_eids_from_csv(csv_filename: PathLike, idtype: str='int32'):
-    assert os.path.exists(csv_filename), print_bad_path(csv_filename)
-    with open(csv_filename, 'r') as csv_file:
+def _load_structural_eids_from_csv(eid_csv_filename: PathLike,
+                                   idtype: str='int32'):
+    assert os.path.exists(eid_csv_filename), print_bad_path(eid_csv_filename)
+    with open(eid_csv_filename, 'r') as csv_file:
         lines = csv_file.readlines()
 
     structural_eids_set = set([])
@@ -132,14 +139,8 @@ def get_structure_xyz(structure_model: BDF,
     structure_xyz = xyz_cid0
 
     log = structure_model.log
-    xyz_min = xyz_cid0.min(axis=0)
-    xyz_max = xyz_cid0.max(axis=0)
-    dxyz = xyz_max - xyz_min
-
     log.info(f'structure xyz range:')
-    log.info(f'    xyz_min ({xyz_units}) = {xyz_min}')
-    log.info(f'    xyz_max ({xyz_units}) = {xyz_max}')
-    log.info(f'    dxyz    ({xyz_units}) = {dxyz}')
+    log_range(log.debug, xyz_cid0, xyz_units)
 
     return structure_nodes, structure_xyz
 
@@ -175,8 +176,16 @@ def get_mapped_structure(structure_model: BDF,
     structure_areas = np.zeros(nelements, dtype=fdtype)
     structure_centroids = np.zeros((nelements, 3), dtype=fdtype)
     structure_normals = np.zeros((nelements, 3), dtype=fdtype)
+    SKIP_ELEMENTS = {
+        'CROD', 'CTUBE', 'CONROD', 'CBAR', 'CBEAM',
+        'CELAS1', 'CELAS2', 'CELAS3', 'CELAS4',
+        'CDAMP1', 'CDAMP2', 'CDAMP3', 'CDAMP4',
+        'CBUSH', 'CVISC',
+    }
     for ieid, eid in enumerate(structure_eids):
         elem = structure_model.elements[eid]
+        if elem.type in SKIP_ELEMENTS:
+            continue
         assert elem.type in {'CTRIA3', 'CQUAD4', 'CTRIA6', 'CQUAD8', 'CQUAD'}, elem
         area, centroid, normal = elem.AreaCentroidNormal()
         structure_areas[ieid] = area

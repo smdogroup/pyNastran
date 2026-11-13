@@ -14,7 +14,7 @@ from pyNastran.op2.errors import (
 
 from pyNastran.dev.op2_vectorized3.op2_geom import OP2, OP2Geom, DuplicateIDsError
 #from pyNastran.dev.op2_vectorized3.op2_interface.op2_writer import op2_write_op2
-from pyNastran.utils import is_binary_file
+from pyNastran.utils import is_binary_file, PathLike
 
 np.set_printoptions(precision=3, threshold=20)
 
@@ -26,12 +26,12 @@ except ImportError:
 
 try:
     import tables
-    IS_HDF5 = True
+    IS_PYTABLES = True
 except ImportError:
-    IS_HDF5 = False
+    IS_PYTABLES = False
 
 IS_PANDAS = False
-IS_HDF5 = False
+IS_PYTABLES = False
 #import warnings
 #warnings.filterwarnings('error')
 #warnings.filterwarnings('error', category=UnicodeWarning)
@@ -124,7 +124,7 @@ def run_lots_of_files(files, make_geom: bool=True, combine: bool=True,
     return failed_cases
 
 
-def run_op2(op2_filename: str, make_geom: bool=False,
+def run_op2(op2_filename: PathLike, make_geom: bool=False,
             run_geom_check: bool=True, combine: bool=True,
             write_bdf: bool=False, read_bdf: Optional[bool]=None,
             write_f06: bool=True, write_op2: bool=False,
@@ -261,7 +261,7 @@ def run_op2(op2_filename: str, make_geom: bool=False,
         op2_bdf = OP2Geom(debug=debug, log=log)
         set_versions([op2, op2_nv, op2_bdf], is_nx, is_autodesk, post, is_testing)
 
-        if load_as_h5 and IS_HDF5:
+        if load_as_h5 and IS_PYTABLES:
             # you can't open the same h5 file twice
             op2.load_as_h5 = load_as_h5
             #op2_nv.load_as_h5 = load_as_h5
@@ -275,7 +275,7 @@ def run_op2(op2_filename: str, make_geom: bool=False,
         op2_nv = OP2(debug=debug, log=log, debug_file=debug_file)
 
         set_versions([op2, op2_nv], is_nx, is_autodesk, post, is_testing)
-        if load_as_h5 and IS_HDF5:
+        if load_as_h5 and IS_PYTABLES:
             # you can't open the same h5 file twice
             op2.load_as_h5 = load_as_h5
             #op2_nv.load_as_h5 = load_as_h5
@@ -330,9 +330,10 @@ def run_op2(op2_filename: str, make_geom: bool=False,
         if compare:
             assert op2 == op2_nv
 
-        if IS_HDF5 and write_hdf5:
+        if IS_PYTABLES and write_hdf5:
             from pyNastran.op2.op2_interface.hdf5_interface import load_op2_from_hdf5_filename
             h5_filename = f'{model}.test_op2{name}.h5'
+            op2.write_h5('model_' + h5_filename)
             op2.export_hdf5_filename(h5_filename)
             load_op2_from_hdf5_filename(h5_filename, log=op2.log)
             if delete_hdf5:
@@ -511,7 +512,7 @@ def get_test_op2_data(argv) -> dict[str, str]:
     is_dev = 'dev' in ver
 
     msg = "Usage:  "
-    version = f'[--nx|--autodesk]'
+    version = '[--nx|--autodesk]'
     options = f'[-p] [-d] [-z] [-w] [-t] [-s <sub>] [-x <arg>]... {version} [--safe] [--post POST] [--load_hdf5]'
     if is_dev:
         line1 = f"test_op2 [-q] [-b] [-c] [-g] [-n] [-f] [-o] [--profile] [--test] [--nocombine] {options} OP2_FILENAME\n"

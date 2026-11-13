@@ -13,8 +13,9 @@ from pyNastran.utils import int_version
 try:
     import imageio
     IMAGEIO_VERSION = int_version('imageio', imageio.__version__)
-    if IMAGEIO_VERSION >= [2, 16, 2]:
-        import imageio.v2 as imageio
+    # if IMAGEIO_VERSION >= [2, 16, 2]:
+        # import imageio.v2 as imageio
+    import imageio.v3 as imageio3
     import PIL
     IS_IMAGEIO = True
 except ModuleNotFoundError:
@@ -31,6 +32,17 @@ if IS_IMAGEIO:
     from pyNastran.utils import int_version
     iver = int_version('pillow', PIL.__version__)
     assert iver != [7, 1, 0], 'pillow=7.1.0 is not supported'
+DEBUG_ANIMATION = False
+
+DIV2_PROFILES = {
+    '0 to scale to 0',
+    '-scale to scale to -scale',
+}
+DIV4_PROFILES = {
+    '0 to scale to -scale to 0',
+    'sinusoidal: 0 to scale to -scale to 0',
+    'sinusoidal: scale to -scale to scale',
+}
 
 
 def setup_animation(scale, istep=None,
@@ -44,7 +56,11 @@ def setup_animation(scale, istep=None,
                     icase_vector_start=None, icase_vector_end=None, icase_vector_delta=None,
 
                     time: float=2.0, animation_profile: str='0 to scale',
-                    fps: int=30, animate_in_gui: bool=False):
+                    fps: int=30, animate_in_gui: bool=False) -> tuple[
+                    # phases2, icases_fringe2, icases_disp2, icases_vector2,
+                    list[float], list[int], list[int], list[int],
+                    # isteps2, scales2, analysis_time, onesided, endpoint,
+                    list[int], list[float], float, bool, bool]:
     """
     helper method for ``make_gif``
 
@@ -61,16 +77,46 @@ def setup_animation(scale, istep=None,
         the displacement scale factor; true scale
     analysis_time : float
         the time that needs to be simulated for the analysis; not the runtime
+    animation_profile : str; default='0 to scale'
+        profile type
+    time : float; default=2.0
+        total time of the animation
+        time and fps are used to calculate the number of frames
+    fps : int; default=30
+        frames per second
+        time and fps are used to calculate the number of frames
+    animate_in_gui : bool; default=False
+        not used
 
+    Returns
+    -------
+    phases2 : list[float]
+        the phases
+    icases_fringe2 : list[int]
+        the fringe cases
+    icases_disp2 : list[int]
+        the displacement cases
+    icases_vector2 : list[int]
+        the arrow/vector cases
+    isteps2 : list[int]
+        ???
+    scales2 : list[float]
+        the displacement scale factors
+    analysis_time : float
+        the time that needs to be simulated for the analysis; not the runtime
+    onesided : bool
+        is the gif symmetric (and therefore we can make fewer images)
+    endpoint : bool
+        should the endpoint be included
     """
     if animate_scale or animate_phase:
         # ignored for time
         assert isinstance(fps, integer_types), f'fps={fps:d} must be an integer'
 
     phases = None
-    onesided = False
-    is_symmetric = False
-    endpoint = False
+    # onesided = False
+    # is_symmetric = False
+    # endpoint = False
     if animate_scale:
         out = setup_animate_scale(
             scale,
@@ -121,7 +167,11 @@ def setup_animation(scale, istep=None,
         phases = (phases2[istep],)
         isteps = (istep,)
     #print('scales_final=%s' % scales)
-    return phases2, icases_fringe2, icases_disp2, icases_vector2, isteps2, scales2, analysis_time, onesided, endpoint
+    setup_out = (
+        phases2, icases_fringe2, icases_disp2, icases_vector2,
+        isteps2, scales2, analysis_time, onesided, endpoint
+    )
+    return setup_out
 
 
 def fix_nframes(nframes: int, profile: str) -> int:
@@ -129,16 +179,6 @@ def fix_nframes(nframes: int, profile: str) -> int:
     make sure we break at the "true scale" max
     should this be in terms of fps or nframes? (I think nframes)
     """
-    DIV2_PROFILES = {
-        '0 to scale to 0',
-        '-scale to scale to -scale',
-    }
-    DIV4_PROFILES = {
-        '0 to scale to -scale to 0',
-        'sinusoidal: 0 to scale to -scale to 0',
-        'sinusoidal: scale to -scale to scale',
-    }
-
     fix_nframes_even = nframes == 1 or nframes % 2 == 0
     fix_nframes_sin = nframes == 1 or nframes % 4 != 1
     is_div_two_profile = profile in DIV2_PROFILES
@@ -326,6 +366,9 @@ def setup_animate_phase(scale: float,
     icases_disp = icase_disp
     icases_vector = icase_vector
     phases = np.linspace(0., 360., num=nframes, endpoint=False)
+    if DEBUG_ANIMATION:
+        print(f'nframes = {nframes}')
+        print(f'phases = {phases}')
     isteps = np.linspace(0, nframes, num=nframes, endpoint=False, dtype='int32')
     scales = [scale] * len(isteps)
     assert len(phases) == len(isteps), f'nphases={len(phases):d} nsteps={len(isteps):d}'
@@ -423,7 +466,10 @@ def get_analysis_time(time: float, onesided: bool=True) -> float:
     return analysis_time
 
 
-def update_animation_inputs(phases, icases_fringe, icases_disp, icases_vector,
+def update_animation_inputs(phases: Optional[list[float]],
+                            icases_fringe: list[int] | int,
+                            icases_disp: list[int] | int,
+                            icases_vector: list[int] | int,
                             isteps: list[int], scales: list[float],
                             analysis_time: float, fps: int):
     """
@@ -637,6 +683,10 @@ def write_gif(gif_filename: PathLike, png_filenames: list[PathLike], time: float
         was the gif made
 
     """
+    # if isinstance(nrepeat, bool):
+    #     warnings.warn(f'nrepeat={nrepeat} and is not an integer')
+    if nrepeat is True:
+        nrepeat = 0
     if not IS_IMAGEIO:
         return False
 
@@ -662,15 +712,13 @@ def write_gif(gif_filename: PathLike, png_filenames: list[PathLike], time: float
     if make_gif and IS_IMAGEIO:
         images = []
         for png_filename in png_filenames:
-            if not isinstance(png_filename, str) and os.path.exists(png_filename):
+            if not isinstance(png_filename, PathLike) and os.path.exists(png_filename):
                 raise TypeError(f'png_filename={png_filename!r} is invalid')
-            imagei = imageio.imread(png_filename)
+            imagei = imageio3.imread(png_filename)
             images.append(imagei)
-        if nrepeat is True:
-            nrepeat = 0
         try:
             imageio.mimsave(gif_filename, images, duration=duration,
-                            loop=nrepeat)
+                             loop=nrepeat)
         except IOError:  # file is open
             raise IOError(f'{gif_filename} is likely open')
 
