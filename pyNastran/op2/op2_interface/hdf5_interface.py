@@ -984,7 +984,7 @@ TABLE_OBJ_MAP = {
     'rms.cbush_stress': (RealBushStressArray, ),
     'no.cbush_stress': (RealBushStressArray, ),
     'modal_contribution.cbush_stress': (ComplexCBushStressArray, ),
-    'nonlinear_cbush_force_stress_strain': (RealNonlinearBushArray, ),
+    'nonlinear.cbush_force_stress_strain': (RealNonlinearBushArray, ),
 
     'strain.cbush_strain': (RealBushStrainArray, ComplexCBushStrainArray),
     'ato.cbush_strain': (RealBushStrainArray, ),
@@ -1144,23 +1144,23 @@ TABLE_OBJ_MAP = {
     'RANEATC.dmig_strain_energy': (RealStrainEnergyArray, ),
     'RANEATC.conm2_strain_energy': (RealStrainEnergyArray, ),
 
-    'nonlinear_celas1_stress': (RealNonlinearSpringStressArray, ),
-    'nonlinear_celas2_stress': (RealNonlinearSpringStressArray, ),
-    'nonlinear_celas3_stress': (RealNonlinearSpringStressArray, ),
-    'nonlinear_celas4_stress': (RealNonlinearSpringStressArray, ),
-    'nonlinear_conrod_stress': (RealNonlinearRodArray, ),
-    'nonlinear_crod_stress':  (RealNonlinearRodArray, ),
-    'nonlinear_ctube_stress': (RealNonlinearRodArray, ),
-    'nonlinear_cgap_stress': (NonlinearGapStressArray,),
-    'nonlinear_cbeam_stress': (RealNonlinearBeamStressArray, ),
+    'nonlinear.celas1_stress': (RealNonlinearSpringStressArray, ),
+    'nonlinear.celas2_stress': (RealNonlinearSpringStressArray, ),
+    'nonlinear.celas3_stress': (RealNonlinearSpringStressArray, ),
+    'nonlinear.celas4_stress': (RealNonlinearSpringStressArray, ),
+    'nonlinear.conrod_stress': (RealNonlinearRodArray, ),
+    'nonlinear.crod_stress':  (RealNonlinearRodArray, ),
+    'nonlinear.ctube_stress': (RealNonlinearRodArray, ),
+    'nonlinear.cgap_stress': (NonlinearGapStressArray,),
+    'nonlinear.cbeam_stress': (RealNonlinearBeamStressArray, ),
 
-    'nonlinear_cquad4_stress': (RealNonlinearPlateArray, ),
-    'nonlinear_ctria3_stress': (RealNonlinearPlateArray, ),
-    'nonlinear_cbush1d_stress_strain': (RealBush1DStressArray, ComplexCBush1DStressArray),
-    'nonlinear_ctetra_stress_strain': (RealNonlinearSolidArray, ),
-    'nonlinear_cpenta_stress_strain': (RealNonlinearSolidArray, ),
-    'nonlinear_chexa_stress_strain': (RealNonlinearSolidArray, ),
-    'nonlinear_cpyram_stress_strain': (RealNonlinearSolidArray, ),
+    'nonlinear.cquad4_stress': (RealNonlinearPlateArray, ),
+    'nonlinear.ctria3_stress': (RealNonlinearPlateArray, ),
+    'nonlinear.cbush1d_stress_strain': (RealBush1DStressArray, ComplexCBush1DStressArray),
+    'nonlinear.ctetra_stress_strain': (RealNonlinearSolidArray, ),
+    'nonlinear.cpenta_stress_strain': (RealNonlinearSolidArray, ),
+    'nonlinear.chexa_stress_strain': (RealNonlinearSolidArray, ),
+    'nonlinear.stress.cpyram_stress_strain': (RealNonlinearSolidArray, ),
 
     'stress.hyperelastic_cquad4_stress': (HyperelasticQuadStressArray, ),
     'strain.hyperelastic_cquad4_strain': (HyperelasticQuadStrainArray, ),
@@ -1170,15 +1170,15 @@ TABLE_OBJ_MAP = {
     'force.chexa_pressure_force': (RealSolidPressureForceArray, ComplexSolidPressureForceArray,),
     'force.cpyram_pressure_force': (RealSolidPressureForceArray, ComplexSolidPressureForceArray,),
 
-    'grid_point_surface_stresses': (GridPointSurfaceStressesArray, ),
-    'grid_point_stresses_volume_direct': (GridPointStressesVolumeDirectArray, ),
-    'grid_point_stresses_volume_principal': (GridPointStressesVolumePrincipalArray, ),
-    'grid_point_stress_discontinuities': (GridPointStressesSurfaceDiscontinutiesArray, ),
+    'grid_point_stress.surface': (GridPointSurfaceStressesArray, ),
+    'grid_point_stress.volume_direct': (GridPointStressesVolumeDirectArray, ),
+    'grid_point_stress.volume_principal': (GridPointStressesVolumePrincipalArray, ),
+    'grid_point_stress.discontinuities': (GridPointStressesSurfaceDiscontinutiesArray, ),
 
-    'grid_point_surface_strains': (GridPointSurfaceStrainsArray, ),
-    'grid_point_strains_volume_direct': (GridPointStrainsVolumeDirectArray, ),
-    'grid_point_strains_volume_principal': (GridPointStrainsVolumePrincipalArray, ),
-    'grid_point_strain_discontinuities': (GridPointStrainsSurfaceDiscontinutiesArray, ),
+    'grid_point_strain.surface': (GridPointSurfaceStrainsArray, ),
+    'grid_point_strain.volume_direct': (GridPointStrainsVolumeDirectArray, ),
+    'grid_point_strain.volume_principal': (GridPointStrainsVolumePrincipalArray, ),
+    'grid_point_strain.discontinuities': (GridPointStrainsSurfaceDiscontinutiesArray, ),
 
     # ----------------------------------------------------------
     # contact
@@ -1302,7 +1302,7 @@ def _load_eigenvalue(h5_result, encoding: str,
         return None
 
     assert obj.class_name == class_name, f'class_name={obj.class_name!r} selected; should be {class_name!r}'
-    keys_to_skip = ['class_name', 'is_complex', 'is_real', 'table_name_str', 'headers']
+    keys_to_skip = ['class_name', 'is_complex', 'is_real', 'is_buckling', 'table_name_str', 'headers']
     for key in h5_result.keys():
         if key in keys_to_skip:
             continue

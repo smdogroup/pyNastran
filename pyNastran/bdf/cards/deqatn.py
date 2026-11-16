@@ -7,7 +7,7 @@ The capitalization of the sub-functions is important.
 """
 from __future__ import annotations
 import re
-import sys
+import copy
 from typing import Any, Optional, TYPE_CHECKING
 import numpy as np
 from numpy import (
@@ -52,9 +52,9 @@ def dim(x, y):
     return x - min(x, y)
 
 
-def db(p, pref):
+def db(p: float | np.ndarray, pref: float):
     """sound pressure in decibels"""
-    return 20. * log(p / pref)
+    return 20. * log10(p / pref)
 
 #def _Log(z):
 
@@ -89,7 +89,7 @@ def atan2h(x, y):
 
 def invdb(dbi: float, pref: float) -> float:
     """inverse Db"""
-    return 10. ** (dbi / 20. + log(pref))
+    return 10. ** (dbi / 20. + log10(pref))
 
 
 def dba(p: float, pref: float, f: float) -> float:
@@ -112,7 +112,7 @@ def dba(p: float, pref: float, f: float) -> float:
 
     """
     ta1, ta2 = _get_ta(f)
-    return 20. * log(p / pref) + 10 * log(ta1) + 10. * log(ta2)
+    return 20. * log10(p / pref) + 10 * log10(ta1) + 10. * log10(ta2)
 
 
 def invdba(dbai: float, pref: float, f: float) -> float:
@@ -136,7 +136,7 @@ def invdba(dbai: float, pref: float, f: float) -> float:
     """
     ta1, ta2 = _get_ta(f)
     #dbai = dba(p, pref, f)
-    return 10. ** ((dbai - 10. * log(ta1) - 10. * log(ta2))/20)
+    return 10. ** ((dbai - 10. * log10(ta1) - 10. * log10(ta2))/20)
 
 
 def _get_ta(f: float) -> tuple[float, float]:
@@ -155,6 +155,24 @@ def _get_ta(f: float) -> tuple[float, float]:
 # we'll add _ to the beginning of these variables
 BUILTINS = ['del', 'eval', 'yield', 'async', 'await', 'property',
             'slice', 'filter', 'map']
+
+# Only the real Python builtins a generated equation body could legitimately need: casts and
+# plain functions, plus isinstance/Exception/print, which _write_variables() bakes into every
+# generated function's own type-coercion prologue (see that function below). Everything else
+# an equation needs is reachable through the math helpers above.
+_DEQATN_SAFE_BUILTINS = {'abs': abs, 'min': min, 'max': max, 'float': float, 'int': int,
+                         'str': str, 'len': len, 'isinstance': isinstance,
+                         'Exception': Exception, 'print': print}
+
+
+def _deqatn_exec_namespace() -> dict[str, Any]:
+    """The globals dict a DEQATN-generated function body executes in: this module's own math
+    helpers (pi, rss, avg, sin, cos, sqrt, ...) plus a small builtins allowlist -- no open(),
+    __import__(), eval(), or anything else outside what an equation can legitimately need."""
+    namespace = {name: value for name, value in globals().items()
+                 if not name.startswith('_') and callable(value)}
+    namespace['__builtins__'] = _DEQATN_SAFE_BUILTINS
+    return namespace
 
 
 def split_deqatn_line0(card: list[str]) -> tuple[int, str, str, list[str]]:
@@ -181,7 +199,7 @@ def split_deqatn_line0(card: list[str]) -> tuple[int, str, str, list[str]]:
     return equation_id, name_eqid, line0_eq, eqs_temp
 
 
-class DEQATN(BaseCard):  # needs work...
+class DEQATN(BaseCard):
     """
     Design Equation Definition
     Defines one or more equations for use in design sensitivity analysis.
@@ -196,6 +214,12 @@ class DEQATN(BaseCard):  # needs work...
     """
     type = 'DEQATN'
     _properties = ['dtable']
+
+    def __deepcopy__(self, memo_dict: dict[int, Any]):
+        eqs = copy.deepcopy(self.eqs)
+        card = DEQATN(self.equation_id, eqs, comment=self.comment)
+        memo_dict[id(self)] = card
+        return card
 
     def __init__(self, equation_id: int, eqs: list[str], comment: str=''):
         """
@@ -313,15 +337,19 @@ class DEQATN(BaseCard):  # needs work...
 
         self.func_str = func_str
         self.func_name = func_name
-        exec_args = {'locals': sys._getframe().f_locals} if sys.version_info > (3, 13) else {}
+        # A restricted namespace, not the caller's own locals/globals: func_str is generated
+        # from user-supplied equation text, so it should only be able to reach the math
+        # helpers above, not open()/__import__()/eval()/etc. This also sidesteps the
+        # Python 3.13+ locals() semantics (PEP 667) the old sys._getframe() hack worked
+        # around, since an explicit dict behaves the same on every version.
+        namespace = _deqatn_exec_namespace()
         try:
-            exec(func_str, **exec_args)
+            exec(func_str, namespace)
         except SyntaxError:
             print(func_str)
             raise
-        #print(locals().keys())
 
-        func = locals()[func_name]
+        func = namespace[func_name]
         setattr(self, func_name, func)
         #print(func)
         self.func = func

@@ -1160,6 +1160,7 @@ def _set_quality(icase: int, cases: dict[int, Any],
     try:
         (element_id_quality, taper_ratio, area_ratio, max_skew, aspect_ratio,
          min_theta, max_theta, dideal_theta, min_edge_length, max_warp,
+         nastran_skew, nastran_taper, nastran_warp,
          #icard_type,
         ) = model.quality(cards_to_read=cards_to_read)
     except IndexError:
@@ -1210,6 +1211,9 @@ def _set_quality(icase: int, cases: dict[int, Any],
     icase = _add_finite_centroidal_gui_result(icase, cases, quality_form, subcase_id, 'dIdeal Theta', dideal_theta)
     icase = _add_finite_centroidal_gui_result(icase, cases, quality_form, subcase_id, 'Min Edge Length', min_edge_length)
     icase = _add_finite_centroidal_gui_result(icase, cases, quality_form, subcase_id, 'Max Warp', max_warp)
+    icase = _add_finite_centroidal_gui_result(icase, cases, quality_form, subcase_id, 'NX Skew', nastran_skew)
+    icase = _add_finite_centroidal_gui_result(icase, cases, quality_form, subcase_id, 'NX Taper', nastran_taper)
+    icase = _add_finite_centroidal_gui_result(icase, cases, quality_form, subcase_id, 'NX Warp', nastran_warp)
     #icase = _add_finite_centroidal_gui_result(icase, cases, quality_form, subcase_id, 'icard_type', icard_type[is_valid_element])
 
     return mean_edge_length, icase, quality_form
@@ -1380,9 +1384,9 @@ def _load_stress_strain(element_cards: list,
     }
     for element in element_cards:
         etype = element.type
-        # not added to gui yet
+        # not added to gui yet (see cards_to_drop_silenced)
         if etype in {'CELAS1', 'CELAS2', 'CELAS3', 'CELAS4',
-                     'CDAMP1', 'CDAMP2', 'CDAMP3', 'CDAMP4', }:
+                     'CDAMP1', 'CDAMP2', 'CDAMP3', 'CDAMP4', 'CVISC'}:
             continue
 
         if etype not in name_results_dict:
@@ -1644,7 +1648,7 @@ def _load_oug(model: OP2,
                     ncolors=None, colormap='', set_max_min=False,
                     uname=res_name)
             else:  # pragma: no cover
-                raise RuntimeError((name, deflects_str))
+                raise RuntimeError((res_name, deflects_str))
 
             headers2 = []
             for itime in range(ntimes):

@@ -67,6 +67,11 @@ RESULT_NAME_MAP = {
     'ELAS3': 'celas3',
     'ELAS4': 'celas4',
 
+    'MASS1': 'cmass1',
+    'MASS2': 'cmass2',
+    'MASS3': 'cmass3',
+    'MASS4': 'cmass4',
+
     'DUM8': 'cdum8',
     'DMIG': 'dmig',
     'GENEL': 'genel',
@@ -78,6 +83,16 @@ RESULT_NAME_MAP = {
     'WELD': 'cweld',
     'FASTP': 'cfast',
     'SEAMP': 'cseam',
+
+    'CPLSTN3': 'cplstn3',
+    'CPLSTN4': 'cplstn4',
+    'CPLSTN6': 'cplstn6',
+    'CPLSTN8': 'cplstn8',
+
+    'CPLSTS3': 'cplsts3',
+    'CPLSTS4': 'cplsts4',
+    'CPLSTS6': 'cplsts6',
+    'CPLSTS8': 'cplsts8',
 }
 
 
@@ -447,12 +462,12 @@ class ONR:
         """
         op2 = self.op2
         if op2.table_code == 18:  # element strain energy
-            if op2.table_name not in op2.table_name in [b'ONRGY', b'ONRGY1']:
+            if op2.table_name not in [b'ONRGY', b'ONRGY1', b'ONRGY2']:
                 msg = f'table_name={op2.table_name} table_code={op2.table_code}'
                 raise NotImplementedError(msg)
             n = self._read_element_strain_energy(data, ndata, result_name_suffix='_strain_energy')
         elif op2.table_code == 36:  # element kinetic energy
-            if op2.table_name not in op2.table_name in [b'OEKE1']:
+            if op2.table_name not in [b'OEKE1']:
                 msg = f'table_name={op2.table_name} table_code={op2.table_code}'
                 raise NotImplementedError(msg)
             n = self._read_element_strain_energy(data, ndata, result_name_suffix='_kinetic_energy')

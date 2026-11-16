@@ -7,15 +7,20 @@ from pyNastran.op2.op2_interface.msc_tables import MSC_ELEMENTS, MSC_TABLE_CONTE
 SORT1_TABLES_BYTES = [
     b'OUG1S',
 
-    b'OES1', b'OES1C', b'OES1X', b'OES1X1', b'OESVM1', b'OESVM1C',
-    b'OSTR1', b'OSTR1C', b'OSTR1X', b'OSTRVM1', b'OSTRVM1C',
+    b'OES1', b'OES1C', b'OES1X', b'OES1X1', b'OES1XMC', b'OESVM1', b'OESVM1C',
+    b'OSTR1', b'OSTR1C', b'OSTR1X', b'OSTR1XMC', b'OSTRVM1', b'OSTRVM1C',
     b'OSTRMS1C',
 
     b'OESNLXR', b'OESTRCP',
     # ----------
-    b'OEF1X', b'OEF1',
+    b'OEF1X', b'OEF1XMC', b'OEF1',
     b'HOEF1', b'DOEF1',
     b'OEFIT', b'OEFITSTN', b'OESRT', b'OESRTN',
+
+    # elastic/plastic/thermal strain
+    # composite
+    b'OSTR1EL', b'OSTR1PL', b'OSTR1TH',
+    b'OSTR1ELC', b'OSTR1PLC', b'OSTR1THC',
     # --------
     # random
 
@@ -23,12 +28,14 @@ SORT1_TABLES_BYTES = [
     b'OESXRMS1', b'OESPSD1C', b'OESXNO1', b'OESXNO1C', b'OESXRM1C',
     b'OSTRMS1C', b'OSTPSD1C', b'OSTNO1C', b'OSTRRMS1',
     b'OEFATO1', b'OEFRMS1', b'OEFPSD1', b'OEFNO1', b'OEFCRM1',
-    b'OESPSD1',
+    b'OESPSD1', b'OESRMS1', b'OESNO1',
     b'OSTRNO1',
     b'OSTRPSD1',
 
-    # mislabeled tables
+    # mislabeled tables; *RMS2/*NO2 are actually SORT1
     b'OESRMS2', b'OESNO2',
+    b'OSTRRMS2', b'OSTRNO2',
+    b'OEFRMS2', b'OEFNO2',
 
     b'RAFCONS', b'RAFEATC',
     b'OUG1F',
@@ -45,7 +52,7 @@ SORT2_TABLES_BYTES = [
 
     b'OES2', b'OES2C', b'OESVM2',
     b'OSTR2', b'OSTR2C', b'OSTRVM2',
-    b'OEF2', b'OEFNO2',
+    b'OEF2',
 
     # shock
     b'DOES1',
@@ -272,9 +279,8 @@ class Op2Codes:
         self.set_table_type()
         try:
             etype = self.element_mapper[elem_code]
-        except TypeError:
-            print('elem_code=%r' % elem_code)
-            raise
+        except KeyError as error:
+            raise KeyError(f'elem_code={str(elem_code)}; nastran_format={self._nastran_format!r} nastran_revision={self._nastran_revision!r}') from error
         return etype
 
     def print_table_code(self, table_code: int) -> str:
@@ -356,7 +362,7 @@ class Op2Codes:
                 if name in 'mode':
                     fmts = ('int32', 'int64')
                 else:
-                    assert name in {'freq', 'dt', 'time',
+                    assert name in {'freq', 'dt', 'time', 'eigr',
                                     'lsdvmn', 'lftsfq', 'load_factor',
                                     'load_step', 'loadID', 'thresh'}, name + self.object_stats() # 'eigr', 'eign'
                     fmts = ('float32', 'float64')
@@ -372,7 +378,8 @@ class Op2Codes:
         #index = self.size // 4 - 1  # factor is size/4 -> subtract 1
         return fmts[index]
 
-    def code_information(self, include_time: bool=True) -> str:
+    def code_information(self, include_time: bool=True,
+                         stop_on_failure: bool=True) -> str:
         """
         prints the general table information
         DMAP - page 60-63
@@ -499,7 +506,12 @@ class Op2Codes:
             if isinstance(element_type, str):
                 etype = element_type
             else:
-                etype = self.get_element_type(element_type)
+                try:
+                    etype = self.get_element_type(element_type)
+                except KeyError:
+                    if stop_on_failure:
+                        raise
+                    etype = '???'
             msg += "  element_type  = %-3s %s\n" % (element_type, etype)
 
         if s_word:  # stress code

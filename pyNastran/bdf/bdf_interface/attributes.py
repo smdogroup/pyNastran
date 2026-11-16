@@ -69,6 +69,7 @@ if TYPE_CHECKING:  # pragma: no cover
         #SPLINE1, SPLINE2, SPLINE3, SPLINE4, SPLINE5,
         FLUTTER, MKAERO1, MKAERO2, FLFACT,
         TRIM, TRIM2, GUST, GUST2, DIVERG, CSSCHD, UXVEC,
+        AEFORCE, AEPRESS, AEDW,
         # roter
         ROTORD, ROTORG,
         # modal
@@ -82,8 +83,11 @@ if TYPE_CHECKING:  # pragma: no cover
         DCONADD, DCONSTR, DOPTPRM,
         DMNCON, GROUP,
         # contact
-        BCPARA, BCBODY, BCTPARM, BGSET, BCTADD, BSURF, BSURFS, BCONP, BLSEG, BFRIC,
-        BCTSET, BCTPARA, BGADD, BCTPARA, BCRPARA,
+        BCPARA, BCBODY,
+        BSURF, BSURFS, BCONP, BLSEG, BFRIC,
+        BCRPARA,
+        BCTPARM, BCTSET, BCTADD, BCTPARA,
+        BGPARM, BGSET, BGADD,
         # superelements
         SEBULK, SENQSET, SENQSET1, SEBNDRY, RELEASE, SELOC, SEMPLN, SETREE,
         SELABEL, SECONCT, SEEXCLD, SEELT, SELOAD, CSUPER, CSUPEXT,
@@ -310,6 +314,10 @@ SLOT_TO_TYPE_MAP: dict[str, list[str]] = {
     'csschds': ['CSSCHD',],
     'trims': ['TRIM', 'TRIM2'],
     'divergs': ['DIVERG'],
+    'uxvec': ['UXVEC'],
+    'aedw': ['AEDW'],
+    'aeforce': ['AEFORCE'],
+    'aepress': ['AEPRESS'],
 
     # coords
     'coords': ['CORD1R', 'CORD1C', 'CORD1S',
@@ -349,7 +357,7 @@ SLOT_TO_TYPE_MAP: dict[str, list[str]] = {
     'dmi': ['DMI'],
     'dti': ['DTI'],
 
-    # optimzation
+    # optimization
     'dequations': ['DEQATN'],
     'dtable': ['DTABLE'],
     'dconstrs': ['DCONSTR', 'DCONADD'],
@@ -428,6 +436,7 @@ SLOT_TO_TYPE_MAP: dict[str, list[str]] = {
     'bctparas': ['BCTPARA'],
     'bcrparas': ['BCRPARA'],
     'bctparms': ['BCTPARM'],
+    'bgparm': ['BGPARM'],
 
     'bctadds': ['BCTADD'],
     'bctsets': ['BCTSET'],
@@ -504,7 +513,7 @@ class BDFAttributes:
         self.is_zaero = False
 
     def set_as_zaero(self):
-        self._nastran_format = 'zona'
+        self._nastran_format = 'zaero'
         self.is_nx = False
         self.is_msc = False
         self.is_optistruct = False
@@ -526,7 +535,7 @@ class BDFAttributes:
                 'nnodes', 'node_ids', 'point_ids', 'npoints',
                 'nelements', 'element_ids', 'nproperties', 'property_ids',
                 'nmaterials', 'material_ids', 'ncoords', 'coord_ids',
-                'ncaeros', 'caero_ids', 'wtmass', 'is_bdf_vectorized', 'nid_map']
+                'ncaeros', 'caero_ids', 'wtmass', 'nid_map']
 
     def object_attributes(self, mode: str='public',
                           keys_to_skip: Optional[list[str]]=None,
@@ -647,7 +656,8 @@ class BDFAttributes:
         This would be in the init but doing it this way allows for better
         inheritance
 
-        References:
+        References
+        ----------
           1.  https://www.mscsoftware.com/support/library/conf/wuc87/p02387.pdf
         """
         self.xref_obj = CrossReference(self)
@@ -655,6 +665,9 @@ class BDFAttributes:
         self.punch = None
         self._encoding = None
         self._is_long_ids = False  # ids > 8 characters
+
+        #: hacky way to change fields - might remove
+        self.dict_of_vars = {}
 
         #: ignore any ECHOON flags
         self.force_echo_off = True
@@ -758,6 +771,8 @@ class BDFAttributes:
         self._nparse_errors = 0
         self._stop_on_parsing_error = True
         self._stop_on_duplicate_error = True
+        self._warn_on_equivalent_duplicate = True
+        self._warn_on_reject_cards = True
         self._stored_parse_errors: list[str] = []
 
         self._duplicate: dict[str, list[str]] = {
@@ -770,6 +785,7 @@ class BDFAttributes:
             'masses': [],
             'coords': [],
         }
+        self._duplicate_equivalents: list[tuple[str, int, str, int, int]] = []
         self.values_to_skip: dict[str, list[int]] = {}
 
         # ------------------------ structural defaults -----------------------
@@ -1077,6 +1093,10 @@ class BDFAttributes:
 
         #: stores UXVEC
         self.uxvec: dict[int, UXVEC] = {}
+        self.aeforce: list[AEFORCE] = []
+        self.aepress: list[AEPRESS] = []
+        self.aedw: list[AEDW] = []
+        # self.aeload: dict[int, Any] = {}
 
         # ------ SOL 145 ------
         #: stores AERO
@@ -1131,6 +1151,7 @@ class BDFAttributes:
         self.bgadds: dict[int, BGADD] = {}
         self.bgsets: dict[int, BGSET] = {}
         self.bctparms: dict[int, BCTPARM] = {}
+        self.bgparm: dict[int, BGPARM] = {}
 
         #--------------------------superelements------------------------------
         self.setree: dict[int, SETREE] = {}

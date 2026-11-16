@@ -40,7 +40,7 @@ class StressObject:
                  is_stress: bool=True) -> None:
         #print('--StressObject--')
         self.model = model
-        self.vm_word = None
+        self.vm_word = ''
         self.header_dict: dict[Any, str] = {}
         self.keys_map: dict[NastranKey, str] = {}
         self.composite_ieids: dict[str, str] = {}
@@ -76,6 +76,7 @@ class StressObject:
                                  max_principal: np.ndarray, min_principal: np.ndarray,
                                  ovm: np.ndarray, is_element_on: np.ndarray,
                                  header_dict: HeaderDict) -> str:
+        vm_word = ''
         for element_type, composite_data in self.composite_data_dict.items():
             try:
                 element_layer, unused_ueids, data2, vm_word, unused_ntimes, headers = composite_data[key]
@@ -109,6 +110,7 @@ class StressObject:
                                       key: int, itime: int, nelements: int,
                                       header_dict: HeaderDict) -> str:
         """get all the ply stresses/strains"""
+        vm_word = ''
         nlayers = 0
         nelements2 = 0
         for element_type, composite_data in self.composite_data_dict.items():
@@ -383,6 +385,7 @@ def _get_nastran_header(case: Any,
     elif dt is None:
         return 'Static'
     else:  # pragma: no cover
+        header = ''
         print(case, dt, type(dt))
 
     # cases:
@@ -395,12 +398,18 @@ def _get_nastran_header(case: Any,
     elif hasattr(case, 'cycles'):
         header += '; freq = %s Hz' % func_str(case.cycles[itime])
     elif hasattr(case, 'eigis'):
-        eigi = np.array(case.eigis)
-        eigr = np.array(case.eigrs)
-        dampings, freqs = complex_damping_frequency(eigr, eigi)
+        eigrs = np.array(case.eigrs)
+        eigis = np.array(case.eigis)
+        dampings, freqs = complex_damping_frequency(eigrs, eigis)
         damping = dampings[itime]
         freq = freqs[itime]
-        header += '; freq = %s Hz; g=%s' % (func_str(freq), func_str(damping))
+        # header += '; freq = %s Hz; g=%s' % (
+        #     func_str(freq), func_str(damping),
+        # )
+        header += '; freq = %s Hz; g=%s lambda=(%s,%sj)' % (
+            func_str(freq), func_str(damping, '%.4f'),
+            func_str(eigrs[itime]), func_str(eigis[itime]),
+        )
     elif hasattr(case, 'eigns'):
         unused_omegas, freqs = real_modes_to_omega_freq(case.eigns)
         freq = freqs[itime]

@@ -21,7 +21,7 @@ from pyNastran.utils.mathematics import integrate_positive_unit_line # integrate
 
 from pyNastran.dev.bdf_vectorized3.cards.base_card import (
     Element, Property, make_idim, hslice_by_idim, searchsorted_filter, # vslice_by_idim,
-    parse_check, save_ifile_comment,
+    parse_check, save_ifile_comment, slice_element_by_property_id,
 )
 from .rod import line_pid_mass_per_length, line_length, line_vector_length, line_centroid, e_g_nu_from_property_id
 from .bar import (apply_bar_default, init_x_g0, get_bar_vector, split_offt_vector,
@@ -29,7 +29,7 @@ from .bar import (apply_bar_default, init_x_g0, get_bar_vector, split_offt_vecto
                   e_g_nu_from_isotropic_material, check_offt)
 from .utils import get_density_from_material
 from pyNastran.dev.bdf_vectorized3.cards.write_utils import (
-    array_str, array_default_int, array_default_float, array_default_str,
+    array_str, array_float, array_default_int, array_default_float, array_default_str,
     array_default_float_nan, get_print_card_size,)
 from pyNastran.dev.bdf_vectorized3.bdf_interface.geom_check import geom_check
 from pyNastran.dev.bdf_vectorized3.utils import hstack_msg
@@ -150,25 +150,25 @@ class CBEAM(Element):
 
     @Element.clear_check
     def clear(self) -> None:
-        self.element_id: np.array = np.array([], dtype='int32')
-        self.property_id: np.array = np.array([], dtype='int32')
-        self.nodes: np.array = np.zeros((0, 2), dtype='int32')
-        self.offt: np.array = np.array([], dtype='|U3')
-        self.bit: np.array = np.array([], dtype='int32')
-        self.g0: np.array = np.array([], dtype='int32')
-        self.x: np.array = np.zeros((0, 3), dtype='float64')
+        self.element_id: np.ndarray = np.array([], dtype='int32')
+        self.property_id: np.ndarray = np.array([], dtype='int32')
+        self.nodes: np.ndarray = np.zeros((0, 2), dtype='int32')
+        self.offt: np.ndarray = np.array([], dtype='|U3')
+        self.bit: np.ndarray = np.array([], dtype='int32')
+        self.g0: np.ndarray = np.array([], dtype='int32')
+        self.x: np.ndarray = np.zeros((0, 3), dtype='float64')
 
         # pin flags
-        self.pa: np.array = np.array([], dtype='int32')
-        self.pb: np.array = np.array([], dtype='int32')
+        self.pa: np.ndarray = np.array([], dtype='int32')
+        self.pb: np.ndarray = np.array([], dtype='int32')
 
         # offset vectors at A/B
-        self.wa: np.array = np.zeros((0, 3), dtype='float64')
-        self.wb: np.array = np.zeros((0, 3), dtype='float64')
+        self.wa: np.ndarray = np.zeros((0, 3), dtype='float64')
+        self.wb: np.ndarray = np.zeros((0, 3), dtype='float64')
 
         # scalar points at end A/B for warping
-        self.sa: np.array = np.zeros([], dtype='int32')
-        self.sb: np.array = np.zeros([], dtype='int32')
+        self.sa: np.ndarray = np.zeros([], dtype='int32')
+        self.sb: np.ndarray = np.zeros([], dtype='int32')
 
     def add(self, eid: int, pid: int, nids: list[int],
             x: Optional[list[float]], g0: Optional[int],
@@ -285,7 +285,20 @@ class CBEAM(Element):
         if ifile is None:
             ifile = np.zeros(ncards, dtype='int32')
         if len(self.element_id) != 0:
-            raise RuntimeError(f'stacking of {self.type} is not supported')
+            ifile = np.hstack([self.ifile, ifile])
+            element_id = np.hstack([self.element_id, element_id])
+            property_id = np.hstack([self.property_id, property_id])
+            nodes = np.vstack([self.nodes, nodes])
+            offt = np.hstack([self.offt, offt])
+            bit = np.hstack([self.bit, bit])
+            g0 = np.hstack([self.g0, g0])
+            x = np.vstack([self.x, x])
+            pa = np.hstack([self.pa, pa])
+            pb = np.hstack([self.pb, pb])
+            wa = np.vstack([self.wa, wa])
+            wb = np.vstack([self.wb, wb])
+            sa = np.hstack([self.sa, sa])
+            sb = np.hstack([self.sb, sb])
         save_ifile_comment(self, ifile, comment)
         self.element_id = element_id
         self.property_id = property_id
@@ -302,6 +315,9 @@ class CBEAM(Element):
         self.sa = sa
         self.sb = sb
         self.n = len(property_id)
+
+    def slice_card_by_property_id(self, property_id: np.ndarray):
+        return slice_element_by_property_id(self, property_id)
 
     def set_used(self, used_dict: dict[str, list[np.ndarray]]) -> None:
         used_dict['element_id'].append(self.element_id)
@@ -338,6 +354,8 @@ class CBEAM(Element):
         elem.x = self.x[i, :]
         elem.pa = self.pa[i]
         elem.pb = self.pb[i]
+        elem.sa = self.sa[i]
+        elem.sb = self.sb[i]
         elem.wa = self.wa[i, :]
         elem.wb = self.wb[i, :]
         elem.n = len(i)
@@ -357,6 +375,88 @@ class CBEAM(Element):
         return max(self.element_id.max(), self.property_id.max(),
                    self.nodes.max(), self.g0.max())
 
+    def stiffness_info(self) -> np.ndarray:
+        """
+        [L, rho, A, i1, i2, i12, j, k1, k2, s1, s2, E, G]
+        """
+        pid = self.property_id
+        npid = len(pid)
+
+        area = np.full(npid, np.nan, dtype='float64')
+        I = np.full((npid, 3), np.nan, dtype='float64')
+        J = np.full(npid, np.nan, dtype='float64')
+
+        k1 = np.full(npid, np.nan, dtype='float64')
+        k2 = np.full(npid, np.nan, dtype='float64')
+        s1 = np.full(npid, np.nan, dtype='float64')
+        s2 = np.full(npid, np.nan, dtype='float64')
+
+        E = np.full(npid, np.nan, dtype='float64')
+        G = np.full(npid, np.nan, dtype='float64')
+        for prop in self.allowed_properties:
+            i_lookup, i_all = searchsorted_filter(prop.property_id, pid, msg='')
+            if len(i_lookup) == 0:
+                continue
+            # we're at least using some properties
+            # [area, I, J, k1, k2, s1, s2]
+            breakdowni = prop.prop_stiffness_info()
+            area[i_lookup] = breakdowni[i_all, 0]
+            #print(prop.type, i_lookup, i_all, breakdowni.shape)
+            I[i_lookup, :] = breakdowni[i_all, :][:, [1, 2, 3]]
+            J[i_lookup] = breakdowni[i_all, 4]
+
+            k1[i_lookup] = breakdowni[i_all, 5]
+            k2[i_lookup] = breakdowni[i_all, 6]
+            s1[i_lookup] = breakdowni[i_all, 7]
+            s2[i_lookup] = breakdowni[i_all, 8]
+
+            mat1 = self.model.mat1.slice_card_by_material_id(prop.material_id)
+            E[i_lookup] = mat1.E
+            G[i_lookup] = mat1.G
+        length = self.length()
+        breakdown = np.column_stack([length, area, I, J, k1, k2, s1, s2,
+                                     E, G])
+        return breakdown
+
+    def write_h5(self, h5file, element_group):
+        neid, nnode = self.nodes.shape
+        if neid == 0:
+            return
+        from tables import Int64Col, Float64Col
+        h5_dict = {
+            'EID': Int64Col(pos=0),  # Signed 64-bit integer
+            'PID': Int64Col(pos=1),
+            'GA': Int64Col(pos=2),
+            'GB': Int64Col(pos=3),
+            'SA': Int64Col(pos=4),
+            'SB': Int64Col(pos=5),
+            'X': Float64Col(shape=(3,), pos=6),
+            'G0': Int64Col(pos=7),
+            'F': Int64Col(pos=8),
+            'PA': Int64Col(pos=9),
+            'PB': Int64Col(pos=10),
+            'WA': Float64Col(shape=(3,), pos=11),
+            'WB': Float64Col(shape=(3,), pos=12),
+            'DOMAIN_ID': Int64Col(pos=13),
+        }
+        table = h5file.create_table(element_group, self.type, h5_dict)
+        arr = np.empty(neid, dtype=table.dtype)
+        arr["EID"] = self.element_id
+        arr["PID"] = self.property_id
+        arr["GA"] = self.nodes[:, 0]
+        arr["GB"] = self.nodes[:, 1]
+        arr["F"] = np.ones(neid)
+        arr["SA"] = self.sa
+        arr["SB"] = self.sb
+        arr["X"] = self.x
+        arr["G0"] = self.g0
+        arr["PA"] = self.pa
+        arr["PB"] = self.pb
+        arr["WA"] = self.wa
+        arr["WB"] = self.wb
+        arr["DOMAIN_ID"] = np.ones(neid, dtype='int64')
+        table.append(arr)
+
     @parse_check
     def write_file(self, bdf_file: TextIOLike,
                    size: int=8, is_double: bool=False,
@@ -374,10 +474,12 @@ class CBEAM(Element):
         pbs = array_default_int(self.pb, default=0, size=size)
         was = array_default_float(self.wa, default=0, size=size, is_double=False)
         wbs = array_default_float(self.wb, default=0, size=size, is_double=False)
-        for eid, pid, nodes, g0, x, is_g0, offt, pa, pb, wa, wb in zip_longest(
+        sas = array_default_int(self.sa, default=0, size=size)
+        sbs = array_default_int(self.sb, default=0, size=size)
+        for eid, pid, nodes, g0, x, is_g0, offt, pa, pb, wa, wb, sa, sb in zip_longest(
             element_ids, property_ids, nodes_,
             self.g0, self.x, self.is_g0, offts,
-            pas, pbs, was, wbs):
+            pas, pbs, was, wbs, sas, sbs):
 
             n1, n2 = nodes
             w1a, w2a, w3a = wa
@@ -393,9 +495,58 @@ class CBEAM(Element):
             #offt = set_blank_if_default(offt, 'GGG')
 
             list_fields = ['CBEAM', eid, pid, n1, n2,
-                           x1, x2, x3, offt, pa, pb, w1a, w2a, w3a, w1b, w2b, w3b]
+                           x1, x2, x3, offt, pa, pb, w1a, w2a, w3a, w1b, w2b, w3b,
+                           sa, sb]
             bdf_file.write(print_card(list_fields))
         return
+
+    @parse_check
+    def write_file_8(self, bdf_file: TextIOLike,
+                     write_card_header: bool=False) -> None:
+        if self.max_id >= 100_000_000:
+            self.write_file(bdf_file, size=8, write_card_header=write_card_header)
+            return
+
+        no_pa_pb = np.all(self.pa == 0) and np.all(self.pb == 0)
+        no_wa_wb = np.all(self.wa == 0.) and np.all(self.wb == 0.)
+        no_sa_sb = np.all(self.sa == 0) and np.all(self.sb == 0)
+        all_g0 = np.all(self.g0 > 0)
+        all_offt_ggg = np.all(self.offt == 'GGG') and np.all(self.bit == -1)
+        is_basic = no_pa_pb and no_wa_wb and no_sa_sb and all_offt_ggg
+
+        eids = np.char.rjust(array_str(self.element_id, size=8), 8)
+        pids = np.char.rjust(array_str(self.property_id, size=8), 8)
+        nodes_str = np.char.rjust(array_str(self.nodes, size=8), 8)
+
+        if is_basic and all_g0:
+            g0s = np.char.rjust(array_str(self.g0, size=8), 8)
+            eid_list = eids.tolist()
+            pid_list = pids.tolist()
+            n1_list = nodes_str[:, 0].tolist()
+            n2_list = nodes_str[:, 1].tolist()
+            g0_list = g0s.tolist()
+            lines = [f'CBEAM   {eid}{pid}{n1}{n2}{g0}\n'
+                     for eid, pid, n1, n2, g0 in
+                     zip(eid_list, pid_list, n1_list, n2_list, g0_list)]
+            bdf_file.write(''.join(lines))
+        elif is_basic:
+            g0s = np.char.rjust(array_str(self.g0, size=8), 8)
+            xs = np.char.rjust(array_float(self.x, size=8, nan_check=False), 8)
+            eid_list = eids.tolist()
+            pid_list = pids.tolist()
+            n1_list = nodes_str[:, 0].tolist()
+            n2_list = nodes_str[:, 1].tolist()
+            lines = []
+            for eid, pid, n1, n2, g0, x, g0_val in zip(
+                    eid_list, pid_list, n1_list, n2_list,
+                    g0s.tolist(), xs.tolist(), self.g0):
+                if g0_val > 0:
+                    lines.append(f'CBEAM   {eid}{pid}{n1}{n2}{g0}\n')
+                else:
+                    lines.append(f'CBEAM   {eid}{pid}{n1}{n2}{x[0]}{x[1]}{x[2]}\n')
+            bdf_file.write(''.join(lines))
+        else:
+            self.write_file(bdf_file, size=8, write_card_header=write_card_header)
 
     @property
     def is_x(self) -> np.ndarray:
@@ -411,14 +562,15 @@ class CBEAM(Element):
         return [model.pbeam, model.pbeaml, model.pbcomp]
 
     @property
-    def allowed_properties(self):
+    def allowed_properties(self) -> list[PBEAM | PBEAML | PBCOMP]:
         all_properties = self.all_properties
         props = [prop for prop in all_properties if prop.n > 0]
         assert len(props) > 0, f'{self.type}: all_props={all_properties}'
         return props
 
     def mass_material_id(self) -> np.ndarray:
-        material_id = basic_mass_material_id(self.property_id, self.allowed_properties, 'CBEAM')
+        material_id = basic_mass_material_id(
+            self.property_id, self.allowed_properties, 'CBEAM')
         return material_id
 
     def mass(self) -> np.ndarray:
@@ -939,8 +1091,8 @@ class PBEAM(Property):
     _skip_equal_check = ['allowed_materials']
     @Property.clear_check
     def clear(self) -> None:
-        self.property_id: np.array = np.array([], dtype='int32')
-        self.material_id: np.array = np.array([], dtype='int32')
+        self.property_id: np.ndarray = np.array([], dtype='int32')
+        self.material_id: np.ndarray = np.array([], dtype='int32')
         self.nstation = np.array([], dtype='int32')
 
         self.s1 = np.array([], dtype='float64')
@@ -1301,7 +1453,6 @@ class PBEAM(Property):
                            nsia, nsib, cwa, cwb,
                            m1a, m2a, m1b, m2b, n1a, n2a, n1b, n2b,
                            ifile, comment))
-
         self.n += 1
         return self.n - 1
 
@@ -1358,27 +1509,34 @@ class PBEAM(Property):
              m1ai, m2ai, m1bi, m2bi,
              n1ai, n2ai, n1bi, n2bi,
              ifilei, commenti) = card
+            # nstations = len(xxbi)
             nstations = len(areai)
-            if nsmi is None:
-                nsmi = np.zeros(nstations)
-            if c1i is None:
-                c1i = np.zeros(nstations)
-            if c2i is None:
-                c2i = np.zeros(nstations)
-            if d1i is None:
-                d1i = np.zeros(nstations)
-            if d2i is None:
-                d2i = np.zeros(nstations)
-            if e1i is None:
-                e1i = np.zeros(nstations)
-            if e2i is None:
-                e2i = np.zeros(nstations)
-            if f1i is None:
-                f1i = np.zeros(nstations)
-            if f2i is None:
-                f2i = np.zeros(nstations)
-            #if nsmi is None:
-                #nsmi = np.zeros(nstations)
+            # print(f'nstations = {nstations}')
+            # if areai is None:
+            #     areai = np.zeros(nstations)
+            nstationi = len(xxbi)
+            if soi is None:
+                soi = np.full(nstations, 'YES')
+            elif isinstance(soi, str):
+                soi = np.full(nstations, soi)
+            elif isinstance(soi, (list, tuple, np.ndarray)):
+                soi = np.asarray(soi)
+            else:  # pragma: no cover
+                raise TypeError(f'soi={soi} type={type(soi)}')
+            ji = listify(ji, nstations)
+            i1i = listify(i1i, nstations)
+            i2i = listify(i2i, nstations)
+            i12i = listify(i12i, nstations)
+            nsmi = listify(nsmi, nstations)
+            c1i = listify(c1i, nstations)
+            c2i = listify(c2i, nstations)
+            d1i = listify(d1i, nstations)
+            d2i = listify(d2i, nstations)
+            e1i = listify(e1i, nstations)
+            e2i = listify(e2i, nstations)
+            f1i = listify(f1i, nstations)
+            f2i = listify(f2i, nstations)
+            d2i = listify(d2i, nstations)
 
             if m1ai is None:
                 m1ai = 0.0
@@ -1400,7 +1558,6 @@ class PBEAM(Property):
             if n2bi is None:
                 n2bi = n2ai
 
-            nstationi = len(xxbi)
             ifile[icard] = ifilei
             if commenti:
                 comment[pid] = commenti
@@ -1413,6 +1570,7 @@ class PBEAM(Property):
             k1[icard] = k1i
             k2[icard] = k2i
 
+            # print(xxbi, soi, areai)
             xxb_list.extend(xxbi)
             so_list.extend(soi)
             A_list.extend(areai)
@@ -1492,6 +1650,49 @@ class PBEAM(Property):
         if ifile is None:
             ifile = np.zeros(ncards, dtype='int32')
         save_ifile_comment(self, ifile, comment)
+
+        if len(self.property_id) == 0:
+            property_id = np.hstack([self.property_id, property_id])
+            material_id = np.hstack([self.material_id, material_id])
+            nstation = np.hstack([self.nstation, nstation])
+            xxb = np.hstack([self.xxb, xxb])
+            so = np.hstack([self.so, so])
+            A = np.hstack([self.A, A])
+            J = np.hstack([self.J, J])
+            I1 = np.hstack([self.I1, I1])
+            I2 = np.hstack([self.I2, I2])
+            I12 = np.hstack([self.I12, I12])
+
+            nsm = np.hstack([self.nsm, nsm])
+            c1 = np.hstack([self.c1, c1])
+            c2 = np.hstack([self.c2, c2])
+            d1 = np.hstack([self.c1, d1])
+            d2 = np.hstack([self.c2, d2])
+            e1 = np.hstack([self.c1, e1])
+            e2 = np.hstack([self.c2, e2])
+            f1 = np.hstack([self.c1, f1])
+            f2 = np.hstack([self.c2, f2])
+
+            k1 = np.hstack([self.k1, k1])
+            k2 = np.hstack([self.k2, k2])
+
+            s1 = np.hstack([self.s1, s1])
+            s2 = np.hstack([self.s2, s2])
+
+            nsia = np.hstack([self.nsia, nsia])
+            nsib = np.hstack([self.nsib, nsib])
+
+            cwa = np.hstack([self.cwa, cwa])
+            cwb = np.hstack([self.cwb, cwb])
+            m1a = np.hstack([self.m1a, m1a])
+            m2a = np.hstack([self.m2a, m2a])
+            m1b = np.hstack([self.m1b, m1b])
+            m2b = np.hstack([self.m2b, m2b])
+            n1a = np.hstack([self.n1a, n1a])
+            n2a = np.hstack([self.n2a, n2a])
+            n1b = np.hstack([self.n1b, n1b])
+            n2b = np.hstack([self.n2b, n2b])
+
         self.property_id = property_id
         self.material_id = material_id
 
@@ -1532,6 +1733,12 @@ class PBEAM(Property):
         self.n1b = n1b
         self.n2b = n2b
         self.n = len(property_id)
+
+    def cdef(self) -> np.ndarray:
+        cdef = np.column_stack([
+            self.c1, self.c2, self.d1, self.d2,
+            self.e1, self.e2, self.f1, self.f2])
+        return cdef
 
     def set_used(self, used_dict: dict[str, list[np.ndarray]]) -> None:
         used_dict['material_id'].append(self.material_id)
@@ -1613,6 +1820,25 @@ class PBEAM(Property):
         prop.e2 = hslice_by_idim(i, istation, self.e2)
         prop.f1 = hslice_by_idim(i, istation, self.f1)
         prop.f2 = hslice_by_idim(i, istation, self.f2)
+
+        prop.k1 = self.k1[i]
+        prop.k2 = self.k2[i]
+        prop.s1 = self.s1[i]
+        prop.s2 = self.s2[i]
+
+        prop.nsia = self.nsia[i]
+        prop.nsib = self.nsib[i]
+        prop.cwa = self.cwa[i]
+        prop.cwb = self.cwb[i]
+        prop.m1a = self.m1a[i]
+        prop.m2a = self.m2a[i]
+        prop.m1b = self.m1b[i]
+        prop.m2b = self.m2b[i]
+        prop.n1a = self.n1a[i]
+        prop.n2a = self.n2a[i]
+        prop.n1b = self.n1b[i]
+        prop.n2b = self.n2b[i]
+
         prop.nstation = self.nstation[i]
         prop.n = len(i)
 
@@ -1664,7 +1890,7 @@ class PBEAM(Property):
         assert len(mass_per_length) == nproperties
         return mass_per_length
 
-    def rhoarea_nsm(self) -> np.ndarray:
+    def rhoarea_nsm(self) -> tuple[np.ndarray, np.ndarray]:
         nproperties = len(self.property_id)
         rho = self.rho()
 
@@ -1710,7 +1936,7 @@ class PBEAM(Property):
             s1, s2, k1, k2, \
             nsia, nsib, cwa, cwb, \
             m1a, m2a, m1b, m2b, \
-            n1a, n2a, n1b, n2b in zip(property_ids, material_ids,
+            n1a, n2a, n1b, n2b in zip_longest(property_ids, material_ids,
                                       self.istation, self.nstation,
                                       self.s1, self.s2, self.k1, self.k2,
                                       self.nsia, self.nsib, self.cwa, self.cwb,
@@ -1786,8 +2012,8 @@ class PBEAM(Property):
                         list_fields += ['NO', xxb, A, i1, i2, i12, j, nsm]
                     elif so in ['YESA']:
                         list_fields += ['YESA', xxb, A, i1, i2, i12, j, nsm]
-                    else:
-                        raise RuntimeError('so=%r type(so)=%s' % (so, type(so)))
+                    else:  # pragma: no cover
+                        raise RuntimeError(f'so={so!r} type(so)={type(so)}')
                 i += 1
                 if not write_so:
                     break
@@ -1878,6 +2104,15 @@ class PBEAM(Property):
             inertias[i, :] = [i1i, i2i, i12i, ji]
         assert len(inertias) == nproperties
         return inertias
+
+    def prop_stiffness_info(self) -> np.ndarray:
+        """[area, I1, I2, I12, J, k1, k2, s1, s2]"""
+        area = self.area()
+        inertia = self.inertia()
+        breakdown = np.column_stack([
+            area, inertia,
+            self.k1, self.k2, self.s1, self.s2])
+        return breakdown
 
     def to_old_card(self) -> list[Any]:
         from pyNastran.bdf.bdf import BDF
@@ -2790,6 +3025,7 @@ class PBCOMP(Property):
     def area(self) -> np.ndarray:
         return self._area
 
+
 def _sort_pbeam(pid, xxb, so, area, i1, i2, i12, j, nsm,
                 c1, c2, d1, d2, e1, e2, f1, f2, ensure_xxb_1_section=True):
     nxxb = len(xxb)
@@ -3084,7 +3320,17 @@ class CBEAM3(Element):
         if ifile is None:
             ifile = np.zeros(ncards, dtype='int32')
         if len(self.element_id) != 0:
-            raise RuntimeError(f'stacking of {self.type} is not supported')
+            ifile = np.hstack([self.ifile, ifile])
+            element_id = np.hstack([self.element_id, element_id])
+            property_id = np.hstack([self.property_id, property_id])
+            nodes = np.vstack([self.nodes, nodes])
+            g0 = np.hstack([self.g0, g0])
+            x = np.vstack([self.x, x])
+            wa = np.vstack([self.wa, wa])
+            wb = np.vstack([self.wb, wb])
+            wc = np.vstack([self.wc, wc])
+            tw = np.vstack([self.tw, tw])
+            s = np.vstack([self.s, s])
         save_ifile_comment(self, ifile, comment)
         self.element_id = element_id
         self.property_id = property_id
@@ -4212,7 +4458,30 @@ class PBEAM3(Property):
         if ifile is None:
             ifile = np.zeros(ncards, dtype='int32')
         if len(self.property_id) != 0:
-            raise NotImplementedError()
+            ifile = np.hstack([self.ifile, ifile])
+            property_id = np.hstack([self.property_id, property_id])
+            material_id = np.hstack([self.material_id, material_id])
+            area = np.vstack([self._area, area])
+            iy = np.vstack([self.iy, iy])
+            iz = np.vstack([self.iz, iz])
+            iyz = np.vstack([self.iyz, iyz])
+            j = np.vstack([self.j, j])
+            nsm = np.vstack([self._nsm, nsm])
+            ky = np.hstack([self.ky, ky])
+            kz = np.hstack([self.kz, kz])
+            sout = np.vstack([self.sout, sout])
+            ny = np.vstack([self.ny, ny])
+            nz = np.vstack([self.nz, nz])
+            my = np.vstack([self.my, my])
+            mz = np.vstack([self.mz, mz])
+            nsiy = np.vstack([self.nsiy, nsiy])
+            nsiz = np.vstack([self.nsiz, nsiz])
+            nsiyz = np.vstack([self.nsiyz, nsiyz])
+            cw = np.vstack([self.cw, cw])
+            stress = np.hstack([self.stress, stress])
+            w = np.vstack([self.w, w])
+            wy = np.vstack([self.wy, wy])
+            wz = np.vstack([self.wz, wz])
 
         save_ifile_comment(self, ifile, comment)
         self.property_id = property_id
@@ -4587,7 +4856,13 @@ class CBEND(Element):
         if ifile is None:
             ifile = np.zeros(ncards, dtype='int32')
         if len(self.element_id) != 0:
-            raise RuntimeError(f'stacking of {self.type} is not supported')
+            ifile = np.hstack([self.ifile, ifile])
+            element_id = np.hstack([self.element_id, element_id])
+            property_id = np.hstack([self.property_id, property_id])
+            nodes = np.vstack([self.nodes, nodes])
+            g0 = np.hstack([self.g0, g0])
+            x = np.vstack([self.x, x])
+            geom_flag = np.hstack([self.geom_flag, geom_flag])
         save_ifile_comment(self, ifile, comment)
         self.element_id = element_id
         self.property_id = property_id
@@ -4764,7 +5039,6 @@ class CBEND(Element):
             ipos = chord_sq > 0
             chord = 2 * np.sqrt(chord_sq[ipos])
             length[igeom_flag1] = chord[ipos]
-
 
         if igeom_flag2.sum():
             i = np.where(igeom_flag2)[0]
@@ -5745,3 +6019,16 @@ class PBEND(Property):
         ibeamtype1 = (self.beam_type == 1)
         area[ibeamtype1] = self.A[ibeamtype1]
         return area
+
+def listify(ji, nstations: int) -> np.ndarray:
+    if ji is None:
+        j = np.zeros(nstations)
+    elif isinstance(ji, np.ndarray):
+        j = ji
+    elif isinstance(ji, float_types):
+        j = np.full(nstations, ji)
+    elif isinstance(ji, (tuple, list)):
+        j = np.asarray(ji)
+    else:  # pragma: no cover
+        raise TypeError(type(ji))
+    return j

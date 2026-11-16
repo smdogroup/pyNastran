@@ -2,7 +2,6 @@
 import os
 import collections
 
-from numpy import arange, mean, vstack, unique, where, sqrt
 import numpy as np
 
 from pyNastran.utils.numpy_utils import integer_types
@@ -11,7 +10,9 @@ from pyNastran.gui.qt_files.colors import (
 from pyNastran.gui.gui_objects.gui_result import GuiResult
 from pyNastran.gui.utils.vtk.vtk_utils import (
     create_vtk_cells_of_constant_element_type, numpy_to_vtk_points)
-from pyNastran.converters.cart3d.cart3d import read_cart3d, Cart3D
+from pyNastran.converters.cart3d.cart3d import (
+    read_cart3d, Cart3D, get_area_centroid_normals)
+from pyNastran.converters.fluent.fluent_io import compute_cp_force_moment_coefficients
 from pyNastran.converters.cart3d.cart3d_result import Cart3dGeometry
 
 from pyNastran.converters.cart3d.input_c3d_reader import read_input_c3d
@@ -24,6 +25,8 @@ class Cart3dIO:
         self.gui = gui
         self.data_map = None
         self.mdoel = Cart3D()
+        # (cf_total, cm_total, region_dict) from the last Cp integration
+        self.force_moment_coefficients = None
 
     def get_cart3d_wildcard_geometry_results_functions(self):
         """
@@ -136,8 +139,14 @@ class Cart3dIO:
         gui.scalar_bar_actor.Modified()
 
         assert loads is not None
+        # must come before _fill_cart3d_results, which nan's out rho=0 nodes in-place
+        self.force_moment_coefficients = None
+        if 'Cp' in loads:
+            self.force_moment_coefficients = _cart3d_cp_force_moment(
+                gui, model, loads['Cp'])
+
         if 'Mach' in loads:
-            avg_mach = mean(loads['Mach'])
+            avg_mach = np.mean(loads['Mach'])
             note = ':  avg(Mach)=%g' % avg_mach
         else:
             note = ''
@@ -208,7 +217,7 @@ class Cart3dIO:
                 #vel = np.full(nelements, np.nan, dtype='float32')
                 pressure = np.full(nelements, np.nan, dtype='float32')
 
-                uregions = set(unique(regions))
+                uregions = set(np.unique(regions))
                 surf_bc_regions = set(surfbcs.keys())
                 invalid_regions = surf_bc_regions - uregions
                 if len(invalid_regions) != 0:
@@ -216,7 +225,7 @@ class Cart3dIO:
 
                 for bc_id, bc_values in sorted(surfbcs.items()):
                     rhoi, xveli, yveli, zveli, pressi = bc_values
-                    i = where(regions == bc_id)[0]
+                    i = np.where(regions == bc_id)[0]
                     rho[i] = rhoi
                     xvel[i] = xveli
                     yvel[i] = yveli
@@ -231,7 +240,7 @@ class Cart3dIO:
                 #vel[inan] = np.nan
                 pressure[inan] = np.nan
 
-                mach = sqrt(xvel ** 2 + yvel ** 2 + zvel ** 2)
+                mach = np.sqrt(xvel ** 2 + yvel ** 2 + zvel ** 2)
 
                 rho_res = GuiResult(ID, header='Rho', title='Rho',
                                     location='centroid', scalar=rho)
@@ -350,29 +359,29 @@ class Cart3dIO:
                     raise NotImplementedError(msg)
 
             if ifarfield:
-                nodes = vstack(farfield_nodes)
-                elements = vstack(farfield_elements)
+                nodes = np.vstack(farfield_nodes)
+                elements = np.vstack(farfield_elements)
                 name = get_name('farfield', self.gui.name)
                 gui.set_quad_grid(name, nodes, elements, color=BLUE_FLOAT,
                                   line_width=1, opacity=1.)
 
             if isymmetry:
-                nodes = vstack(symmetry_nodes)
-                elements = vstack(symmetry_elements)
+                nodes = np.vstack(symmetry_nodes)
+                elements = np.vstack(symmetry_elements)
                 name = get_name('symmetry', self.gui.name)
                 gui.set_quad_grid(name, nodes, elements, color=GREEN_FLOAT,
                                   line_width=1, opacity=1.)
 
             if iinflow:
-                nodes = vstack(inflow_nodes)
-                elements = vstack(inflow_elements)
+                nodes = np.vstack(inflow_nodes)
+                elements = np.vstack(inflow_elements)
                 name = get_name('inflow', self.gui.name)
                 gui.set_quad_grid(name, nodes, elements, color=RED_FLOAT,
                                   line_width=1, opacity=1.)
 
             if ioutflow:
-                nodes = vstack(outflow_nodes)
-                elements = vstack(outflow_elements)
+                nodes = np.vstack(outflow_nodes)
+                elements = np.vstack(outflow_elements)
                 name = get_name('outflow', self.gui.name)
                 gui.set_quad_grid(name, nodes, elements, color=YELLOW_FLOAT,
                                   line_width=1, opacity=1.)
@@ -433,8 +442,8 @@ def _fill_cart3d_geometry_objects(cases, unused_id, nodes, elements, regions, mo
     nelements = elements.shape[0]
     nnodes = nodes.shape[0]
 
-    eids = arange(1, nelements + 1)
-    nids = arange(1, nnodes + 1)
+    eids = np.arange(1, nelements + 1)
+    nids = np.arange(1, nnodes + 1)
     area = model.get_area()
     cnormals = model.get_normals()
     cnnodes = cnormals.shape[0]
@@ -509,6 +518,30 @@ def _fill_cart3d_geometry_objects(cases, unused_id, nodes, elements, regions, mo
     return form, cases, icase, nids, eids, data_map_dict
     #cnormals = model.get_normals(nodes, elements)
     #nnormals = model.get_normals_at_nodes(nodes, elements, cnormals)
+
+
+def _cart3d_cp_force_moment(gui, model: Cart3D, cp_nodal: np.ndarray):
+    """
+    Integrates the nodal Cp over the triangles.
+
+    The element Cp is the average of the 3 nodal values (exact for a
+    linear Cp over the triangle).  The geometry is taken in the model
+    units; compute_cp_force_moment_coefficients handles the unit transform
+    to sref/cref/bref/xyz_ref.
+    """
+    other_settings = gui.settings.other_settings
+    area, centroid, normal = get_area_centroid_normals(model.nodes, model.elements)
+    cp = np.asarray(cp_nodal)[model.elements].mean(axis=1)
+    out = compute_cp_force_moment_coefficients(
+        cp, area, centroid, normal, model.regions,
+        sref=other_settings.sref,
+        cref=other_settings.cref,
+        bref=other_settings.bref,
+        xyz_ref=other_settings.xyz_ref,
+        units_length_in=other_settings.units_model_in[0],
+        units_length_out=other_settings.units_length,
+        log_info=gui.log_info)
+    return out
 
 
 def _node_inverse_counter(model, nnodes):

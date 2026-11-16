@@ -50,11 +50,13 @@ def save_load_deck(model: BDF, xref: str='standard', punch: bool=True,
                    run_test_bdf: bool=True,
                    run_op2_writer: bool=True,
                    run_op2_reader: bool=True,
+                   run_deepcopy: bool=True,
                    remove_disabled_cards: bool=True,
                    stringify: bool=False,
                    nastran_format: str='nx',
                    op2_log_level: str='warning') -> BDF:
     """writes, re-reads, saves an obj, loads an obj, and returns the deck"""
+    assert xref in {'standard', 'safe', True, False}, f'xref={xref}'
     if os.path.exists('junk.bdf'):
         os.remove('junk.bdf')
     if not remove_disabled_cards:
@@ -66,7 +68,6 @@ def save_load_deck(model: BDF, xref: str='standard', punch: bool=True,
     model.pop_parse_errors()
     model.pop_xref_errors()
     bdf_file = StringIO()
-    # copy.deepcopy(model)
     model.write_bdf(bdf_file, size=8, close=False)
     bdf_file.seek(0)
     model.write_bdf(bdf_file, size=16, close=False)
@@ -74,6 +75,12 @@ def save_load_deck(model: BDF, xref: str='standard', punch: bool=True,
     model.write_bdf(bdf_file, size=16, is_double=True, close=False)
     bdf_file.seek(0)
     get_matrices(model)
+
+    if run_deepcopy:
+        model_copy = copy.deepcopy(model)
+        bdf_file2 = StringIO()
+        model_copy.write_bdf(bdf_file2, size=8, close=False)
+        del bdf_file2
 
     if write_saves and model.save_file_structure:
         bdf_filenames = {0 : 'junk.bdf',}
@@ -97,6 +104,7 @@ def save_load_deck(model: BDF, xref: str='standard', punch: bool=True,
             bdf_file_out.writelines(bdf_file.getvalue())
         bdf_file = bdf_filename_out
         assert len(model2.zaero.pafoil) == 0
+
     model2.read_bdf(bdf_file, punch=punch, xref=False)
     _cross_reference(model2, xref)
 
@@ -249,8 +257,8 @@ def _run_mass_properties(model2: BDF, nnodes: int, nelements: int,
 
     if nelements > 1 and nnodes == 0:  # pragma: no cover
         raise RuntimeError('no nodes exist')
-    mass1, cg1, inertia1 = mass_properties(model2, reference_point=None, sym_axis=None)
-    mass2, cg2, inertia2 = mass_properties_nsm(model2, reference_point=None, sym_axis=None)
+    mass1, cg1, inertia1 = mass_properties(model2, reference_point=None, sym_axis='')
+    mass2, cg2, inertia2 = mass_properties_nsm(model2, reference_point=None, sym_axis='')
     # if not quiet:
     #     if model2.wtmass != 1.0:
     #         print('weight = %s' % (mass1 / model2.wtmass))

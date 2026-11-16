@@ -21,6 +21,7 @@ defines:
 from __future__ import annotations
 import os
 import copy
+import warnings
 from typing import Optional, Any, TYPE_CHECKING
 import numpy as np
 from qtpy import QtGui
@@ -43,12 +44,9 @@ if TYPE_CHECKING:  # pragma: no cover
     from pyNastran.gui.main_window import MainWindow
 
 from pyNastran.gui import (
-    USE_NEW_SIDEBAR_OBJS_ as USE_NEW_SIDEBAR_OBJECTS,
     USE_NEW_TERMS_ as USE_NEW_TERMS)
 
-USE_NEW_SIDEBAR = False
-if USE_NEW_SIDEBAR_OBJECTS:
-    USE_NEW_SIDEBAR = False
+USE_NEW_SIDEBAR = True
 
 
 IS_WINDOWS = 'nt' in os.name
@@ -133,7 +131,8 @@ NASTRAN_BOOL_KEYS = [
     'nastran_is_plotel',
 
     'nastran_displacement', 'nastran_velocity',
-    'nastran_acceleration', 'nastran_eigenvector', 'nastran_temperature',
+    'nastran_acceleration', 'nastran_temperature',
+    'nastran_eigenvector', 'nastran_eigenvector_complex',
     'nastran_spc_force', 'nastran_mpc_force',
     'nastran_applied_load', 'nastran_heat_flux',
 
@@ -157,6 +156,9 @@ NASTRAN_BOOL_KEYS = [
     #'nastran_show_conm',
 ]
 NASTRAN_KEYS = NASTRAN_BOOL_KEYS + NASTRAN_STR_KEYS + NASTRAN_COLOR_KEYS
+NASTRAN_OPTIONAL_ARRAY_KEYS = [
+    'nastran_real_modes_to_include',
+    'nastran_complex_modes_to_include']
 
 OTHER_STRING_KEYS = [
     'units_length', 'units_force', 'units_moment',
@@ -197,10 +199,11 @@ class OtherSettings:
         self.units_velocity = 'in/s'
         self.units_acceleration = 'in/s^2'
 
-    def update(self, out_data: dict[str, Any]):
+    def update(self, out_data: dict[str, Any]) -> None:
         """from preferences"""
         self.cart3d_fluent_include = out_data['cart3d_fluent_include']
         self.cart3d_fluent_remove = out_data['cart3d_fluent_remove']
+
         self.sref = out_data['sref']
         self.cref = out_data['cref']
         self.bref = out_data['bref']
@@ -296,6 +299,24 @@ class NastranSettings:
         self.parent = parent
         self.reset_settings()
 
+    def update(self, out_data: dict[str, Any]) -> None:
+        """from preferences"""
+        keys = list(out_data)
+        keys.sort()
+        if 'nastran_real_modes_to_include' not in out_data:
+            warnings.warn(f'missing nastran_real_modes_to_include; allowed={keys}')
+        elif len(out_data['nastran_real_modes_to_include']) == 0:
+            self.real_modes_to_include = None
+        else:
+            self.real_modes_to_include = out_data['nastran_real_modes_to_include']
+
+        if 'nastran_complex_modes_to_include' not in out_data:
+            warnings.warn(f'missing nastran_complex_modes_to_include; allowed={keys}')
+        elif len(out_data['nastran_complex_modes_to_include']) == 0:
+            self.complex_modes_to_include = None
+        else:
+            self.complex_modes_to_include = out_data['nastran_complex_modes_to_include']
+
     def reset_settings(self):
         self.version = 'Guess'
         self.is_element_quality = True
@@ -311,6 +332,10 @@ class NastranSettings:
         self.is_rbe = True
         self.is_aero = True
         self.is_plotel = True
+
+        #---------------------------
+        self.real_modes_to_include: Optional[np.ndarray] = None
+        self.complex_modes_to_include: Optional[np.ndarray] = None
 
         self.stress = True
         self.spring_stress = True
@@ -339,6 +364,7 @@ class NastranSettings:
         self.plate_force = True
 
         self.eigenvector = True
+        self.eigenvector_complex = True
         self.displacement = True
         self.velocity = True
         self.acceleration = True
@@ -466,6 +492,20 @@ class NastranSettings:
             #print(f'key={key!r} key2={key2!r} default={default!r} value={value!r}')
             setattr(self, key2, value)
 
+        for key in NASTRAN_OPTIONAL_ARRAY_KEYS:
+            # nastran_is_properties -> nastran, is_properties
+            base, key2 = key.split('_', 1)
+
+            # we get default from the nastran_settings
+            default = getattr(self, key2)
+
+            # pull it from the QSettings
+            value = _set_setting(self, settings, setting_keys, [key],
+                                 default, save=True, auto_type=int, allow_none=True)
+            #print(f'key={key!r} key2={key2!r} default={default!r} value={value!r}')
+            setattr(self, key2, value)
+
+
     def __repr__(self) -> str:
         msg = '<NastranSettings>\n'
         keys = object_attributes(self, mode='public', keys_to_skip=['parent'])
@@ -498,6 +538,12 @@ class Settings:
         self.nastran_settings = NastranSettings(parent)
         self.other_settings = OtherSettings(parent)
 
+    def update(self, out_data: dict[str, Any]) -> None:
+        self.on_set_font_size(out_data['font_size'])
+        self.nastran_settings.update(out_data)
+        self.other_settings.update(out_data)
+        # self.set_annotation_size_color(self._annotation_size)
+
     def reset_settings(self, resize: bool=True,
                        reset_dim_max: bool=True) -> None:
         """helper method for ``setup_gui``"""
@@ -518,7 +564,6 @@ class Settings:
         # True:  startup directory
         self.use_startup_directory = True
 
-        self.use_new_sidebar_objects = USE_NEW_SIDEBAR_OBJECTS
         self.use_new_sidebar = USE_NEW_SIDEBAR
         self.use_new_terms = USE_NEW_TERMS
 
@@ -597,7 +642,6 @@ class Settings:
             'use_startup_directory': self.use_startup_directory,
             'recent_files': self.recent_files,
 
-            'use_new_sidebar_objects': self.use_new_sidebar_objects,
             'use_new_terms': self.use_new_terms,
 
             # rgb tuple
@@ -705,10 +749,7 @@ class Settings:
         else:
             self.startup_directory = ''
 
-        _set_setting(self, settings, setting_keys, ['use_new_sidebar_objects'],
-                     default=self.use_new_sidebar_objects,
-                     save=True, auto_type=bool)
-        self.use_new_sidebar = self.use_new_sidebar_objects
+        self.use_new_sidebar = True
         # _set_setting(self, settings, setting_keys, ['use_new_sidebar'], self.use_new_sidebar,
         #              USE_NEW_SIDEBAR, auto_type=bool)
         _set_setting(self, settings, setting_keys, ['use_new_terms'],
@@ -913,10 +954,10 @@ class Settings:
 
         self.python_dock_visible = _set_setting(
             self, settings, setting_keys, ['python_dock_visible'],
-            default=False, save=False)
+            default=False, save=False, auto_type=bool)
         self.log_dock_visible = _set_setting(
             self, settings, setting_keys, ['log_dock_visible'],
-            default=True, save=False)
+            default=True, save=False, auto_type=bool)
 
         font = QtGui.QFont()
         font.setPointSize(self.font_size)
@@ -1439,7 +1480,7 @@ def check_length(slot_key_length_defaults: list[Any, str, int, Any])  -> None:
 
 def _set_setting(self, settings: QSettings, setting_keys: list[str],
                  setting_names: list[str], default: Any,
-                 save: bool=True, auto_type=None) -> Any:
+                 save: bool=True, auto_type=None, allow_none: bool=False) -> Any:
     """
     helper method for ``reapply_settings``
 
@@ -1455,7 +1496,7 @@ def _set_setting(self, settings: QSettings, setting_keys: list[str],
         useful for deprecations
     save : bool; default=True
         why would you never save the setting?  testing?
-    autotype : Callable; default=None -> no typing
+    auto_type : Callable; default=None -> no typing
         int, float
         for list[float], it just iterates over each one and types it
         for arrays, it iterates over it as a list, types it, and arrays the list
@@ -1464,7 +1505,7 @@ def _set_setting(self, settings: QSettings, setting_keys: list[str],
     assert isinstance(save, bool), save
     set_name = setting_names[0]
     value = get_setting(settings, setting_keys, setting_names, default,
-                        auto_type=auto_type)
+                        auto_type=auto_type, allow_none=allow_none)
     if save:
         setattr(self, set_name, value)
     return value

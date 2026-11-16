@@ -82,6 +82,15 @@ class OP2Common(Op2Codes, F06Writer):
         self.is_vectorized = None
         self.combine = False
 
+        # local flags that haven't been promoted to official variables
+        # these will change at some point
+        self.flags = {
+            'eigenvectors_real': True,
+            'eigenvectors_complex': True,
+            'real_modes_to_include': None,  # all; unused
+            'complex_modes_to_include': None,  # all; unused
+        }
+
         #: the storage dictionary that is passed to OP2 objects (e.g. RealDisplacementArray)
         #: the key-value pairs are extracted and used to generate dynamic self
         #: variables for the OP2 objects
@@ -461,11 +470,10 @@ class OP2Common(Op2Codes, F06Writer):
         nsubtitle_break = 67
         adpativity_index = subtitle[nsubtitle_break:99]
         superelement = subtitle[99:].strip()
-        #print(f'superelement={superelement!r}; n={len(superelement)}')
-
-        #print('subtitle = %r' % subtitle)
-        #print('aindex   = %r' % adpativity_index)
-        #print('superele = %r' % superelement)
+        # print(f'superelement={superelement!r}; n={len(superelement)}')
+        # print('subtitle = %r' % subtitle)
+        # print('aindex   = %r' % adpativity_index)
+        # print('superele = %r' % superelement)
 
         #'SUPERELEMENT 0       ,   1'; n=26
         #'SUPERELEMENT 0       ,   10'; n=27
@@ -1663,6 +1671,7 @@ class OP2Common(Op2Codes, F06Writer):
                 self.table_name, self.table_code, msg, self.code_information())
             raise NotImplementedError(msg)
 
+        # raise NotImplementedError(self.code_information())
         if self.warn_on_op2_missed_table:
             if msg != self._last_comment:
                 #print(self.code_information())
@@ -2446,6 +2455,7 @@ def read_title_helper(title_bytes: bytes, subtitle_bytes: bytes, label_bytes: by
 
     label_100 = label[100:]
     if 'FBA SUBCASE ' in label_100:
+        # label_100 = '   FBA SUBCASE        1'
         subtitle, label, label2 = parse_fba_subcase(title, subtitle, label, log)
     elif 'FRF SUBCASE ' in label_100:
         subtitle, label, label2 = parse_frf_subcase(
@@ -2471,10 +2481,12 @@ def read_title_helper(title_bytes: bytes, subtitle_bytes: bytes, label_bytes: by
 
 def parse_fba_subcase(title: str, subtitle: str, label: str,
                       log: SimpleLogger) -> tuple[str, str, str]:
-
-    #log.error(f'title={title!r}')
-    #log.error(f'subtitle={subtitle!r}')
-    #log.error(f'label={label!r}')
+    """
+    label='LOAD ON INTERNAL GRID PT. 16377 IN FRF COMPONE                                                         FBA SUBCASE        1'
+    """
+    # log.error(f'title={title!r}')
+    # log.error(f'subtitle={subtitle!r}')
+    # log.error(f'label={label!r}')
     subtitle = subtitle[:28]
     # title    = b' FRF PAPER DOF 8 PROBLEM USING GRID POINTS                                                                                      '
     # subtitle = b' SINGLE SHOT RUN VIA GENASM - FRFP1GPS                                     FBA OUTPUT FOR FRF COMPONENT        1 (FRF8    )     '
@@ -2520,16 +2532,30 @@ def parse_fba_subcase(title: str, subtitle: str, label: str,
             #print(f'label_num={label_num!r} unit_labeli={unit_labeli!r}')
             unit_label = unit_labeli.strip()
             #label_num='        6' unit_labeli='UNIT LOAD ON SPNT'
-        else:
+        else:  # pragma: no cover
             raise NotImplementedError(label_base)
 
     elif label_base.startswith('LOAD ON INTERNAL GRID PT. '):
         grid_comp_str = label_base.split('LOAD ON INTERNAL GRID PT. ')[1].strip()
 
-        #'812 IN FRF COMPONENT'
-        grid_str, comp_str = grid_comp_str.split('IN FRF COMPONENT')
+        # 123 IN FRF COMPONENT 4
+        sline = grid_comp_str.split(' ')
+        if len(sline) not in [4, 5]:
+            raise RuntimeError('Expected grid_comp_str in the form of "123 IN FRF COMPONENT 4"\n'
+                               f'label_base={label_base!r}; n={len(label_base)}\n'
+                               f'grid_comp_str={grid_comp_str!r}\n'
+                               f'sline={sline}; n={len(sline)}')
+
+        grid_str = sline[0]
+        comp_str = sline[-1]
+        # try:
+        #     grid_str, comp_str = grid_comp_str.split('IN FRF COMPONENT')
+        # except ValueError as error:
+        #     raise RuntimeError('Expected grid_comp_str in the form of "123 IN FRF COMPONENT 4"\n'
+        #                        f'label_base={label_base!r}; n={len(label_base)}\n'
+        #                        f'grid_comp_str={grid_comp_str!r}\n') from error
         grid_id = int(grid_str)
-        comp_id = int(comp_str)
+        comp_id = int(comp_str) if comp_str.isdigit() else -1
 
         #print(f'sline = {sline}')
         #print(title)
@@ -2551,7 +2577,7 @@ def parse_fba_subcase(title: str, subtitle: str, label: str,
         label = f'Load on connection grid point; grid={grid_id} comp={comp_id}'
         label2 = ''
         return subtitle, label, label_base
-    else:
+    else:  # pragma: no cover
         raise NotImplementedError(label_base)
 
     comp_grid_1 = int(comp_grid_1)
@@ -2562,11 +2588,12 @@ def parse_fba_subcase(title: str, subtitle: str, label: str,
     comp_num_2, comp_name = num_name.split('/')
     comp_num_2 = int(comp_num_2)
     comp_name = comp_name.strip()
-    #print('label2 = ', label2)
+    # print(f'label2 = {label2!r}')
     #print('unit = ', unit_label, comp_num_1, comp_num_2)
     #print('num_name = ', comp_num_2, comp_name)
     assert comp_num_2 in [1, 2, 7, 8], f'comp_num_2={comp_num_2} label_base={label_base!r}'
     label = f'{unit_label}; grid={comp_grid_1} comp={comp_num_1}'
+    # print(f'label_out = {label!r}')
     label2 = ''
     return subtitle, label, label_base
 
@@ -2579,7 +2606,7 @@ def parse_frf_subcase(title_bytes: bytes, subtitle_bytes: bytes, label_bytes: by
     #subtitle = b' GENERATE FRFS FOR COMPONENT NO. 4                                         FRF OUTPUT FOR FRF COMPONENT        4 (TOP     )     '
     #label    = b'UNIT LOAD ON GRID POINT     5010 - COMPONENT 3                                                         FRF SUBCASE        1     '
     #label = f'{unit_label}; grid={comp_grid_1} comp={comp_num_1}'
-    #print(f'label_bytes = {label_bytes}')
+    # print(f'label_bytes = {label_bytes}')
     if label_base.startswith('UNIT LOAD ON GRID POINT'):
         grid_comp_sline = label_base.split('UNIT LOAD ON GRID POINT')[1].strip()
 
@@ -2597,7 +2624,7 @@ def parse_frf_subcase(title_bytes: bytes, subtitle_bytes: bytes, label_bytes: by
         # subtitle = b' FRF GENERATION FOR COMPONENT NO. 1                                        FRF OUTPUT FOR FRF COMPONENT        1 (LEFTBOT )     '
         # label    = b'LOAD ON INTERNAL GRID PT. 812 IN FRF COMPONENT 1                                                       FRF SUBCASE        1     '
         grid_str = label_base.split('LOAD ON INTERNAL GRID PT.')[1].strip()
-        #print(f'label_base = {label_base!r}')
+        # print(f'label_base = {label_base!r}')
         #'812 IN FRF COMPONENT 1'
         #print(grid_str)
         if 'IN FRF COMPONENT' in grid_str:

@@ -7,6 +7,7 @@ Various mathematical functions are defined in this file.  This includes:
  - get_abs_max(min_values, max_values)
  - get_max_index(data, axis=1)
  - get_min_index(data, axis=1)
+ - grms(freq, psd)
  - integrate_positive_unit_line(x, y, min_value=0.)
  - integrate_unit_line(x, y)
  - is_float_ranged(a, x, b)
@@ -31,8 +32,36 @@ from numpy import (float32, float64, complex64, complex128,
 import numpy as np
 from numpy.linalg import norm  # type: ignore
 
-#from scipy.linalg import solve_banded  # type: ignore
-from scipy.integrate import quad  # type: ignore
+try:
+    import scipy  # prevents confusing import error
+    IS_SCIPY = True
+except (ImportError, NameError):
+    IS_SCIPY = False
+
+if IS_SCIPY:
+    try:
+        from scipy.integrate import trapezoid
+    except ImportError:  # pragma: no cover
+        from scipy.integrate import trapz as trapezoid
+
+    #from scipy.linalg import solve_banded  # type: ignore
+    from scipy.integrate import quad  # type: ignore
+else:
+    try:
+        from numpy import trapezoid
+    except ImportError:  # pragma: no cover
+        from numpy import trapz as trapezoid
+
+    # def trapezoid(y, x=None, dx: float=1.0, axis: int=-1):
+    #     return np.trapz(y, x=x, dx=dx, axis=axis)
+
+    def quad(func, a, b, args):
+        # args=(x, y, y[0], y[-1]))
+        x, y, y0, y1 = args
+        xp = np.linspace(a, b, num=10)
+        yp = func(xp, *args)
+        abserr = 0.0
+        return trapezoid(yp, xp, dx=1.0, axis=-1), abserr
 
 # should future proof this as it handles 1.9.0.dev-d1dbf8e, 1.10.2, and 1.6.2
 #_numpy_version = [int(i) for i in numpy.__version__.split('.') if i.isdigit()]
@@ -53,8 +82,8 @@ def get_abs_max(min_values: np.ndarray,
                 max_values: np.ndarray,
                 dtype: str='float32') -> np.ndarray:
     """Get return the value with the greatest magnitude, preserving sign."""
-    min_values = np.asarray(min_values)
-    max_values = np.asarray(max_values)
+    min_values = np.asarray(min_values, dtype=dtype)
+    max_values = np.asarray(max_values, dtype=dtype)
     imin = np.abs(min_values) > np.abs(max_values)
     #out = np.zeros(min_values.shape, dtype=dtype)
     out = max_values.copy()
@@ -174,8 +203,6 @@ def integrate_unit_line(x: list[float], y: list[float]) -> float:
         # print('spline Error x=%s y=%s' % (x, y))
         raise
     return out[0]
-
-
 
 
 def integrate_positive_unit_line(x, y, min_value: float=0.) -> float:
@@ -460,3 +487,78 @@ def roundup(value: int, round_increment: int=100) -> int:
                obvious when testing
     """
     return int(ceil(value / float(round_increment))) * round_increment
+
+
+def grms(freq: np.ndarray, psd: np.ndarray) -> float | np.ndarray:
+    """Compute GRMS from a PSD using piecewise power-law (log-log) integration.
+
+    Between each pair of frequency points, assumes the PSD follows a power
+    law: Φ(f) = Φ_i · (f/f_i)^m, where m is the local log-log slope.
+    Each segment has an analytical integral:
+
+        ∫[f_i, f_{i+1}] Φ_i·(f/f_i)^m df
+            = Φ_i·f_i / (m+1) · [(f_{i+1}/f_i)^(m+1) - 1]    (m ≠ -1)
+            = Φ_i·f_i · ln(f_{i+1}/f_i)                        (m = -1)
+
+    Parameters
+    ----------
+    freq : (N,) ndarray
+        Frequency array [Hz or rad/s — consistent with PSD units].
+        Must be positive and monotonically increasing.
+    psd : (N,) or (M, N) ndarray
+        Power spectral density values. If 2D, each row is integrated
+        independently (e.g., one row per mode or DOF).
+
+    Returns
+    -------
+    float or (M,) ndarray
+        GRMS value = sqrt(integral of PSD over frequency).
+        Returns scalar if psd is 1D, array if psd is 2D.
+    """
+    freq = np.asarray(freq, dtype=float)
+    psd = np.asarray(psd, dtype=float)
+
+    if psd.ndim == 1:
+        return float(np.sqrt(_integrate_psd_loglog(freq, psd)))
+    else:
+        result = np.zeros(psd.shape[0])
+        for i in range(psd.shape[0]):
+            result[i] = np.sqrt(_integrate_psd_loglog(freq, psd[i, :]))
+        return result
+
+
+def _integrate_psd_loglog(freq: np.ndarray, psd: np.ndarray) -> float:
+    """Integrate a PSD using piecewise power-law assumption (log-log linear).
+
+    Parameters
+    ----------
+    freq : (N,) ndarray
+        Positive, monotonically increasing frequency values.
+    psd : (N,) ndarray
+        PSD values at each frequency.
+
+    Returns
+    -------
+    float
+        Mean-square value (integral of PSD over frequency).
+    """
+    total = 0.0
+    for i in range(len(freq) - 1):
+        f1, f2 = freq[i], freq[i + 1]
+        p1, p2 = psd[i], psd[i + 1]
+
+        if f1 <= 0 or f2 <= 0 or p1 <= 0 or p2 <= 0:
+            # Fall back to trapezoid for segments with zero/negative values
+            total += 0.5 * (p1 + p2) * (f2 - f1)
+            continue
+
+        r = f2 / f1
+        m = np.log(p2 / p1) / np.log(r)
+
+        if abs(m + 1.0) < 1e-10:
+            # m ≈ -1: integral is Φ_i·f_i·ln(f_{i+1}/f_i)
+            total += p1 * f1 * np.log(r)
+        else:
+            # General case
+            total += p1 * f1 / (m + 1.0) * (r ** (m + 1.0) - 1.0)
+    return total

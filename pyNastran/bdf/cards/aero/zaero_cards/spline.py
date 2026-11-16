@@ -91,9 +91,10 @@ class SPLINE1_ZAERO(Spline):
             a comment for the card
 
         """
+        # SPLINE1 EID MODEL CP SETK SETG DZ EPS
         eid = integer(card, 1, 'eid')
         model = string_or_blank(card, 2, 'model', default='')
-        cp = blank(card, 3, 'cp')
+        cp = integer_or_blank(card, 3, 'cp', default=0)
 
         panlst = integer(card, 4, 'panlst/setk')
         setg = integer(card, 5, 'setg')
@@ -117,7 +118,7 @@ class SPLINE1_ZAERO(Spline):
         """
         eid = integer(card, 1, 'eid')
         model = string_or_blank(card, 2, 'model')
-        cp = blank(card, 3, 'cp')
+        cp = integer_or_blank(card, 3, 'cp', default=0)
 
         panlst = integer(card, 4, 'panlst/setk')
         setg = integer(card, 5, 'setg')
@@ -135,7 +136,7 @@ class SPLINE1_ZAERO(Spline):
 
         self.panlst_ref, self.aero_element_ids = cross_reference_panlst(
             model, self.panlst)
-        # model.log.info(f'SPLINE1={self.eid} model={self.model}: boxs={self.aero_element_ids}')
+        # model.log.info(f'SPLINE1={self.eid} model={self.model}: boxes={self.aero_element_ids}')
 
     def safe_cross_reference(self, model: BDF, xref_errors):
         msg = ', which is required by SPLINE1 eid=%s' % self.eid
@@ -150,7 +151,7 @@ class SPLINE1_ZAERO(Spline):
         try:
             self.panlst_ref, self.aero_element_ids = cross_reference_panlst(
                 model, self.panlst)
-            # model.log.info(f'SPLINE1={self.eid} model={self.model}: boxs={self.aero_element_ids}')
+            # model.log.info(f'SPLINE1={self.eid} model={self.model}: boxes={self.aero_element_ids}')
         except KeyError:
             pass
 
@@ -213,13 +214,13 @@ class SPLINE1_ZAERO(Spline):
 
     def write_card(self, size: int=8, is_double: bool=False) -> str:
         card = self.repr_fields()
-        return self.comment + print_card_8(card)
+        header = '$            EID   MODEL      CP    SETK    SETG      DZ     EPS\n'
+        return self.comment + header + print_card_8(card)
 
 
 class SPLINE2_ZAERO(Spline):
     """
-    Defines an infinite plate spline method for displacements and loads
-    transferal between CAERO7 macroelement and structural grid points.
+    Defines a beam spline method for CAERO7 / BODY7.
 
     +---------+------+-------+------+------+----+-----+-------+-------+
     |    1    |  2   |   3   |  5   |   6  |  6 |  7  |   8   |   9   |
@@ -278,6 +279,7 @@ class SPLINE2_ZAERO(Spline):
             a comment for the card
 
         """
+        # SPLINE2 EID MODEL SETK SETG DZ EPS CID CURV
         eid = integer(card, 1, 'eid')
         model = str(integer_string_or_blank(card, 2, 'model', default=''))
         panlst = integer(card, 3, 'panlst/setk')
@@ -289,12 +291,37 @@ class SPLINE2_ZAERO(Spline):
         return SPLINE2_ZAERO(eid, panlst, setg, model=model, cp=cp, dz=dz, eps=eps,
                              curvature=curvature, comment=comment)
 
+    # @classmethod
+    # def add_card_lax(cls, card: BDFCard, comment: str=''):
+    #     """
+    #     Adds a SPLINE2 card from ``BDF.add_card(...)``
+    #
+    #     Parameters
+    #     ----------
+    #     card : BDFCard()
+    #         a BDFCard object
+    #     comment : str; default=''
+    #         a comment for the card
+    #
+    #     """
+    #     # SPLINE2 EID MODEL SETK SETG DZ EPS CID CURV
+    #     eid = integer(card, 1, 'eid')
+    #     model = str(integer_string_or_blank(card, 2, 'model', default=''))
+    #     panlst = integer(card, 3, 'panlst/setk')
+    #     setg = integer(card, 4, 'setg')
+    #     dz = double_or_blank(card, 5, 'dz', default=0.0)
+    #     eps = double_or_blank(card, 6, 'eps', default=0.01)
+    #     cp = integer_or_blank(card, 7, 'cp', default=0)
+    #     curvature = double_or_blank(card, 8, 'curvature', default=1.0)
+    #     return SPLINE2_ZAERO(eid, panlst, setg, model=model, cp=cp, dz=dz, eps=eps,
+    #                          curvature=curvature, comment=comment)
+
     def cross_reference(self, model: BDF) -> None:
         msg = ', which is required by SPLINE1 eid=%s' % self.eid
         self.setg_ref = cross_reference_set(model, self.setg, msg=msg)
         #self.nodes_ref = model.Nodes(self.nodes, msg=msg)
         #self.caero_ref = model.CAero(self.caero, msg=msg)
-        self.panlst_ref, self.aero_element_ids = cross_reference_panlst(model, self.panlst)
+        self.panlst_ref, self.aero_element_ids = cross_reference_panlst(model, self.panlst, msg=msg)
 
     def safe_cross_reference(self, model: BDF, xref_errors):
         try:
@@ -305,7 +332,7 @@ class SPLINE2_ZAERO(Spline):
             pass
         #self.nodes_ref = model.Nodes(self.nodes, msg=msg)
         #self.caero_ref = model.CAero(self.caero, msg=msg)
-        self.panlst_ref, self.aero_element_ids = cross_reference_panlst(model, self.panlst)
+        self.panlst_ref, self.aero_element_ids = cross_reference_panlst(model, self.panlst, msg=msg)
 
     def uncross_reference(self) -> None:
         """Removes cross-reference links"""
@@ -319,12 +346,13 @@ class SPLINE2_ZAERO(Spline):
 
     def write_card(self, size: int=8, is_double: bool=False) -> str:
         card = self.repr_fields()
-        return self.comment + print_card_8(card)
+        header = '$            EID   MODEL    SETK    SETG      DZ     EPS     CID    CURV\n'
+        return self.comment + header + print_card_8(card)
 
 
 class SPLINE3_ZAERO(Spline):
     """
-    Defines a 3-D spline for the BODY7 and CAERO7 macroelement.
+    Defines a 3-D spline (Thin Plate Spline method) for CAERO7 / BODY7.
 
     +---------+------+-------+-------+------+------+----+-----+-------+
     |    1    |  2   |   3   |   4   |  5   |   6  |  7 |  8  |   9   |
@@ -445,8 +473,7 @@ class SPLINEM(Spline):
 
     def __init__(self, save_flag: str, filename: int | str, comment=''):
         """
-        Creates a SPLINE3 card, which is useful for control surface
-        constraints.
+        Saves or retrieves the spline matrix.
 
         Parameters
         ----------

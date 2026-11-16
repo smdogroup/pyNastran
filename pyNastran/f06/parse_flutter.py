@@ -69,6 +69,20 @@ def make_flutter_response(f06_filename: PathLike,
         key : int
            subcase_id
         value : FlutterResponse()
+    data : dict
+        opgwg : dict[str, Any]
+            ref_point : int
+            MO: (6?,6?) float np.ndarray
+            cg : (3,1) float np.ndarray
+            mass : float
+            mass_error: float
+            cg_error: float...why???
+            I(S): (6?,6?) float np.ndarray
+        matrices
+            freq : (nmodes,) float np.ndarray
+            MHH : (nmodes,nmodes) float np.ndarray
+            BHH : (nmodes,nmodes) float np.ndarray
+            KHH : (nmodes,nmodes) float np.ndarray
 
     """
     f06_units = get_flutter_units(f06_units)
@@ -227,11 +241,12 @@ def make_flutter_response(f06_filename: PathLike,
                         mach, density_ratio, method,
                         modes, results,
                         in_units=f06_units,
+                        out_units=out_units,
                         use_rhoref=use_rhoref,
                         eigenvector=eigenvectors_array,
                         eigr_eigi_velocity=eigr_eigi_velocity,
                         make_alt=make_alt)
-                    response.set_out_units(out_units)
+                    # response.set_out_units(out_units)
                     #_remove_neutrinos(response, log)
                     flutters[subcase] = response
                     modes = []
@@ -266,8 +281,8 @@ def make_flutter_response(f06_filename: PathLike,
                     eigenvectors, ieigenvector,
                     load_eigenvalues, log, real_eigenvalues_list)
 
-                short_line = line.strip().replace('   ', ' ')
                 if is_heavy_debug:  # pragma: no cover
+                    short_line = line.strip().replace('   ', ' ')
                     log.debug(f'i={iline} {short_line!r}')
                     if iline > imax:
                         raise RuntimeError(f'iline > imax; {iline:d}')
@@ -304,9 +319,9 @@ def make_flutter_response(f06_filename: PathLike,
                     isubcase = sline.index('SUBCASE')
                     subcase = int(sline[isubcase + 1])
                 except ValueError:
-                    log.error(f"expected: SUBCASE line -> ['SUBCASE', 1]")
+                    log.error("expected: SUBCASE line -> ['SUBCASE', 1]")
                     log.error(f'found: i={iline} sline={sline}')
-                    log.error(f'assuming subcase=1')
+                    log.error('assuming subcase=1')
                     subcase = 1
                     #raise
                 log.debug('subcase = %s' % subcase)
@@ -328,6 +343,7 @@ def make_flutter_response(f06_filename: PathLike,
             #log.debug(point_sline)
             #if methodi:  # true for MSC, but not NX
                 #assert methodi == method, f'methodi={methodi!r}; method={method!r}'
+            # print(f'neigenvectors2 = {len(eigenvectors)}')
 
             if len(eigenvectors):
                 eigr_eigi_velocity = np.array(eigr_eigi_velocity_list, dtype='float64')  # eigr, eigi, velo
@@ -355,8 +371,8 @@ def make_flutter_response(f06_filename: PathLike,
                 f06_file.readline()
                 iline += 1
             elif method == 'KE':
-                #KFREQ       1./KFREQ       VELOCITY          DAMPING       FREQUENCY          COMPLEX   EIGENVALUE
-                    #0.5500  1.8181818E+00   2.2589194E+01  -2.4541089E-03   3.3374373E+00  -5.6140173E-01     4.5752050E+02
+                # KFREQ   1./KFREQ        VELOCITY        DAMPING         FREQUENCY           COMPLEX   EIGENVALUE
+                # 0.5500  1.8181818E+00   2.2589194E+01  -2.4541089E-03   3.3374373E+00  -5.6140173E-01  4.5752050E+02
                 mach = None
                 density_ratio = None
                 #if mode == 1:
@@ -424,16 +440,19 @@ def make_flutter_response(f06_filename: PathLike,
             #if not found_flutter_summary:
                 #print(line)
                 #raise RuntimeError("failed to find 'FLUTTER SUMMARY'")
+            #log.warning(f'eigenvectors_array = {eigenvectors_array.shape}')
+            #log.warning(f'eigr_eigi_velocity {eigr_eigi_velocity.shape}:\n{eigr_eigi_velocity}')
             response = FlutterResponse(
                 f06_filename, subcase, configuration, xysym, xzsym,
                 mach, density_ratio, method,
                 modes, results,
                 in_units=f06_units,
+                out_units=out_units,
                 use_rhoref=use_rhoref,
                 eigenvector=eigenvectors_array,
                 eigr_eigi_velocity=eigr_eigi_velocity,
                 make_alt=make_alt)
-            response.set_out_units(out_units)
+            # response.set_out_units(out_units)
             flutters[subcase] = response
 
     if load_eigenvalues and len(real_eigenvalues_list):
@@ -1068,14 +1087,62 @@ def _check_for_eigenvector(f06_file: TextIO, iline: int, line: str,
                            ieigenvector: int,
                            load_eigenvalues: bool,
                            log: SimpleLogger,
-                           real_eigenvalues_list: list[np.ndarray]) -> tuple[int, str, int]:
+                           real_eigenvalues_list: list[np.ndarray]) -> tuple[int, str, int, str]:
     methodi = ''
+    # log.debug(f'line[{iline}] = {line.strip()!r}')
+    # if iline > 1415:
+    #     raise RuntimeError(f'stopping on iline={iline}')
+
+    if 'LESS CRITICAL REAL ROOTS FOR LOOP' in line:
+        #       LESS CRITICAL REAL ROOTS FOR LOOP   21      MACH        VELOCITY        DENSITY
+        #                                               8.00000E-01    1.07307E+04    1.16780E-07
+        #
+        #          KFREQ          DAMPING                 COMPLEX EIGENVALUE
+        #
+        #         0.0000     -3.8102160E+00       -2.1616984E+02        0.0000000E+00
+        #         0.0000     -2.2447413E+00       -1.2735377E+02        0.0000000E+00
+        # log.debug(f'  **found LESS CRITICAL REAL ROOTS FOR LOOP')
+        line = f06_file.readline()
+        iline += 1
+        sline = line.split()
+        mach = float(sline[0])
+        vel = float(sline[1])
+        density = float(sline[1])
+        # while 'KFREQ' not in line:
+        line = f06_file.readline()
+        assert len(line.strip()) == 0, line
+        iline += 1
+
+        # blank
+        line = f06_file.readline()
+        assert 'KFREQ' in line, line.strip()
+        iline += 1
+
+        line = f06_file.readline().strip()
+        assert len(line) == 0, line
+        iline += 1
+
+        line = f06_file.readline().strip()
+        assert len(line), line
+        iline += 1
+        while len(line) != 0 and 'PAGE' not in line and 'WARNING' not in line:
+            # 0.0000  -3.8102160E+00  -2.1616984E+02  0.0000000E+00
+            sline = line.split()
+            assert len(sline) == 4, sline
+            line = f06_file.readline().strip()
+            iline += 1
+        # ieigenvector = 0
+
     if 'R E A L   E I G E N V A L U E S' in line:
+        # log.debug(f'  **found REAL EIGENVALUES')
         real_eigenvaluesi = read_real_eigenvalues(
             f06_file, log, line, iline)
         real_eigenvalues_list.append(real_eigenvaluesi)
 
     elif 'EIGENVECTOR FROM THE' in line:
+        # log.debug(f'  **found EIGENVECTOR FROM THE')
+        # 'EIGENVECTOR FROM THE PK METHOD'
+        #
         # '                                               EIGENVECTOR FROM THE  PKNL METHOD
         # '   EIGENVALUE =    -9.88553E-02    1.71977E+01       VELOCITY =     1.52383E+02
         # '
@@ -1086,19 +1153,21 @@ def _check_for_eigenvector(f06_file: TextIO, iline: int, line: str,
         # 'EIGENVECTOR FROM THE  PKNL METHOD'
         # print(line)
         #log.debug(f'eigenvector iline: {iline}')
-        iline, line, eigenvector, eigr, eigi, velocity, methodi = _get_eigenvector(f06_file, iline, line)
+        iline, line, eigenvector, eigr, eigi, velocity, methodi = _get_eigenvector(f06_file, iline, line, ieigenvector)
         eigr_eigi_velocity_list.append((eigr, eigi, velocity))
         eigenvectors.append(eigenvector)
+    # print(f'neigenvectors = {len(eigenvectors)}')
     return iline, line, ieigenvector, methodi
 
 
 def _get_eigenvector(f06_file: TextIO, iline: int,
-                     line: str) -> tuple[int, str, np.ndarray, float, float, float, str]:
+                     line: str, ieigenvector: int) -> tuple[int, str, np.ndarray, float, float, float, str]:
     methodi = line.split('EIGENVECTOR FROM THE')[1].split('METHOD')[0].strip()
-    # print(f'imode={ieigenvector+1}; methodi={methodi!r}')
+    # print(f'  imode={ieigenvector+1}; methodi={methodi!r}')
     line = f06_file.readline()
     iline += 1
 
+    # print(f'  ********eigenvector line[{iline}] = {line.strip()}')
     if 'VELOCITY' in line:
         # '   EIGENVALUE =    -9.88553E-02    1.71977E+01       VELOCITY =     1.52383E+02
         eig_value, velocity_str = line.split('VELOCITY =')
@@ -1130,6 +1199,7 @@ def _get_eigenvector(f06_file: TextIO, iline: int,
     # eigenvector = real_imag[:, 0].flatten() + 1j*real_imag[:, 1].flatten()
     nspline_points = len(spline_point_complex_eigenvector_slines)
     eigenvector = (real_imag[:, 0] + real_imag[:, 1] * 1j).reshape(nspline_points, 1)
+    # print(f' -> eigenvector.shape = {eigenvector.shape}')
     return iline, line, eigenvector, eigr, eigi, velocity, methodi
 
 

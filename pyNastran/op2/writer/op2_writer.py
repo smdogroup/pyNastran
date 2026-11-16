@@ -1,10 +1,11 @@
 #pylint: disable=W0201,C0301,C0111
 from __future__ import annotations
 import datetime
+import socket
 from collections import defaultdict
 from struct import pack, Struct
-from typing import Optional, Any, TYPE_CHECKING
-from cpylog import get_logger
+from typing import BinaryIO, TextIO, Optional, Any, TYPE_CHECKING
+from cpylog import get_logger, SimpleLogger
 
 #import pyNastran
 from pyNastran.op2.op2_interface.op2_f06_common import OP2_F06_Common
@@ -22,7 +23,10 @@ from .edom_writer import write_edom
 from .dynamic_writer import write_dynamic
 from .dit_writer import write_dit
 #from .dynamic_writer import write_dynamic
+from .h5_writer import get_h5_elemental_nodal, write_h5_results
 from pyNastran.utils import PathLike, PurePath
+from ..result_objects.scalar6_table_object import integer_types, float_types
+
 if TYPE_CHECKING:  # pragma: no cover
     from pyNastran.op2.op2 import OP2
 
@@ -38,15 +42,64 @@ class TrashWriter:
         pass
 
 
+def apply_default_keys(op2_flags: dict[str, dict[str, bool]],
+                       op2_flags_default: dict[str, dict[str, bool]]) -> None:
+    assert op2_flags is not None, op2_flags
+    assert op2_flags_default is not None, op2_flags_default
+    for key, defaults in op2_flags_default.items():
+        if key not in op2_flags:
+            op2_flags[key] = defaults
+            continue
+        for keyi, default in defaults.items():
+            if keyi not in op2_flags[key]:
+                op2_flags[key][keyi] = default
+    return op2_flags
+
+
 class OP2Writer(OP2_F06_Common):
     def __init__(self, log=None, debug: bool=False):
         self.log = get_logger(log, debug)
         OP2_F06_Common.__init__(self)
         self.card_count = {}
 
+    def write_h5(self, h5_filename: PathLike,
+                 include_geometry: bool=True,
+                 op2_flags: dict[str, dict[str, bool]]=None,
+                 sol: int=101,
+                 version: str='msc20200') -> None:
+        from tables import File
+        elemental_dicts, nodal_dicts, se_dicts, key_to_id_map = get_h5_elemental_nodal(self)
+
+        hostname = socket.gethostname()
+
+        # might change this to the run date vs. the conversion date
+        local_now = datetime.datetime.now().astimezone()
+        offset_hours = local_now.utcoffset().total_seconds() / 3600
+        local_time = local_now.strftime("%a %b %d %H:%M:%S %Y") + ' (UTC%+d)' % offset_hours  # (UTC-8)
+
+        #print(utc_now.strftime("%a %b %d %H:%M:%S %Y (UTC-8)"))
+        with File(h5_filename, 'w') as h5file:
+            nastran_group = h5file.create_group('/', 'NASTRAN')
+            h5file.set_node_attr(nastran_group, "ARCH", 'win64i8')
+            h5file.set_node_attr(nastran_group, "HOSTNAME", hostname)
+            h5file.set_node_attr(nastran_group, "IFPSTAR", 'YES')  # yes=strict parser
+            h5file.set_node_attr(nastran_group, "INPUT", 'A1') # TODO: what is this???
+            h5file.set_node_attr(nastran_group, "SOL", str(sol))
+            h5file.set_node_attr(nastran_group, "TIME", local_time)  # Tue Dec 29 13:07:22 2020 (UTC-8)
+            h5file.set_node_attr(nastran_group, "VERSION", version)
+            if include_geometry:
+                # print(self)
+                if hasattr(self, 'writer'):
+                    self.writer.write_h5(h5file, nastran_group)
+                else:
+                    self.log.warning('skipping include_geometry')
+            write_h5_results(self, h5file, nastran_group, key_to_id_map,
+                             elemental_dicts, nodal_dicts, se_dicts, root='/')
+
     def write_op2(self, op2_out_filename: PathLike,
                   post: int=-1,
                   endian: bytes=b'<',
+                  op2_flags: Optional[dict[str, dict[str, bool]]]=None,
                   includes: Optional[list[str]]=None,
                   skips: Optional[list[str]]=None,
                   nastran_format: Optional[str]=None,
@@ -63,11 +116,15 @@ class OP2Writer(OP2_F06_Common):
         endian : bytes; default=b'<'
             little endian is strongly recommended
         includes : list[str]; default=None
-            list of results to include; exclusive with skips; default for both includes/skips=None -> all included
+            skips=None -> all included
+            list of results to include; exclusive with skips; default for both includes
         skips : list[str]; default=None
             list of results to skip; exclusive with includes
         nastran_format : str; default=None -> 'msc'
             supported formats: ['msc', 'nx', 'optistruct']
+        nastran_revision : str; default=None -> self._nastran_revision or 'XXXXXXXX'
+            FEMAP won't read in specific results if your OP2 version is too old.
+            Lagely this is automatic, but it might be needed.
         #is_mag_phase : bool; default=False
             #should complex data be written using Magnitude/Phase
             #instead of Real/Imaginary (default=False; Real/Imag)
@@ -78,28 +135,42 @@ class OP2Writer(OP2_F06_Common):
             nastran_format = self._nastran_format
         if nastran_revision is not None:
             self._nastran_revision = nastran_revision
+        if op2_flags is None:
+            op2_flags = {}
         assert nastran_format in {'msc', 'nx', 'optistruct'}, nastran_format
         skips = _set_skips(self, includes, skips)
+
+        op2_flags_default = {
+            'MAT10': {'include_alpha': False,},
+            'RBAR': {'include_tref': False,},
+        }
+        op2_flags = apply_default_keys(op2_flags, op2_flags_default)
 
         #print('writing %s' % op2_outname)
 
         if isinstance(op2_out_filename, (str, PurePath)):
             op2_file = open(op2_out_filename, 'wb')
-            #fop2_ascii = open(op2_outname + '.txt', 'w')
-            fop2_ascii = TrashWriter()
+            if 0:  # pragma: no cover
+                import os
+                op2_outname = os.path.splitext(op2_out_filename)[0]
+                print(f'op2_outname = {op2_outname}')
+                fop2_ascii = open(op2_outname + '.txt', 'w')
+            else:
+                fop2_ascii = TrashWriter()
             #print('op2 out = %r' % op2_outname)
             close = True
         else:
-            assert isinstance(op2_out_filename, file), f'type(op2_out_filename) = {op2_out_filename}'
+            assert isinstance(op2_out_filename, file), f'op2_out_filename = {op2_out_filename}'
             op2_file = op2_out_filename
             op2_outname = op2_out_filename.name
             close = False
             #print('op2_outname =', op2_outname)
 
+        assert op2_flags is not None, op2_flags
         try:
             total_case_count, table_names = _write_op2(
                 op2_file, fop2_ascii, self,
-                skips,
+                skips, op2_flags,
                 post=post, endian=endian,
                 nastran_format=nastran_format,
                 nastran_revision=self._nastran_revision,
@@ -109,6 +180,9 @@ class OP2Writer(OP2_F06_Common):
                 op2_file.close()
                 fop2_ascii.close()
             raise
+        assert total_case_count > 0, (table_names, total_case_count)
+        assert len(table_names) > 0, table_names
+        # print(f'table_names = {table_names}')
         return total_case_count
 
 
@@ -121,7 +195,8 @@ def _set_skips(model: OP2Writer,
     Parameters
     ----------
     includes : list[str]; default=None
-        list of results to include; exclusive with skips; default for both includes/skips=None -> all included
+        list of results to include; exclusive with skips
+        default for both includes/skips=None -> all included
     skips : list[str]; default=None
         list of results to skip; exclusive with includes
 
@@ -166,11 +241,13 @@ def _set_skips(model: OP2Writer,
 
 def _write_op2(op2_file, fop2_ascii, obj: OP2,
                skips: set[str],
+               op2_flags: dict[str, dict[str, bool]],
                post: int=-1, endian: bytes=b'<',
                nastran_format: str='nx',
-               nastran_revision: Optional[str]=None) -> tuple[int, list[str]]:
+               nastran_revision: str='') -> tuple[int, list[str]]:
     """actually writes the op2"""
     date = obj.date
+    size = 4
     #op2_ascii.write('writing [3, 7, 0] header\n')
 
     struct_3i = Struct(endian + b'3i')
@@ -180,29 +257,24 @@ def _write_op2(op2_file, fop2_ascii, obj: OP2,
     #if 'CASECC' not in skips:
         #write_casecc(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
     obj.log.debug(f'nastran_format={nastran_format}')
-    if 'GEOM1' not in skips:  # nodes
-        write_geom1(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
-    if 'GEOM2' not in skips:  # elements
-        write_geom2(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
-    if 'GEOM3' not in skips:  # constraints
-        write_geom3(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
-    if 'GEOM4' not in skips:  # loads
-        write_geom4(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
-    if 'EPT' not in skips:    # properties
-        write_ept(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
-    if 'MPT' not in skips:    # materials
-        write_mpt(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
-    if 'DYNAMIC' not in skips:    # dynamics
-        write_dynamic(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
 
-    if 'EDT' not in skips:  # aero
-        write_edt(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
-    if 'EDOM' not in skips:  # optimization
-        write_edom(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
-    if 'DIT' not in skips:  # tables
-        write_dit(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
-    #if 'DYNAMIC' not in skips:
-        #write_dynamic(op2_file, fop2_ascii, obj)
+    # <class 'pyNastran.op2.op2.OP2'>
+    obj_type = str(type(obj))
+
+    if hasattr(obj, 'params'):
+        write_params(op2_file, fop2_ascii, obj, obj.params,
+                     endian=endian, size=size)
+
+    if not obj_type.endswith("OP2'>"):
+        if hasattr(obj, 'grid'):
+            from pyNastran.dev.op2_vectorized3.geom_writer.geom1_writer import write_geomv
+            write_geomv(skips, op2_file, fop2_ascii, obj,
+                        endian=endian, nastran_format=nastran_format)
+        else:
+            write_geom(skips, op2_file, fop2_ascii,
+                       op2_flags, obj,
+                       endian=endian, nastran_format=nastran_format)
+
     if 'grid_point_weight' not in skips:
         for key, weight in obj.grid_point_weight.items():
             weight.write_op2(op2_file, fop2_ascii, date, endian=endian)
@@ -212,9 +284,37 @@ def _write_op2(op2_file, fop2_ascii, obj: OP2,
     # nastran puts the tables in order of the Case Control deck,
     # but we're lazy so we just hardcode the order
 
-    case_count, table_names = _write_result_tables(obj, op2_file, fop2_ascii, struct_3i, endian, skips)
+    case_count, table_names = _write_result_tables(
+        obj, op2_file, fop2_ascii, struct_3i, endian, skips)
     return case_count, table_names
 
+def write_geom(skips: set[str],
+               op2_file, fop2_ascii,
+               op2_flags: dict[str, dict[str, bool]],
+               obj: OP2, endian: bytes=b'<', nastran_format: str='nx'):
+    if 'GEOM1' not in skips:  # nodes
+        write_geom1(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
+    if 'GEOM2' not in skips:  # elements
+        write_geom2(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
+    if 'GEOM3' not in skips:  # constraints
+        write_geom3(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
+    if 'GEOM4' not in skips:  # loads
+        write_geom4(op2_file, fop2_ascii, obj, op2_flags,
+        endian=endian, nastran_format=nastran_format)
+    if 'EPT' not in skips:    # properties
+        write_ept(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
+    if 'MPT' not in skips:    # materials
+        write_mpt(op2_file, fop2_ascii, obj, op2_flags,
+        endian=endian, nastran_format=nastran_format)
+    if 'DYNAMIC' not in skips:    # dynamics
+        write_dynamic(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
+
+    if 'EDT' not in skips:  # aero
+        write_edt(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
+    if 'EDOM' not in skips:  # optimization
+        write_edom(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
+    if 'DIT' not in skips:  # tables
+        write_dit(op2_file, fop2_ascii, obj, endian=endian, nastran_format=nastran_format)
 
 def _write_result_tables(obj: OP2, op2_file, fop2_ascii,
                          struct_3i,
@@ -223,7 +323,6 @@ def _write_result_tables(obj: OP2, op2_file, fop2_ascii,
     table_names_found = []
     date = obj.date
     log = obj.log
-    res_categories2 = defaultdict(list)
     table_order = [
         'OUGV1', 'BOUGV1',
         'OUGF1', 'OUG1F', 'BOUGF1',
@@ -275,6 +374,7 @@ def _write_result_tables(obj: OP2, op2_file, fop2_ascii,
         # force/heat flux
         'HOEF1',
         'OEF1', 'OEF1X', 'OEF2',
+        'OEF1XMC',
         'OEFATO1', 'OEFCRM1', 'OEFNO1', 'OEFPSD1', 'OEFRMS1',
         'OEFATO2', 'OEFCRM2', 'OEFNO2', 'OEFPSD2', 'OEFRMS2',
 
@@ -282,6 +382,7 @@ def _write_result_tables(obj: OP2, op2_file, fop2_ascii,
         # stress
         'OESNLXD', 'OESNLXR', 'OESNL1X',
         'OES1', 'OES1X', 'OES1X1', 'OES1C', 'OESVM1', 'OESVM1C',
+        'OES1XMC',
         'OSTR1EL',
         'OES1A',
         'OES2', 'OESVM2',
@@ -301,6 +402,7 @@ def _write_result_tables(obj: OP2, op2_file, fop2_ascii,
         'OSTRATO1', 'OSTRCRM1', 'OSTRNO1', 'OSTRPSD1', 'OSTRRMS1',
         'OSTRATO2', 'OSTRCRM2', 'OSTRNO2', 'OSTRPSD2', 'OSTRRMS2',
         'OSTRVM2',
+        'OSTR1XMC',
         # ---------------
         # shock response spectra
         'OUPV1',  # displacment
@@ -320,6 +422,10 @@ def _write_result_tables(obj: OP2, op2_file, fop2_ascii,
         'RANCONS', 'RANEATC',
     ]
     skip_results = {'gpdt', 'bgpdt', 'eqexin', 'psds', 'monitor1', 'monitor3', 'cstm'}
+
+    sort_subcases = True
+    subcases_set = set([])
+    res_categories2 = defaultdict(list)
     for table_type in obj.get_table_types():
         if table_type in skip_results or table_type in skips or table_type.startswith('responses.'):
             continue
@@ -328,14 +434,17 @@ def _write_result_tables(obj: OP2, op2_file, fop2_ascii,
         if not isinstance(res_dict, dict):
             raise TypeError(table_type)
 
-        for key, res in res_dict.items():
-            #print(key)
+        for subcase_key, res in res_dict.items():
+            #print(subcase_key)
             #print(res)
-            _fix_subcase_id(key, res)
-
+            subcase_id = _fix_subcase_id(subcase_key, res)
             if hasattr(res, 'table_name_str') and res.table_name_str not in {'LAMA'}: # params
                 #print(table_type)
-                res_categories2[res.table_name_str].append(res)
+                subcases_set.add(subcase_id)
+                if sort_subcases:
+                    res_categories2[(subcase_id, res.table_name_str)].append(res)
+                else:  # pragma: no cover
+                    res_categories2[res.table_name_str].append(res)
             else:
                 # grid_point
                 #print(table_type, unused_key)
@@ -345,22 +454,38 @@ def _write_result_tables(obj: OP2, op2_file, fop2_ascii,
                 if class_name not in ['GridPointWeight', 'PARAM',
                                      'RealEigenvalues', 'ComplexEigenvalues']:
                     log.warning(class_name)
+            del subcase_id
 
-    for table_name, results in sorted(res_categories2.items()):
-        assert table_name in table_order, table_name
+    subcases_list = list(subcases_set)
+    if not sort_subcases:
+        for table_name, results in sorted(res_categories2.items()):
+            assert table_name in table_order, table_name
 
     total_case_count = 0
     pretables = ['LAMA', 'BLAMA', ]  # 'CLAMA'
-    if 'eigenvalues' not in skips:
-        for unused_title, eigenvalue in obj.eigenvalues.items():
-            res_categories2[eigenvalue.table_name].append(eigenvalue)
-    if 'eigenvalues_fluid' not in skips:
-        for unused_title, eigenvalue in obj.eigenvalues_fluid.items():
-            res_categories2[eigenvalue.table_name].append(eigenvalue)
+    eigenvalues_list = ['eigenvalues', 'eigenvalues_fluid']
+    if sort_subcases:
+        for key in eigenvalues_list:
+            if key in skips:
+                continue
+            slot_dict = getattr(obj, key)  # obj.eigenvalues
+            for unused_title, eigenvalue in slot_dict.items():
+                subcase_id = eigenvalue.isubcase  # TODO: not 100%
+                subcases_set.add(subcase_id)
+                res_categories2[(subcase_id, eigenvalue.table_name)].append(eigenvalue)
+    else:  # pragma: no cover
+        for key in eigenvalues_list:
+            if key in skips:
+                continue
+            slot_dict = getattr(obj, key)  # obj.eigenvalues
+            for unused_title, eigenvalue in slot_dict.items():
+                res_categories2[eigenvalue.table_name].append(eigenvalue)
+        # if 'eigenvalues_structure' not in skips:
+        #     for unused_title, eigenvalue in obj.eigenvalues_structure.items():
+        #         res_categories2[eigenvalue.table_name].append(eigenvalue)
     # res_categories2 is a dictionary:
     #  - key: table_name
     #  - value:  displacment/stress/etc.
-    #assert len(res_categories2['OUGV1']) == 13, (len(res_categories2['OUGV1']), res_categories2['OUGV1'])
 
     skip_tables = [
         'LAMA', 'BLAMA',
@@ -377,79 +502,58 @@ def _write_result_tables(obj: OP2, op2_file, fop2_ascii,
     footer_bytes = struct_3i.pack(*footer)
 
     struct_9i = Struct(endian + b'9i')
-    for table_name in pretables + table_order:
-        if table_name not in res_categories2:
-            # no LAMA table in a static run
-            continue
-        if table_name in skip_tables:
-            log.warning(f'skipping table={table_name}')
-            continue
-        results = res_categories2[table_name]
-        itable = -1
-        case_count = 0
-        for result in results:
-            element_name = ''
-            new_result = True
-            if hasattr(result, 'element_name'):
-                element_name = ' - ' + result.element_name
-                #print(element_name)
-
-            #print(result.class_name)
-            if hasattr(result, 'write_op2'):
-                if result.table_name not in table_names_found:
-                    table_names_found.append(result.table_name)
-
-                fop2_ascii.write('-' * 60 + '\n')
-                #if hasattr(result, 'is_bilinear') and result.is_bilinear():
-                    #obj.log.warning("  *op2 - %s (%s) not written" % (
-                        #result.__class__.__name__, result.element_name))
-                    #continue
-                isubcase = ''
-                if hasattr(result, 'isubcase'):  # no for eigenvalues
-                    isubcase = result.isubcase
-                    #print(f' {result.__class__.__name__} - isubcase={isubcase}')
-
-                try:
-                    #print(' %-6s - %s - isubcase=%s%s; itable=%s %s' % (
-                        #table_name, result.__class__.__name__,
-                        #isubcase, element_name, itable, new_result))
-                    itable = result.write_op2(op2_file, fop2_ascii, itable, new_result,
-                                              date, is_mag_phase=False, endian=endian)
-                except Exception:
-                    print(f' {result.__class__.__name__} - isubcase={isubcase}{element_name}')
-                    raise
-            elif hasattr(result, 'element_name'):
-                if result.element_name in ['CBAR', 'CBEND']:
-                    log.warning('skipping:\n%s' % result)
+    # print(res_categories2)
+    if sort_subcases:
+        for subcase in subcases_list:
+            for table_name in pretables + table_order:
+                subcase_table_name = (subcase, table_name)
+                if subcase_table_name not in res_categories2:
+                    # no LAMA table in a static run
                     continue
-                #log.warning('????:\n%s' % result)
-            else:
-                raise NotImplementedError(f'  *op2 - {result.__class__.__name__} not written')
-                log.warning(f'  *op2 - {result.__class__.__name__} not written')
-                #continue
+                if table_name in skip_tables:
+                    log.warning(f'skipping table={table_name}')
+                    continue
+                results = res_categories2[subcase_table_name]
+                case_count = _write_results_for_table(
+                    op2_file, fop2_ascii,
+                    table_name, results,
+                    table_names_found, endian, log,
+                    struct_9i, date)
+                #print(f'op2_writer close? case_count={case_count} table_name={table_name}')
+                if case_count:
+                    #print(f'closing table_name={table_name}')
+                    # print(result.table_name, itable)
+                    # print('res_category_name=%s case_count=%s'  % (res_category_name, case_count))
+                    # close off the result - [4, 0, 4]
+                    op2_file.write(footer_bytes)
+                    fop2_ascii.write('close_a = %s\n' % footer)
+                    fop2_ascii.write('---------------\n')
+                    total_case_count += case_count
 
-            case_count += 1
-            header = [
-                4, itable, 4,
-                4, 1, 4,
-                4, 0, 4,
-            ]
-            #print('writing itable=%s' % itable)
-            assert itable is not None, '%s itable is None' % result.__class__.__name__
-            op2_file.write(struct_9i.pack(*header))
-            fop2_ascii.write('footer2 = %s\n' % header)
-            new_result = False
-
-        #assert case_count > 0, case_count
-        if case_count:
-            #print(result.table_name, itable)
-            #print('res_category_name=%s case_count=%s'  % (res_category_name, case_count))
-            # close off the result - [4, 0, 4]
-            op2_file.write(footer_bytes)
-            fop2_ascii.write('close_a = %s\n' % footer)
-            fop2_ascii.write('---------------\n')
-            total_case_count += case_count
-        total_case_count += case_count
+    else:  # pragma: no cover
+        for table_name in pretables + table_order:
+            if table_name not in res_categories2:
+                # no LAMA table in a static run
+                continue
+            if table_name in skip_tables:
+                log.warning(f'skipping table={table_name}')
+                continue
+            results = res_categories2[table_name]
+            case_count = _write_results_for_table(
+                op2_file, fop2_ascii,
+                table_name, results,
+                table_names_found, endian, log,
+                struct_9i, date)
+            # print(f'op2_writer close? case_count={case_count} table_name={table_name}')
+            if case_count:
+                # print(f'closing table_name={table_name}')
+                # print(result.table_name, itable)
+                # print('res_category_name=%s case_count=%s'  % (res_category_name, case_count))
+                # close off the result - [4, 0, 4]
+                op2_file.write(footer_bytes)
+                fop2_ascii.write('close_a = %s\n' % footer)
+                fop2_ascii.write('---------------\n')
+                total_case_count += case_count
 
     #if total_case_count == 0:
         #raise FatalError('total_case_count = 0')
@@ -462,7 +566,74 @@ def _write_result_tables(obj: OP2, op2_file, fop2_ascii,
     return total_case_count, table_names_found
 
 
-def _fix_subcase_id(key: int | tuple[Any], res: Any) -> None:
+def _write_results_for_table(op2_file: BinaryIO, fop2_ascii: TextIO,
+                             table_name: str, results: list,
+                             table_names_found: list[str],
+                             endian: bytes, log: SimpleLogger,
+                             struct_9i,
+                             date: tuple[int, int, int]) -> int:
+    # print(f'op2_writer: nresults = {len(results)}')
+    itable = -1
+    case_count = 0
+    for result in results:
+        # print('  ', result.class_name)
+        element_name = ''
+        new_result = True
+        if hasattr(result, 'element_name'):
+            element_name = ' - ' + result.element_name
+            #print(element_name)
+
+        #print(result.class_name)
+        if hasattr(result, 'write_op2'):
+            if result.table_name not in table_names_found:
+                table_names_found.append(result.table_name)
+
+            fop2_ascii.write('-' * 60 + '\n')
+            #if hasattr(result, 'is_bilinear') and result.is_bilinear():
+                #obj.log.warning("  *op2 - %s (%s) not written" % (
+                    #result.__class__.__name__, result.element_name))
+                #continue
+            isubcase = ''
+            if hasattr(result, 'isubcase'):  # no for eigenvalues
+                isubcase = result.isubcase
+                #print(f' {result.__class__.__name__} - isubcase={isubcase}')
+
+            try:
+                #print(' %-6s - %s - isubcase=%s%s; itable=%s %s' % (
+                    #table_name, result.__class__.__name__,
+                    #isubcase, element_name, itable, new_result))
+                itable = result.write_op2(op2_file, fop2_ascii, itable, new_result,
+                                          date, is_mag_phase=False, endian=endian)
+            except Exception:
+                print(f' {result.__class__.__name__} - isubcase={isubcase}{element_name}')
+                raise
+        elif hasattr(result, 'element_name') and result.element_name in ['CBAR', 'CBEND']:
+            log.warning('skipping:\n%s' % result)
+            continue
+        else:
+            # Don't fall through: writing the record-4 footer without a
+            # table3/table4 pair produces a corrupt op2 (EmptyRecord on re-read).
+            raise NotImplementedError(
+                f'{result.__class__.__name__}.write_op2 is not implemented '
+                f'(table_name={result.table_name!r}{element_name})')
+
+        case_count += 1
+        header = [
+            4, itable, 4,
+            4, 1, 4,
+            4, 0, 4,
+        ]
+        #print('writing itable=%s' % itable)
+        assert itable is not None, '%s itable is None' % result.__class__.__name__
+        op2_file.write(struct_9i.pack(*header))
+        fop2_ascii.write('footer2 = %s\n' % header)
+        new_result = False
+
+    #assert case_count > 0, case_count
+    # print(f'op2_writer: itable={itable}; case_count={case_count}')
+    return case_count
+
+def _fix_subcase_id(key: int | tuple[Any], res: Any) -> int:
     """
     The subcase id may be inconsistent between the op2 result object
     and the key. The key takes priority to make doing a load case
@@ -472,11 +643,12 @@ def _fix_subcase_id(key: int | tuple[Any], res: Any) -> None:
     if isinstance(key, tuple):
         subcase_id = key[0]
     res.isubcase = subcase_id
+    return subcase_id
 
 
 def write_op2_header(model: OP2, op2_file, fop2_ascii,
                      struct_3i: Struct,
-                     nastran_revision=None,
+                     nastran_revision: str='',
                      post: int=-1, endian: bytes=b'<'):
     """writes the op2 header"""
     is_nx = model.is_nx
@@ -494,7 +666,7 @@ def write_op2_header(model: OP2, op2_file, fop2_ascii,
             op2_file.write(pack(endian + b'7i 28s i', *[4, 1, 4,
                                                         4, 7, 4,
                                                         28, tape_code, 28]))
-            if nastran_revision is None:
+            if nastran_revision in {None, ''}:
                 nastran_revision = '8.5'
             nastran_version_str = f'NX{nastran_revision:6s}'
             nastran_version = nastran_version_str.encode('utf8')
@@ -506,7 +678,7 @@ def write_op2_header(model: OP2, op2_file, fop2_ascii,
                                                         12, 4, 7, 4,
                                                         28, tape_code, 28]))
             nastran_version = b'XXXXXXXX'
-        else:
+        else:  # pragma: no cover
             raise NotImplementedError(model._nastran_format)
 
         op2_file.write(pack(endian + b'4i 8s i', *[4, 2, 4,
@@ -518,5 +690,113 @@ def write_op2_header(model: OP2, op2_file, fop2_ascii,
                                               4, 0, 4,]))
     elif post == -2:
         _write_markers(op2_file, fop2_ascii, [2, 4])
-    else:
+    else:  # pragma: no cover
         raise RuntimeError(f'post = {post:d}; use -1 or -2')
+
+def write_params(op2_file: BinaryIO,
+                 op2_ascii,
+                 op2: OP2,
+                 params: dict[str, Any],
+                 endian: bytes=b'<',
+                 size: int=4, ):
+    """
+    Writes the PVT0 table (PARAM cards); doesn't handle size=8
+
+    Layout (matches what _read_pvto_4 expects; from an NX op2):
+      [2] 'PVT0    ' [-1] [7] (101, nwords, 0, 0, 0, 0, 0)
+      [-2, 1, 0] [2] 'PVT     '
+      [-3, 1, 0] [nwords] (key(2), flag, value(1 or 2), ...)
+      [-4, 1, 0] [0]
+
+    where each entry is:
+      flag=1 int:     8s i i
+      flag=2 float:   8s i f
+      flag=3 string:  8s i 8s
+      flag=5 2 float: 8s i ff
+    """
+    assert size == 4, size
+    if not params:
+        return
+
+    from pyNastran.bdf.cards.params import FLOAT2_PARAMS
+
+    data_bytes_list = []
+    for param_name, param in params.items():
+        # Nastran pads with spaces (not nulls); the reader only strips spaces
+        assert len(param_name) <= 8, f'PARAM name={param_name!r} is too long'
+        param_name_bytes = b'%-8s' % param_name.encode('ascii')
+        values = param.values
+        nvalue = len(values)
+        if nvalue == 1:
+            value = values[0]
+            if isinstance(value, integer_types):  # flag=1
+                values_list = [param_name_bytes, 1, value]
+                fmt = b'8s 2i'
+            elif isinstance(value, float_types):  # flag=2
+                values_list = [param_name_bytes, 2, value]
+                fmt = b'8s if'
+            elif isinstance(value, str):  # flag=3
+                assert len(value) <= 8, f'PARAM {param_name} value={value!r} is too long'
+                word_bytes = b'%-8s' % value.encode('ascii')
+                values_list = [param_name_bytes, 3, word_bytes]
+                fmt = b'8s i 8s'
+            # elif flag == 7:  # logical/int
+            else:
+                raise NotImplementedError(f'invalid length=1 PARAM\n{str(param)}')
+        elif nvalue == 2:
+            if param_name in FLOAT2_PARAMS or (
+                    param_name[0] == 'G' and param_name[1:].isdigit()):  # flag=5  CMPLXS
+                values_list = [param_name_bytes, 5] + list(values)
+                fmt = b'8s i 2f'
+            else:
+                raise NotImplementedError(f'invalid length=2 PARAM\n{str(param)}')
+        else:
+            raise NotImplementedError(f'invalid PARAM (must be of length = [1,2])\n{str(param)}')
+        data_bytes_list.append(pack(endian + fmt, *values_list))
+
+    data_bytes = b''.join(data_bytes_list)
+    nbytes = len(data_bytes)
+    nwords = nbytes // 4
+
+    # table name + header record: (101, nwords, 0, 0, 0, 0, 0)
+    header = [
+        4, 2, 4,
+        8, b'PVT0    ', 8,
+        4, -1, 4,
+        4, 7, 4,
+        28, 101, nwords, 0, 0, 0, 0, 0, 28,
+    ]
+    op2_file.write(pack(endian + b'4i 8s i 6i 9i', *header))
+    op2_ascii.write(f'PVT0 header = {header}\n')
+
+    # subtable name (no date)
+    subtable = [
+        4, -2, 4,
+        4, 1, 4,
+        4, 0, 4,
+        4, 2, 4,
+        8, b'PVT     ', 8,
+    ]
+    op2_file.write(pack(endian + b'13i 8s i', *subtable))
+    op2_ascii.write(f'PVT0 subtable = {subtable}\n')
+
+    # PARAM record
+    op2_file.write(pack(endian + b'13i', *[
+        4, -3, 4,
+        4, 1, 4,
+        4, 0, 4,
+        4, nwords, 4,
+        nbytes]))
+    op2_file.write(data_bytes)
+    op2_file.write(pack(endian + b'i', nbytes))
+    op2_ascii.write(f'PVT0 params (nwords={nwords}) = {list(params)}\n')
+
+    # close the table
+    close = [
+        4, -4, 4,
+        4, 1, 4,
+        4, 0, 4,
+        4, 0, 4,
+    ]
+    op2_file.write(pack(endian + b'12i', *close))
+    op2_ascii.write(f'PVT0 close = {close}\n')

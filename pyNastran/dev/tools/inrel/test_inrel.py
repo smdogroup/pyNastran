@@ -1,15 +1,29 @@
 import unittest
 import numpy as np
-from pyNastran.dev.tools.inrel.inertia_relief2 import (
-    inertia_relief)
+from pyNastran.dev.tools.inrel.inertia_relief2 import inertia_relief
+
+
+def _moment_residual(
+    xyz: np.ndarray,
+    force_out: np.ndarray,
+    moment_out: np.ndarray,
+    mass: np.ndarray,
+) -> np.ndarray:
+    """Moment equilibrium residual about the CG.
+
+    sum(moment_out) + sum(r_cg × force_out) should be ~0 for a
+    correctly balanced load set.
+    """
+    cg = (xyz * mass[:, np.newaxis]).sum(axis=0) / mass.sum()
+    r = xyz - cg[np.newaxis, :]
+    return moment_out.sum(axis=0) + np.cross(r, force_out).sum(axis=0)
 
 
 class TestInrel(unittest.TestCase):
     def test_inrel_bar_force_constant(self):
         nnode = 11
-        mass_total = 11.
-        xyz, mass = get_bar(
-            mass_total=mass_total, nnode=nnode)
+        mass_total = 11.0
+        xyz, mass = get_bar(mass_total=mass_total, nnode=nnode)
         gx = 0.1
         gy = 0.0
         gz = 0.5
@@ -22,10 +36,8 @@ class TestInrel(unittest.TestCase):
         fz = gz * mass
         force = np.column_stack([fx, fy, fz])
         moment = force * 0.0
-        inertia = np.zeros((nnode, 6), dtype='float64')
-        dforce, dmoment = inertia_relief(
-            mass, xyz, inertia,
-            force, moment)
+        inertia = np.zeros((nnode, 6), dtype="float64")
+        dforce, dmoment = inertia_relief(mass, xyz, inertia, force, moment)
         force_out = force + dforce
         moment_out = moment + dmoment
         # print('df:\n', dforce)
@@ -42,23 +54,21 @@ class TestInrel(unittest.TestCase):
         assert np.allclose(dforce[:, 1].min(), fy_expected), (dforce[:, 1].min(), fy_expected)
         assert np.allclose(dforce[:, 2].min(), fz_expected), (dforce[:, 2].min(), fz_expected)
 
-        assert np.allclose(force_out.sum(), 0.)
-        assert np.allclose(moment_out.sum(), 0.)
+        assert np.allclose(force_out.sum(), 0.0)
+        m_resid = _moment_residual(xyz, force_out, moment_out, mass)
+        assert np.allclose(m_resid, 0.0), m_resid
         # print('force_out:\n', force_out)
 
     def test_inrel_bar_moment_constant(self):
         nnode = 5
         mass_total = 0.02
-        xyz, mass = get_bar(
-            mass_total=mass_total, nnode=nnode)
+        xyz, mass = get_bar(mass_total=mass_total, nnode=nnode)
 
         moment = np.zeros((nnode, 3))
-        moment[:, 1] = 10.
+        moment[:, 1] = 10.0
         force = np.zeros((nnode, 3))
-        inertia = np.zeros((nnode, 6), dtype='float64')
-        dforce, dmoment = inertia_relief(
-            mass, xyz, inertia,
-            force, moment)
+        inertia = np.zeros((nnode, 6), dtype="float64")
+        dforce, dmoment = inertia_relief(mass, xyz, inertia, force, moment)
         force_out = force + dforce
         moment_out = moment + dmoment
         # assert np.allclose(dforce[0, 0], gx/2)
@@ -73,8 +83,9 @@ class TestInrel(unittest.TestCase):
         # assert np.allclose(dforce[1, :].min(), gy/2)
         # assert np.allclose(dforce[2, :].min(), gz/2)
 
-        assert np.allclose(force_out.sum(), 0.)
-        assert np.allclose(moment_out.sum(), 0.)
+        assert np.allclose(force_out.sum(), 0.0)
+        m_resid = _moment_residual(xyz, force_out, moment_out, mass)
+        assert np.allclose(m_resid, 0.0), m_resid
         # print('df:\n', dforce)
         # print('dm:\n', dmoment)
         # print('force_out:\n', force_out)
@@ -83,12 +94,11 @@ class TestInrel(unittest.TestCase):
     def test_inrel_bar_force_linear(self):
         """inertia1 = [0, 6250, 6250, 0, 0, 0]"""
         nnode = 5
-        mass_total = 5.
-        xyz, mass = get_bar(
-            mass_total=mass_total, nnode=nnode)
+        mass_total = 5.0
+        xyz, mass = get_bar(mass_total=mass_total, nnode=nnode)
         # mass[0] = 5.
 
-        linspace = np.linspace(-.5, .5, num=nnode)
+        linspace = np.linspace(-0.5, 0.5, num=nnode)
         fx = 0.0 * linspace
         fy = 0.0 * mass
         fz = linspace
@@ -98,31 +108,39 @@ class TestInrel(unittest.TestCase):
         nz_expected = fz.sum() / mass_total
         # print(f'nz_expected = {nz_expected:g}')
         moment = force * 0.0
-        inertia = np.zeros((nnode, 6), dtype='float64')
-        dforce, dmoment = inertia_relief(
-            mass, xyz, inertia,
-            force, moment)
+        inertia = np.zeros((nnode, 6), dtype="float64")
+        dforce, dmoment = inertia_relief(mass, xyz, inertia, force, moment)
         force_out = force + dforce
         moment_out = moment + dmoment
         # print('df:\n', dforce)
         # print('dm:\n', dmoment)
-        assert np.allclose(force_out.sum(), 0.)
-        assert np.allclose(moment_out.sum(), 0.)
+        assert np.allclose(force_out.sum(), 0.0)
+        m_resid = _moment_residual(xyz, force_out, moment_out, mass)
+        assert np.allclose(m_resid, 0.0), m_resid
         # print('force_out:\n', force_out)
 
-    def _test_inrel_bar_force_linear_rotated(self):  # pragma: no cover
+    def test_inrel_bar_force_linear_rotated(self):
         """
+        Same bar as test_inrel_bar_force_linear, but rotated onto v=[1,2,3]
+        so the principal axes no longer coincide with the global axes.
+
+        This is the case that exercises the principal-frame transform: the
+        products of inertia are non-zero, so S is not the identity.
+
         inertia1 = [370.646, 4576.892, 7552.462, 0, 0, 0]
         inertia_rotated = [0, 6250, 6250, 0, 0, 0]
+
+        Note the bar is collinear, so the principal inertia about the bar
+        axis is 0 (eigh returns ~1e-12); the degenerate axis must be skipped
+        by a relative tolerance rather than an exact != 0 test.
         """
         nnode = 5
-        mass_total = 5.
-        xyz, mass = get_bar(
-            mass_total=mass_total, nnode=nnode)
+        mass_total = 5.0
+        xyz, mass = get_bar(mass_total=mass_total, nnode=nnode)
         # mass[0] = 5.
 
         r = xyz[:, 0].copy()
-        v = ([1., 2., 3.])
+        v = [1.0, 2.0, 3.0]
         v /= np.linalg.norm(v)
         p0 = np.zeros(3)
         xyz = p0[np.newaxis, :] + (v[np.newaxis, :] * r[:, np.newaxis])
@@ -133,7 +151,7 @@ class TestInrel(unittest.TestCase):
         # xyz[:, 0] = r * np.cos(theta)
         # xyz[:, 1] = r * np.sin(theta)
 
-        linspace = np.linspace(-.5, .5, num=nnode)
+        linspace = np.linspace(-0.5, 0.5, num=nnode)
         fx = 0.0 * linspace
         fy = 0.0 * mass
         fz = linspace
@@ -143,31 +161,128 @@ class TestInrel(unittest.TestCase):
         nz_expected = fz.sum() / mass_total
         # print(f'nz_expected = {nz_expected:g}')
         moment = force * 0.0
-        inertia = np.zeros((nnode, 6), dtype='float64')
-        dforce, dmoment = inertia_relief(
-            mass, xyz, inertia,
-            force, moment, debug=True)
+        inertia = np.zeros((nnode, 6), dtype="float64")
+        dforce, dmoment = inertia_relief(mass, xyz, inertia, force, moment)
         force_out = force + dforce
         moment_out = moment + dmoment
-        # print('df:\n', dforce)
-        print('dm:\n', dmoment)
 
-        # [16.8622951, 4.21557378, 0, 4.21557378, 16.8622951]
-        print(f'dm_norm = {np.linalg.norm(dmoment, axis=1)}')
-        assert np.allclose(force_out.sum(), 0.), force_out.sum()
-        assert np.allclose(moment_out.sum(), 0.), moment_out.sum()
-        # print('force_out:\n', force_out)
+        # the net force and moment must both vanish component-by-component,
+        # not just in total (a plain .sum() can cancel across components)
+        assert np.allclose(force_out.sum(axis=0), 0.0), force_out.sum(axis=0)
+        m_resid = _moment_residual(xyz, force_out, moment_out, mass)
+        assert np.allclose(m_resid, 0.0), m_resid
+
+        # the applied load is self-equilibrating in force, so the linear
+        # relief is zero and the whole balance is carried by alpha
+        assert np.allclose(dforce, 0.0), dforce
+
+        # the relief must be a genuine rotation about the bar, not all zeros
+        assert np.abs(dmoment).max() > 0.0, dmoment
+
+    def test_inrel_rotated_with_self_inertia(self):
+        """
+        Rotated 3-D mass cloud carrying non-zero per-node self-inertia,
+        including products of inertia.
+
+        The self-inertia is supplied in the global frame while alpha is solved
+        in the principal frame, so each node's tensor must be rotated before
+        being contracted with alpha. Applying the raw diagonal instead mixes
+        frames and leaves a visible moment residual.
+        """
+        rng = np.random.default_rng(11)
+        nnode = 6
+        xyz = rng.normal(scale=5.0, size=(nnode, 3))
+        mass = np.ones(nnode)
+
+        inertia = np.zeros((nnode, 6), dtype="float64")
+        inertia[:, :3] = rng.uniform(1.0, 4.0, (nnode, 3))  # Ixx, Iyy, Izz
+        inertia[:, 3:] = rng.uniform(-1.0, 1.0, (nnode, 3))  # Ixy, Ixz, Iyz
+
+        force = rng.normal(size=(nnode, 3))
+        moment = rng.normal(size=(nnode, 3))
+        dforce, dmoment = inertia_relief(mass, xyz, inertia, force, moment)
+        force_out = force + dforce
+        moment_out = moment + dmoment
+
+        assert np.allclose(force_out.sum(axis=0), 0.0), force_out.sum(axis=0)
+        m_resid = _moment_residual(xyz, force_out, moment_out, mass)
+        assert np.allclose(m_resid, 0.0), m_resid
+
+    def test_inrel_near_collinear_degenerate_axis(self):
+        """
+        A *nearly* collinear bar loaded by a moment about the bar axis.
+
+        The principal inertia about the bar axis is zero in exact arithmetic,
+        but eigh returns a tiny value of either sign (here ~-7e-13) rather
+        than exactly 0. An exact ``inertia != 0`` guard admits that value and
+        computes alpha = M/~0, producing an enormous bogus relief; the guard
+        must instead be a tolerance relative to the largest principal inertia.
+
+        This load case is not physically solvable: there is no inertia about
+        the bar axis, so no angular acceleration can react the applied axial
+        moment. The correct behavior is to warn, apply no relief about that
+        axis, and leave the axial moment visibly unbalanced, rather than to
+        manufacture a huge alpha that corrupts the other two axes as well.
+        """
+        nnode = 5
+        v = np.array([1.0, 2.0, 3.0])
+        v /= np.linalg.norm(v)
+        xyz = v[np.newaxis, :] * np.linspace(0.0, 100.0, nnode)[:, np.newaxis]
+        # nudge off perfectly collinear so eigh cannot return an exact 0
+        xyz = xyz + np.array([[0.0, 0.0, 1e-7]]) * np.arange(nnode)[:, np.newaxis]
+        mass = np.ones(nnode)
+
+        force = np.zeros((nnode, 3))
+        # a pure moment along the bar axis -- about the zero-inertia axis
+        moment_per_node = 10.0
+        moment = np.tile((v * moment_per_node)[np.newaxis, :], (nnode, 1))
+        inertia = np.zeros((nnode, 6), dtype="float64")
+        with self.assertWarns(RuntimeWarning):
+            dforce, dmoment = inertia_relief(mass, xyz, inertia, force, moment)
+        force_out = force + dforce
+        moment_out = moment + dmoment
+
+        # the giveaway for a divide-by-~0 is a huge relief term
+        assert np.abs(dmoment).max() < 1e-3, np.abs(dmoment).max()
+
+        # no force was applied, so there is nothing to relieve linearly
+        assert np.allclose(force_out.sum(axis=0), 0.0), force_out.sum(axis=0)
+
+        # the unreacted moment must be exactly the applied axial moment: the
+        # degenerate axis is skipped, and the other two axes are untouched
+        moment_expected = v * moment_per_node * nnode
+        m_resid = _moment_residual(xyz, force_out, moment_out, mass)
+        assert np.allclose(m_resid, moment_expected), (m_resid, moment_expected)
+
+    def test_inrel_large_forces(self):
+        """
+        Guards the removal of a hardcoded ``assert abs(f).max() < 1.``, which
+        tripped on any realistic load magnitude.
+        """
+        rng = np.random.default_rng(5)
+        nnode = 5
+        xyz = rng.normal(scale=5.0, size=(nnode, 3))
+        mass = np.ones(nnode)
+        force = rng.normal(scale=1e5, size=(nnode, 3))
+        moment = np.zeros((nnode, 3))
+        inertia = np.zeros((nnode, 6), dtype="float64")
+        dforce, dmoment = inertia_relief(mass, xyz, inertia, force, moment)
+        force_out = force + dforce
+        moment_out = moment + dmoment
+        # scale the tolerance to the load magnitude
+        assert np.abs(force_out.sum(axis=0)).max() < 1e-6, force_out.sum(axis=0)
+        m_resid = _moment_residual(xyz, force_out, moment_out, mass)
+        assert np.abs(m_resid).max() < 1e-6, m_resid
 
 
-def get_bar(mass_total: float=11.0,
-            nnode: int=11):
-    x = np.linspace(0., 100., num=nnode)
-    xyz = np.zeros((nnode, 3), dtype='float64')
+def get_bar(mass_total: float = 11.0, nnode: int = 11):
+    x = np.linspace(0.0, 100.0, num=nnode)
+    xyz = np.zeros((nnode, 3), dtype="float64")
     xyz[:, 0] = x
 
-    mass = np.ones(nnode, dtype='float64') * mass_total / nnode
+    mass = np.ones(nnode, dtype="float64") * mass_total / nnode
     return xyz, mass
 
 
-if __name__ == '__main__':  # pragma: no cover
+if __name__ == "__main__":  # pragma: no cover
     unittest.main()

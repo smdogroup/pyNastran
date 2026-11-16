@@ -11,7 +11,7 @@ from typing import Optional, TYPE_CHECKING
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from pyNastran.utils import print_bad_path, PathLike
 from pyNastran.bdf.errors import EnvironmentVariableError
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # pragma: no cover
     from cpylog import SimpleLogger
 
 IS_WINDOWS = 'nt' in os.name
@@ -24,6 +24,7 @@ def get_include_filename(log: SimpleLogger,
                          include_dirs: list[str],
                          replace_includes: dict[str, str],
                          source_filename: str='',
+                         spaces: str='',
                          is_windows: Optional[bool]=None,
                          debug: bool=False,
                          write_env_on_error: bool=False) -> str:
@@ -63,7 +64,7 @@ def get_include_filename(log: SimpleLogger,
     if is_windows is None:
         is_windows = IS_WINDOWS
 
-    filename_raw = parse_include_lines(include_lines)
+    filename_raw = parse_include_lines(include_lines, log, spaces=spaces)
     if filename_raw in replace_includes:
         filename_raw = replace_includes[filename_raw]
         if len(filename_raw) == 0:
@@ -89,9 +90,9 @@ def get_include_filename(log: SimpleLogger,
         msg = f'Could not find INCLUDE file:\n{include_lines}\n'
         msg += f'  filename: {os.path.abspath(filename_raw)}\n'
         if source_filename:
-            msg += (f'  source file: {os.path.abspath(source_filename)}\n'\
+            msg += (f'  source file: {os.path.abspath(source_filename)}\n'
                     f'\n{print_bad_path(filename_raw)}\n\n')
-        msg += f'  include_dirs:\n - ' + '\n - '.join(repr(val) for val in include_dirs) + '\n'
+        msg += '  include_dirs:\n - ' + '\n - '.join(repr(val) for val in include_dirs) + '\n'
         if write_env_on_error:
             msg += '  environment:'
             skip_keys = [
@@ -112,7 +113,8 @@ def get_include_filename(log: SimpleLogger,
     return filename
 
 
-def parse_include_lines(card_lines: list[str]) -> str:
+def parse_include_lines(card_lines: list[str], log: SimpleLogger,
+                        spaces: str='') -> str:
     """handles splitting out the INCLUDE lines"""
     card_lines2 = []
     #print(f'card_lines = {card_lines}')
@@ -140,6 +142,10 @@ def parse_include_lines(card_lines: list[str]) -> str:
     if len(filename.strip()) == 0:
         raise SyntaxError(f'INCLUDE file is empty...card_lines={card_lines}\n'
                           'there is a $ sign in the INCLUDE card')
+
+    if '\\' in filename and not filename.startswith('\\') and ':' not in filename:
+        # not Linux friendly
+        log.warning(f"{spaces}- '{filename}' (backslash found)")
 
     # not handled...
     #    include '/mydir' /level1 /level2/ 'myfile.x'
@@ -209,7 +215,7 @@ def split_filename_into_tokens(include_dir: str, filename: str,
     return pth_out
 
 
-def split_tokens(tokens: tuple[str], is_windows: bool,
+def split_tokens(tokens: tuple[str, ...], is_windows: bool,
                  debug: bool=False) -> list[str]:
     """converts a series of path tokens into a joinable path"""
     tokens2: list[str] = []

@@ -1,15 +1,20 @@
+import copy
 from typing import TextIO, Optional
 import numpy as np
 
+from pyNastran.femutils.utils import pivot_table
 from pyNastran.utils.numpy_utils import integer_types, integer_float_types
+from pyNastran.op2.stress_reduction import von_mises_2d, max_shear
 from pyNastran.op2.result_objects.op2_objects import get_times_dtype, combination_inplace
 from pyNastran.op2.result_objects.utils_pandas import build_dataframe_transient_header, build_pandas_transient_element_node
 from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import (
-    StressObject, StrainObject, OES_Object, oes_real_data_code, get_scode,
+    StressObject, StrainObject, OES_Object,
+    slice_eids_by_index, oes_real_data_code, get_scode,
     set_static_case, set_modal_case, set_transient_case, set_post_buckling_case,
 )
 from pyNastran.f06.f06_formatting import write_floats_12e, write_floats_12e_long, _eigenvalue_header
 from pyNastran.op2.op2_interface.write_utils import set_table3_field, view_dtype, view_idtype_as_fdtype
+from pyNastran.op2.writer.utils import fdtype_from_data
 
 
 class RealCompositePlateArray(OES_Object):
@@ -30,6 +35,67 @@ class RealCompositePlateArray(OES_Object):
                 #pass
         #else:
             #raise NotImplementedError('SORT2')
+
+    def h5_table_dict(self) -> dict:
+        from tables import Int64Col, Float64Col
+        h5_table_dict = {
+            'EID': Int64Col(pos=0),
+            'PLY': Int64Col(pos=1),
+            'X1': Float64Col(pos=2),
+            'Y1': Float64Col(pos=3),
+            'T1': Float64Col(pos=4),
+            'L1': Float64Col(pos=5),
+            'L2': Float64Col(pos=6),
+            'DOMAIN_ID': Int64Col(pos=7),
+        }
+        return h5_table_dict
+
+    def add_to_h5_array(self, arr, ntime_neid0: int, ntime_neid1: int, itime: int):
+        #[o11, o22, t12, t1z, t2z, angle, major, minor, ovm]
+        arr["EID"][ntime_neid0:ntime_neid1] = self.element_layer[:, 0]
+        arr["PLY"][ntime_neid0:ntime_neid1] = self.element_layer[:, 1]
+        arr["X1"][ntime_neid0:ntime_neid1] = self.data[itime, :, 0]
+        arr["Y1"][ntime_neid0:ntime_neid1] = self.data[itime, :, 1]
+        arr["T1"][ntime_neid0:ntime_neid1] = self.data[itime, :, 2]
+        arr["L1"][ntime_neid0:ntime_neid1] = self.data[itime, :, 3]
+        arr["L2"][ntime_neid0:ntime_neid1] = self.data[itime, :, 4]
+
+
+    def slice_by_element_id(self, eids: np.ndarray, assume_exists: bool=False, inplace: bool=False):
+        element = self.element_layer[:, 0]
+        #col_layer = self.element_layer[:, 1]
+        uelement = np.unique(element)
+        #ulayer = np.unique(col_layer)
+        #nlayer = len(ulayer)
+        neid_layer = len(element)
+
+        #neid = self.get_neid()
+        ntime, nelement_layer, nresult = self.data.shape
+        assert len(eids) == len(np.unique(eids))
+
+        #-------------------------
+
+        # throw most of the results in the trash
+        eids, _, _ = slice_eids_by_index(uelement, eids, assume_exists)
+        obj = self if inplace else copy.deepcopy(self)
+
+        ilayer = np.where(np.isin(element, eids))[0]
+
+        # testing when we pass in all eids
+        #assert len(ilayer) == neid_layer, (len(ilayer), neid_layer)
+
+        obj.element_layer = obj.element_layer[ilayer, :]
+        obj.data = obj.data[:, ilayer, :]
+        # ilayer is the ply (row) index; nelements is the number of elements
+        obj.nelements = len(eids)
+        return obj
+
+    def finalize(self):
+        """it's required that the object be in SORT1"""
+        # the number of plies varies per element, so the actual number
+        # of elements is only known once element_layer is filled
+        self.nelements = len(np.unique(self.element_layer[:, 0]))
+        self.set_as_sort1()
 
     @property
     def is_real(self) -> bool:
@@ -170,6 +236,81 @@ class RealCompositePlateArray(OES_Object):
             data_frame = pd.DataFrame(self.data[0], columns=headers, index=index)
             data_frame.columns.names = ['Static']
             self.data_frame = data_frame
+
+    def envelope(self,
+                 eids: np.ndarray,
+                 result_name: str) -> np.ndarray:
+        is_min = (result_name == 'min')
+        func_name = 'nanmin' if is_min else 'nanmax'
+        max_min_func = getattr(np, func_name)
+
+        # self.element_layer = group.create_dataset('element_layer', data=element_layer)
+
+        # print(''.join(self.get_stats()))
+        element = np.unique(self.element_layer[:, 0])
+        ielement = np.searchsorted(element, eids)
+        assert np.array_equal(element[ielement], eids)
+
+        #[o11, o22, t12, t1z, t2z, angle, major, minor, ovm]
+        stress_strain_dict_map = {
+            'max': 6,
+            'min': 7,
+        }
+        ntime, nelement_node, _ = self.data.shape
+        if result_name == 'von_mises':
+            data = self.von_mises()
+        elif result_name == 'max_shear':
+            data = self.max_shear()
+        elif result_name == 'abs_max':
+            # TODO: wrong, but ok...
+            data = np.abs(self.data[:, :, [6,8]]).max(axis=2)
+            assert data.shape == (ntime, nelement_node), data.shape
+        elif result_name in stress_strain_dict_map:
+            iresult = stress_strain_dict_map[result_name]
+            data = self.data[:, :, iresult]
+        else:  # pragma: No cover
+            raise NotImplementedError(result_name)
+
+        neid = len(element)
+        assert data.ndim == 2, data.shape
+        ntime, nelement_layer = data.shape
+
+        # reshape for the pivot_table
+        data = data.reshape(ntime, nelement_layer, 1)
+
+        row_eids = self.element_layer[:, 0]
+        col_layers = self.element_layer[:, 1]
+        ulayers = np.unique(col_layers)
+        nlayer = len(ulayers)
+        pivot_data, eids_new = pivot_table(data, row_eids, col_layers, shape=3)
+        pivot_data = pivot_data.reshape(ntime, neid, nlayer)
+        assert pivot_data.shape == (ntime, neid, nlayer), pivot_data.shape
+
+        # squash the time and layer axes
+        eid_data = max_min_func(pivot_data, axis=(0, 2))
+        assert eid_data.shape == (neid,), (eid_data.shape, neid)
+
+        return eid_data[ielement]
+
+    def von_mises(self) -> np.ndarray:
+        if self.is_von_mises:
+            return self.data[:, :, -1]
+        #[o11, o22, t12, t1z, t2z, angle, major, minor, ovm]
+        oxx = self.data[:, :, 0]
+        oyy = self.data[:, :, 1]
+        txy = self.data[:, :, 2]
+        ovm = von_mises_2d(oxx, oyy, txy, self.is_stress)
+        return ovm
+
+    def max_shear(self) -> np.ndarray:
+        """hasn't been checked for strain"""
+        if not self.is_von_mises:
+            return self.data[:, :, -1]
+        #[o11, o22, t12, t1z, t2z, angle, major, minor, ovm]
+        omax = self.data[:, :, 6]
+        omin = self.data[:, :, 7]
+        max_sheari = max_shear(omax, omin)
+        return max_sheari
 
     @classmethod
     def _add_case(cls,
@@ -685,14 +826,7 @@ class RealCompositePlateArray(OES_Object):
         if not self.is_sort1:
             raise NotImplementedError('SORT2')
 
-        fdtype = self.data.dtype
-        if self.size == fdtype.itemsize:
-            pass
-        else:
-            # print(f'downcasting {self.class_name}...')
-            #idtype = np.int32(1)
-            fdtype = np.float32(1.0)
-
+        fdtype = fdtype_from_data(self.data, self.size)
         data_out = np.empty((nlayers, 11), dtype=fdtype)
         data_out[:, 0] = view_idtype_as_fdtype(eids_device, fdtype)
         data_out[:, 1] = view_idtype_as_fdtype(layers, fdtype)

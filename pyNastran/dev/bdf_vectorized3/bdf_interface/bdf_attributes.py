@@ -77,13 +77,13 @@ from pyNastran.dev.bdf_vectorized3.cards.loads.static_loads import (
     LOAD, SLOAD,
     FORCE, FORCE1, FORCE2,
     MOMENT, MOMENT1, MOMENT2,
-    TEMP, TEMPD, # DTEMP, DTEMP,
+    TEMP, TEMPD, TEMPP1, TEMPRB, # DTEMP, DTEMP,
     SPCD, DEFORM,
     RFORCE, RFORCE1,
     GRAV, ACCEL, ACCEL1,
 )
 from pyNastran.dev.bdf_vectorized3.cards.loads.static_pressure_loads import (
-    PLOAD, PLOAD1, PLOAD2, PLOAD4, # PLOADX1,
+    PLOAD, PLOAD1, PLOAD2, PLOAD4, PLOADX1,
 )
 from pyNastran.dev.bdf_vectorized3.cards.loads.types import Loads as StaticLoad
 
@@ -91,6 +91,7 @@ from pyNastran.dev.bdf_vectorized3.cards.loads.dynamic_loads import (
     LSEQ, DLOAD,
     DAREA, TLOAD1, TLOAD2, RLOAD1, RLOAD2, TIC, QVECT,
     RANDPS, DELAY, DPHASE, TF, ACSRCE,
+    RANDT1, LOADCYN, LOADCYH,
 )
 
 from pyNastran.dev.bdf_vectorized3.cards.loads.thermal_loads import (
@@ -116,6 +117,10 @@ from pyNastran.dev.bdf_vectorized3.cards.contact import (
     BCBODY, BCBODY1,
     BOUTPUT,
 )
+from pyNastran.dev.bdf_vectorized3.cards.superelements import (
+    SETREE, SENQSET, SEBULK, SEBNDRY, SECONCT, SEELT, SEEXCLD,
+    SELABEL, SELOAD, SELOC, SEMPLN, CSUPER, CSUPEXT,
+)
 from pyNastran.dev.bdf_vectorized3.cards.coord import COORD
 from pyNastran.dev.bdf_vectorized3.cards.rotor import (
     ROTORG
@@ -136,12 +141,22 @@ from pyNastran.dev.bdf_vectorized3.cards.elements.rigid import (
 from pyNastran.dev.bdf_vectorized3.cards.monitor import (
     MONPNT1, MONPNT2, MONPNT3, MONDSP1)
 from pyNastran.dev.bdf_vectorized3.cards.aero import (
-    CAERO1, CAERO2, CAERO3, CAERO4, CAERO5, CAERO7,
+    CAERO1, CAERO2, CAERO3, CAERO4, CAERO5,
     PAERO1, PAERO2, PAERO3, PAERO4, PAERO5,
-    SPLINE1, SPLINE2, SPLINE3, SPLINE4, SPLINE5,
-    AECOMP, AECOMPL, AELIST, AEFACT, FLFACT, FLUTTER,
+    AECOMP, AECOMPL, AELIST, AEFACT,
     AEPARM, AELINK, AESTAT,
-    GUST, AESURF, AESURFS, CSSCHD, DIVERG, TRIM)
+    AESURF, AESURFS,
+    )
+from pyNastran.dev.bdf_vectorized3.cards.aero.static_loads import (
+    CSSCHD, DIVERG, TRIM, TRIM2, UXVEC, AEFORCE,
+    # AEPRESS, AEDW,
+)
+from pyNastran.dev.bdf_vectorized3.cards.aero.dynamic_loads import (
+    GUST, FLFACT, FLUTTER,)
+from pyNastran.dev.bdf_vectorized3.cards.aero.zaero import CAERO7
+from pyNastran.dev.bdf_vectorized3.cards.aero.spline import (
+    SPLINE1, SPLINE2, SPLINE3, SPLINE4, SPLINE5)
+
 from pyNastran.dev.bdf_vectorized3.cards.optimization import (
     DESVAR, DLINK, DVGRID,
     DRESP1, DRESP2, DCONSTR,
@@ -160,7 +175,7 @@ from .breakdowns import (
     get_area_breakdown, get_volume_breakdown,
     NO_LENGTH, NO_AREA, NO_VOLUME, NO_MASS,
 )
-
+from pyNastran.dev.bdf_vectorized3.mesh_utils.mass_properties import mass_properties
 
 if TYPE_CHECKING:  # pragma: no cover
     #from pyNastran.dev.bdf_vectorized3.bdf import PARAM, MDLPRM, FLUTTER
@@ -173,7 +188,7 @@ if TYPE_CHECKING:  # pragma: no cover
         TABLED1, TABLED2, TABLED3, TABLED4, # TABLED5,
         TABLEM1, TABLEM2, TABLEM3, TABLEM4,
         TABLES1, TABLEST, TABLEH1, TABLEHT,
-        TABDMP1, # TABRND1, TABRNDG
+        TABDMP1, TABRND1, TABRNDG,
     )
 
 class BDFAttributes:
@@ -560,6 +575,8 @@ class BDFAttributes:
         self.accel1 = ACCEL1(self)
         self.temp = TEMP(self)
         self.tempd = TEMPD(self)  # default temp
+        self.tempp1 = TEMPP1(self)
+        self.temprb = TEMPRB(self)
         #self.dtemp = DTEMP(self)  # has nodes
         self.lseq = LSEQ(self)    # static load sequence
         self.spcd = SPCD(self)   # enforced displacment; load
@@ -568,7 +585,7 @@ class BDFAttributes:
         self.rforce1 = RFORCE1(self)  # rotational force
 
         # axisymmetric loads
-        #self.ploadx1 = PLOADX1(self)
+        self.ploadx1 = PLOADX1(self)
 
         # other thermal...
         self.qvect = QVECT(self)
@@ -601,6 +618,11 @@ class BDFAttributes:
         # random loads
         self.randps = RANDPS(self)
         self.acsrce = ACSRCE(self)
+        self.randt1 = RANDT1(self)
+
+        # cyclic loads
+        self.loadcyn = LOADCYN(self)
+        self.loadcyh = LOADCYH(self)
 
         self.mat1 = MAT1(self)
         self.mat2 = MAT2(self)
@@ -699,7 +721,11 @@ class BDFAttributes:
         self.csschd = CSSCHD(self)
         self.diverg = DIVERG(self)
         self.trim = TRIM(self)
-        #self.trim2 = TRIM(self)
+        self.trim2 = TRIM2(self)
+        self.uxvec = UXVEC(self)
+        self.aeforce = AEFORCE(self)
+        # self.aepress = AEPRESS(self)
+        # self.aedw = AEDW(self)
 
         # static aero
         self.aeros = None
@@ -714,6 +740,7 @@ class BDFAttributes:
         self.tables_d: dict[int, TABLED1 | TABLED2 | TABLED3 | TABLED4] = {}
         self.tables_m: dict[int, TABLEM1 | TABLEM2 | TABLEM3 | TABLEM4] = {}
         self.tables_sdamping: dict[int, TABDMP1] = {}
+        self.random_tables: dict[int, TABRND1 | TABRNDG] = {}
 
         # matrices
         #: direct matrix input - DMIG
@@ -727,6 +754,21 @@ class BDFAttributes:
         self._dmig_temp = defaultdict(list)  # type: dict[str, list[str]]
         # ----------------------------------------
 
+        # superelements
+        self.setree = SETREE(self)
+        self.senqset = SENQSET(self)
+        self.sebulk = SEBULK(self)
+        self.sebndry = SEBNDRY(self)
+        self.seconct = SECONCT(self)
+        self.seelt = SEELT(self)
+        self.seloc = SELOC(self)
+        self.sempln = SEMPLN(self)
+        self.selabel = SELABEL(self)
+        self.seexcld = SEEXCLD(self)
+        self.csuper = CSUPER(self)
+        self.csupext = CSUPEXT(self)
+        self.seload = SELOAD(self)
+
         self.system_command_lines: list[str] = []
         self.executive_control_lines: list[str] = []
         self.superelement_models = {}
@@ -738,8 +780,8 @@ class BDFAttributes:
         #self.coords = {0 : coord}   # type: dict[int, Any]
 
         ## old style
-        self.ringaxs = {}
-        self.gridb = {}
+        #self.ringaxs = {}
+        #self.gridb = {}
         self.mdlprm = None
 
         # optimization
@@ -976,10 +1018,10 @@ class BDFAttributes:
             self.pload, self.pload1, self.pload2, self.pload4,
             self.grav, self.accel, self.accel1,
             self.sload,
-            self.temp, self.tempd,
+            self.temp, self.tempd, self.tempp1, self.temprb,
             self.spcd, self.deform,
             self.rforce, self.rforce1,
-            #self.ploadx1,
+            self.ploadx1,
         ]
         return loads
 
@@ -1006,7 +1048,10 @@ class BDFAttributes:
             self.rotorg,
 
             # random loads
-            self.randps, self.acsrce,
+            self.randps, self.acsrce, self.randt1,
+
+            # cyclic loads
+            self.loadcyn, self.loadcyh,
         ]
         return loads
 
@@ -1077,6 +1122,12 @@ class BDFAttributes:
         sesets = [
             self.sebset, self.secset, self.seqset, self.seuset,
             self.release, self.seset,
+            # superelements
+            self.setree, self.senqset, self.sebulk,
+            self.sebndry, self.seconct, self.seelt,
+            self.seloc, self.sempln, self.selabel,
+            self.seexcld, self.csuper, self.csupext,
+            self.seload,
         ]
         return sesets
 
@@ -1104,8 +1155,9 @@ class BDFAttributes:
     @property
     def aero_load_cards(self) -> list[VectorizedBaseCard]:
         loads = [
-            self.gust, self.csschd, self.trim, # self.trim2,
-            self.diverg,
+            self.gust, self.csschd, self.trim, self.trim2,
+            self.uxvec, self.diverg,
+            self.aeforce, #self.aepress, # self.aedw,
         ]
         return loads
 
@@ -1187,8 +1239,9 @@ class BDFAttributes:
         ] + self.spc_cards + self.mpc_cards + self.element_cards + self.rigid_element_cards + \
         self.property_cards + self.material_cards + self.optimization_cards + \
         self.load_cards + self.dynamic_load_cards + \
-        self.plot_element_cards + self.thermal_element_cards + self.bolt_cards + \
-        self.thermal_boundary_condition_cards + self.setx_cards + self.set_cards + self.seset_cards + \
+        self.plot_element_cards + self.bolt_cards + \
+        self.thermal_element_cards + self.thermal_boundary_condition_cards + \
+        self.setx_cards + self.set_cards + self.seset_cards + \
         self.aero_objects + self.dynamic_cards + self.nonstructural_mass_cards + self.contact_cards
         #for i, card in enumerate(cards):
             #assert isinstance(card.type, str), card
@@ -1574,10 +1627,89 @@ class BDFAttributes:
             mass = mass2[i]
         return mass
 
-    def inertia_sum(self, element_id: Optional[np.ndarray]=None,
-                    nansum: bool=False) -> tuple[float, np.ndarray, np.ndarray]:
+    @property
+    def wtmass(self) -> float:
+        """
+        Gets the PARAM,WTMASS value, which defines the weight to mass
+        conversion factor
+
+        kg -> kg : 1.0
+        lb -> slug : 1/32.2
+        lb -> slinch : 1/(32.2*12)=1/386.4
+        """
+        wtmass = 1.0
+        if 'WTMASS' in self.params:
+            param = self.params['WTMASS']
+            wtmass = param.values[0]
+        return wtmass
+
+    def inertia_sum(self, nsm_id: int=0,
+                    element_id: np.ndarray | list[int] | None = None,
+                    reference_point: Optional[np.ndarray] = None,
+                    inertia_reference: str = "cg",
+                    sym_axis: str = "",
+                    scale: Optional[float] = None,
+                    include_base_mass: bool=True,
+                    nansum: bool=False) -> tuple[float, np.ndarray, np.ndarray]:  # pragma: no cover
         """
         mass moment of inertia
+
+        Parameters
+        ----------
+        element_id : Optional[np.ndarray]
+            unused
+        reference_point : (3, ) ndarray; default = <0,0,0>.
+            an array that defines the origin of the frame.
+        inertia_reference : str; default='cg'
+            'cg' : inertia is taken about the cg
+            'ref' : inertia is about the reference point
+        sym_axis : str; default=''
+            'yz', 'xz', 'xy'
+        scale : float; default=WTMASS
+            scales weight to mass (1/g)
+            overwrites PARAM,WTMASS
+        nansum : bool; default=False
+            use np.nansum instead of np.sum
+
+        Returns
+        -------
+        mass : float
+            the mass of the model; wtmass is considered
+        cg : (3, ) float ndarray
+            the cg of the model as an array.
+        I : (6, ) float ndarray
+            moment of inertia array([Ixx, Iyy, Izz, Ixy, Ixz, Iyz]); wtmass is considered
+
+        """
+        fsum = np.nansum if nansum else np.sum
+
+        element_ids, mass, centroid, inertia = self.inertia(
+            nsm_id=nsm_id, element_id=element_id,
+            reference_point=reference_point, inertia_reference=inertia_reference,
+            sym_axis=sym_axis, scale=scale, include_base_mass=include_base_mass)
+
+        mass_total = fsum(mass)
+        mass_cg_total = fsum(mass[:, np.newaxis] * centroid, axis=0)
+        if np.array_equal(mass_cg_total, np.zeros(3)):
+            cg_total = np.zeros(3)
+        else:
+            cg_total = mass_cg_total / mass_total
+        inertia_total = fsum(inertia, axis=0)
+        assert len(cg_total) == 3, cg_total
+        assert len(inertia_total) == 6, inertia_total
+        return mass_total, cg_total, inertia_total
+
+    def _inertia_sum(self, element_id: Optional[np.ndarray]=None,
+                    nansum: bool=False) -> tuple[float, np.ndarray, np.ndarray]:  # pragma: no cover
+        """
+        mass moment of inertia
+
+        Parameters
+        ----------
+        element_id : Optional[np.ndarray]
+            unused
+        nansum : bool; default=False
+            use np.nansum instead of np.sum
         """
         log = self.log
         element_ids_all = []
@@ -1598,12 +1730,12 @@ class BDFAttributes:
             massi_sum = fsum(massi)
             assert massi.shape == (card.n, ), massi.shape
 
-            if hasattr(card, 'center_of_mass'):
-                centroid = card.center_of_mass()
-                assert centroid.shape == (card.n, 3), centroid.shape
-            else:
-                centroid = card.centroid()
-                assert centroid.shape == (card.n, 3), centroid.shape
+            # if hasattr(card, 'center_of_mass'):
+            centroid = card.center_of_mass()
+            assert centroid.shape == (card.n, 3), centroid.shape
+            # else:
+            #     centroid = card.centroid()
+            #     assert centroid.shape == (card.n, 3), centroid.shape
 
             total_mass += massi_sum
             if np.any(np.isnan(centroid)):
@@ -1649,71 +1781,22 @@ class BDFAttributes:
         #if element_id is None:
         return total_mass, cg, inertia
 
-    def inertia(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def inertia(self, nsm_id: int=0,
+                element_id: np.ndarray | list[int] | None = None,
+                reference_point: Optional[np.ndarray] = None,
+                inertia_reference: str = "cg",
+                sym_axis: str = "",
+                scale: Optional[float] = None,
+                include_base_mass: bool=True) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        [mass, cg, mass moment of inertia]
+        [element_id, mass, cg, mass moment of inertia]
+
+        TODO: doesn't handle WTMASS
         """
-        log = self.log
-        element_ids_all = []
-        #inertias = []
-        #mass = 0.
-        mass_cg = np.zeros(3, dtype='float64')
-        masses = []
-        centroids = []
-        element_cards = [card for card in self.element_cards
-                         if card.n > 0 and card.type not in NO_MASS]
-        for card in element_cards:
-            element_ids_all.append(card.element_id)
-            massi = card.mass()
-            masses.append(massi)
-            centroidi = card.centroid()
-            if np.any(np.isnan(centroidi)):
-                log.error(f'{card.type} has nan centroid; centroid={centroidi}')
-                raise RuntimeError(f'{card.type} has nan centroid; centroid={centroidi}')
-            centroids.append(centroidi)
-
-        if len(masses) == 0:
-            element_id = np.array([], dtype='int32')
-            mass = np.array([], dtype='float64')
-            cg = np.zeros((0, 3), dtype='float64')
-            inertia = np.zeros((0, 6), dtype='float64')
-            log.error('no elements with mass/inertia')
-            return element_id, mass, cg, inertia
-
-        element_id = np.hstack(element_ids_all)
-        mass = np.hstack(masses)
-        centroid = np.vstack(centroids)
-        #abs_mass = np.abs(mass).sum()
-        neids = len(element_id)
-        #if abs_mass == 0.:
-            #assert len(element_id) > 0, element_id
-            #cg = np.full(3, np.nan, dtype='float64')
-            #inertia = np.full(6, np.nan, dtype='float64')
-            #log.error('no elements with mass...inertia is nan')
-            #return element_id, abs_mass, cg, inertia
-        mass_cg = mass[:, None] * centroid
-        imass = (mass != 0)
-        cg = np.full(centroid.shape, np.nan, dtype=centroid.dtype)
-        cg[imass] = mass_cg[imass, :] / mass[imass, np.newaxis]
-
-        #cg = mass_cg.sum(axis=0) / mass.sum()
-        #assert len(cg) == 3, cg
-        assert cg.shape == (neids, 3), cg.shape
-
-        dxyz = centroid - cg
-        dx = dxyz[:, 0]
-        dy = dxyz[:, 1]
-        dz = dxyz[:, 2]
-        Ixx = mass * (dy ** 2 + dz ** 2)
-        Iyy = mass * (dx ** 2 + dz ** 2)
-        Izz = mass * (dx ** 2 + dy ** 2)
-        Ixy = mass * (dx * dy)
-        Ixz = mass * (dx * dz)
-        Iyz = mass * (dy * dz)
-        inertia = np.stack([Ixx, Iyy, Izz, Ixy, Ixz, Iyz], axis=1, out=None)
-
-        nrows = len(mass)
-        assert inertia.shape == (nrows, 6), inertia.shape
+        element_id, mass, centroid, inertia = mass_properties(
+            self, nsm_id, element_id=element_id,
+            reference_point=reference_point, inertia_reference=inertia_reference,
+            sym_axis=sym_axis, scale=scale, include_base_mass=include_base_mass)
         return element_id, mass, centroid, inertia
 
     def length(self) -> float:
@@ -1806,6 +1889,9 @@ class BDFAttributes:
         dideal_theta = np.full(nelements, np.nan, dtype='float64')
         min_edge_length = np.full(nelements, np.nan, dtype='float64')
         max_warp = np.full(nelements, np.nan, dtype='float64')
+        nastran_skew = np.full(nelements, np.nan, dtype='float64')
+        nastran_taper = np.full(nelements, np.nan, dtype='float64')
+        nastran_warp = np.full(nelements, np.nan, dtype='float64')
         icard_type = np.full(nelements, np.nan, dtype='float64')
 
         i0 = 0
@@ -1840,7 +1926,8 @@ class BDFAttributes:
                 continue
             qualityi = card.quality()
             (areai, taper_ratioi, area_ratioi, max_skewi, aspect_ratioi,
-             min_thetai, max_thetai, dideal_thetai, min_edge_lengthi, max_warpi) = qualityi
+             min_thetai, max_thetai, dideal_thetai, min_edge_lengthi, max_warpi,
+             nastran_skewi, nastran_taperi, nastran_warpi) = qualityi
             taper_ratio[i0:i0+n] = taper_ratioi
             area_ratio[i0:i0+n] = area_ratioi
             max_skew[i0:i0+n] = max_skewi
@@ -1850,6 +1937,9 @@ class BDFAttributes:
             dideal_theta[i0:i0+n] = dideal_thetai
             min_edge_length[i0:i0+n] = min_edge_lengthi
             max_warp[i0:i0+n] = max_warpi
+            nastran_skew[i0:i0+n] = nastran_skewi
+            nastran_taper[i0:i0+n] = nastran_taperi
+            nastran_warp[i0:i0+n] = nastran_warpi
             icard_type[i0:i0+n] = icard
             i0 += n
             icard += 1
@@ -1863,6 +1953,7 @@ class BDFAttributes:
         out = (
             element_ids, taper_ratio, area_ratio, max_skew, aspect_ratio,
             min_theta, max_theta, dideal_theta, min_edge_length, max_warp,
+            nastran_skew, nastran_taper, nastran_warp,
             #icard_type,
         )
         return out

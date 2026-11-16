@@ -40,12 +40,10 @@ class AddMethods:
         model = self.model
         if key in model.params and not allow_overwrites:
             if not param == model.params[key]:
-                #if param.key in self.params:
-                    #msg = 'key=%s param=%s old_param=%s' % (key, param, self.params[key])
-                    #raise KeyError(msg)
-                model.log.warning('key=%s param=%s old_param=%s' %
-                                  (key, param, model.params[key]))
-                model.params[key] = param
+                model.log.warning('key=%s param=%s old_param=%s' % (key, param, model.params[key]))
+            else:
+                model.log.warning('equivalent card: key=%s param=%s' % (key, param))
+            model.params[key] = param
         else:
             model.params[key] = param
             model._type_to_id_map[param.type].append(key)
@@ -276,6 +274,15 @@ class AddMethods:
             table, self.model.tables_sdamping[key])
         #assert key > 0; yes you can have negative tables...
         self.model.tables_sdamping[key] = table
+        self.model._type_to_id_map[table.type].append(key)
+
+    def add_random_table_object(self, table) -> None:
+        """adds a TABRND1/TABRNDG object"""
+        key = table.tid
+        assert key not in self.model.random_tables, '\nrandom_table=\n%s old_random_table=\n%s' % (
+            table, self.model.random_tables[key])
+        assert key > 0
+        self.model.random_tables[key] = table
         self.model._type_to_id_map[table.type].append(key)
 
     #-----------------------------------------------------------

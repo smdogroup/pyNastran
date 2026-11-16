@@ -24,6 +24,7 @@ Other:
  - control over point size / text annotation size
 """
 from __future__ import annotations
+from collections import Counter
 
 import os
 import warnings
@@ -33,8 +34,6 @@ from typing import Iterable, TextIO, Optional, Any, TYPE_CHECKING
 
 import numpy as np
 import numpy.typing as npt
-import scipy
-import scipy.interpolate
 try:
     import matplotlib
     import matplotlib.pyplot as plt
@@ -63,6 +62,10 @@ LINESTYLES = ['-', '--', '-.', ':', 'None', ' ', '',
 Crossing = tuple[np.floating | float,
                  float, float]
 Limit = tuple[Optional[float], Optional[float]] | None
+
+VCrossingModeDict = dict[int, list[Crossing]]
+# VCrossingDict = dict[npt.floating, VCrossingModeDict]
+VCrossingDict = dict[float, VCrossingModeDict]
 
 
 class FlutterResponse:
@@ -163,14 +166,14 @@ class FlutterResponse:
             use_rhoref=False,
             make_alt=False)
         resp.set_out_units(out_units)
-        fig, axes = resp.plot_vg_vf(
-            fig=None, damp_axes=None, freq_axes=None, modes=None, plot_type='eas',
-            legend=True, xlim=None,
-            ylim_damping=None, ylim_freq=None,
-            damping_limit=None,
-            clear=False, close=False,
-            ncol=0, png_filename=None, show=False)
-        plt.show()
+        # fig, axes = resp.plot_vg_vf(
+        #     fig=None, damp_axes=None, freq_axes=None, modes=None, plot_type='eas',
+        #     legend=True, xlim=None,
+        #     ylim_damping=None, ylim_freq=None,
+        #     damping_limit=None,
+        #     clear=False, close=False,
+        #     ncol=0, png_filename=None, show=False)
+        # plt.show()
         return resp
 
     @classmethod
@@ -204,6 +207,10 @@ class FlutterResponse:
         """
         if in_units is None:
             in_units = get_flutter_units('english_in')
+
+        if cref == 1.0:
+            warnings.warn(f'cref = {cref}')
+
         b = cref / 2.0
         configuration = 'AEROSG2D'  # TODO: what is this?
         xysym = '???'
@@ -228,7 +235,6 @@ class FlutterResponse:
         freqs = fdata[:, :, 4]
         omegas = 2 * np.pi * freqs
         kfreqs = omegas * b / vels
-        # print(f'b = {b}')
         # print('omega:\n', omegas)
         # print('V:\n', vels)
         # print('kfreq:\n', kfreqs)
@@ -236,6 +242,13 @@ class FlutterResponse:
         # lambda = omega*(zeta + 1j)
         eigr = omegas * damps / 2
         eigc = omegas
+
+        izero = (freqs == 0.)
+        if izero.sum():
+            # Re = g * V / L * ln(2)
+            ln2 = np.log(2)
+            eigri = ln2 * damps[izero] * vels[izero] / cref
+            eigr[izero] = eigri
 
         one_over_kfreq = np.full(kfreqs.shape, np.nan, dtype=kfreqs.dtype)
         ikfreq = np.where(kfreqs != 0)
@@ -280,6 +293,7 @@ class FlutterResponse:
                  mach: float, density_ratio: float, method: str,
                  modes: list[int] | np.ndarray, results: Any,
                  in_units: None | str | dict[str, str]=None,
+                 out_units: None | str | dict[str, str]=None,
                  subtitle: str='', label: str='',
                  use_rhoref: bool | float=False,
                  make_alt: bool=True,
@@ -354,6 +368,8 @@ class FlutterResponse:
 
         assert eigr_eigi_velocity.ndim == 2, eigr_eigi_velocity
         assert eigr_eigi_velocity.shape[1] == 3, eigr_eigi_velocity
+
+        self.noffset = 10
         self.freq_ndigits = 1
         self.markevery = 0
         self.eigenvector = eigenvector
@@ -371,6 +387,7 @@ class FlutterResponse:
         self.subtitle = subtitle
         self.label = label
         self.configuration = configuration
+        assert isinstance(method, str), f'method={method!r}'
         if method == 'PK':
             self.mach = mach
             self.xysym = xysym
@@ -433,6 +450,13 @@ class FlutterResponse:
         else:  # pragma: no cover
             raise NotImplementedError(self.method)
 
+        self.results_in = results
+        self.results = self.results_in
+        if out_units is not None:
+            self.set_out_units(out_units)
+
+        # print(f'eigenvector = {self.eigenvector}')
+        # assert len(self.eigenvector), 'no eigenvectors'
         if len(self.eigenvector) > 1:
             # print(f'results.shape = {results.shape}')
             nmodes, nvelocity = results.shape[:2]
@@ -446,6 +470,17 @@ class FlutterResponse:
             if reshape_eigenvectors:
                 eigenvector, eigr_eigi_velocity = _reshape_eigenvectors(
                     self.eigenvector, self.eigr_eigi_velocity)
+
+                eigr = self.results[:, :, self.ieigr].copy()
+                eigi = self.results[:, :, self.ieigi].copy()
+                try:
+                    eigenvector, eigr_eigi_velocity = _sort_eigenvectors(
+                        self, eigenvector, eigr_eigi_velocity, eigr, eigi)
+                except (AssertionError, KeyError, RuntimeError):
+                    pass
+                # assert not np.array_equal(eigenvector, eigenvector2)
+                # assert not np.array_equal(eigr_eigi_velocity, eigr_eigi_velocity2)
+
                 self.eigenvector = eigenvector
                 self.eigr_eigi_velocity = eigr_eigi_velocity
                 assert len(self.eigenvector) and len(self.eigr_eigi_velocity), (len(self.eigenvector), len(self.eigr_eigi_velocity))
@@ -453,9 +488,6 @@ class FlutterResponse:
             assert eigr_eigi_velocity.ndim == 3, eigr_eigi_velocity
             assert eigr_eigi_velocity.shape[2] == 3, eigr_eigi_velocity
             nvelocity = results.shape
-
-        self.results_in = results
-        self.results = self.results_in
 
         # c - cyan
         # b - black
@@ -482,9 +514,10 @@ class FlutterResponse:
         self.nopoints = False
         self._symbols: list[str] = []
         self._colors: list[str] = []
-        self.generate_symbols()
-        self.set_symbol_settings()
-        self.set_font_settings(font_size=None)
+        if IS_MATPLOTLIB:
+            self.generate_symbols()
+            self.set_symbol_settings()
+            self.set_font_settings(font_size=None)
 
         self._xtick_major_locator_multiple = None
         self._ytick_major_locator_multiple = None
@@ -670,11 +703,25 @@ class FlutterResponse:
             imethod=1: loop over colors and then symbols
 
         """
-        # rgbkm - max of 35 combinations
-        # C0-10 - max of 70 combinations
+        # import matplotlib as mpl
+        # print(mpl.rcParams['image.cmap'])
+
+        cmap_name = 'tab10'
+        # cmap_name = 'tab20'
+        # cmap_name = 'tab20b'
+        # cmap_name = 'flag'
+        # cmap_name = 'black'
+        # cmap_name = 'viridis'
+        # cmap_name = 'jet'
+        setup_colormap(cmap_name, n=30)
+        colors_hex = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
         if colors is None:
             # colors = ['r', 'g', 'b', 'k', 'm']  # 5
-            colors = ['C0', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8', 'C9']  # 10
+            if len(colors_hex) > 0:
+                colors = [f'C{d}' for d in range(len(colors_hex))]
+            else:
+                colors = ['C0', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8', 'C9']  # 10
 
         if symbols is None:
             symbols = ['o', '*', 'x', 'v', '>', '<', '^']  # 7
@@ -739,6 +786,7 @@ class FlutterResponse:
                 freq_tol: float=-1.0,
                 freq_tol_remove: float=-1.0,
                 png_filename=None, show: bool=True,
+                bbox_to_anchor: Optional[tuple[float, float]]=None,
                 **legend_kwargs) -> tuple[plt.Figure, plt.Axes]:
         """
         Make a V-g plot
@@ -748,7 +796,7 @@ class FlutterResponse:
         ix, xlabel, xunit = self._plot_type_to_ix_xlabel(plot_type)
         ylabel = 'Structural Damping'
         iy = self.idamping
-        scatter = True
+        scatter = False  # velocity-scaled point size is only for the root locus
         fig, axes = self._plot_x_y(
             ix, iy, xlabel, ylabel, scatter,
             modes=modes, fig=fig, xlim=xlim, ylim=ylim_damping,
@@ -757,6 +805,7 @@ class FlutterResponse:
             freq_tol=freq_tol, freq_tol_remove=freq_tol_remove,
             v_lines=v_lines, plot_type=plot_type, xunit=xunit,
             png_filename=png_filename,
+            bbox_to_anchor=bbox_to_anchor,
             **legend_kwargs)
         return fig, axes
 
@@ -769,8 +818,7 @@ class FlutterResponse:
                               freq_round: int=2,
                               eas_round: int=3,
                               divergence_freq_tol: float=0.1,
-                              ) -> tuple[dict[npt.floating, dict[int, list[Crossing]]],
-                                         dict[npt.floating, dict[int, list[Crossing]]]]:
+                              ) -> tuple[VCrossingDict, VCrossingDict]:
         """
         Gets the flutter crossings
 
@@ -899,6 +947,7 @@ class FlutterResponse:
                         freq_tol: float=-1.0,
                         freq_tol_remove: float=-1.0,
                         png_filename=None,
+                        bbox_to_anchor: Optional[tuple[float, float]]=None,
                         **legend_kwargs) -> tuple[plt.Figure, plt.Axes]:
         """
         Plots a root locus
@@ -915,6 +964,19 @@ class FlutterResponse:
             the x plot limits
         eigi_lim : list[float/None, float/None]
             the y plot limits
+        freq_tol :  float; default=-1.0
+            set modes to gray/dashed with no points if they fall under the tolerance
+            -1.0: no filtering (default)
+            >0.0: filter is active
+        freq_tol_remove : float; default=-1.0
+            hide modes if they fall under the tolerance
+            a mode must be filtered by freq_tol for it to be hidden (i.e., freq_tol_remove <= freq_tol)
+            -1.0: no filtering (default)
+            >0.0: filter is active
+        ncol : int; default=0 -> auto
+            number of columns for the legend
+        bbox_to_anchor : tuple[float, float]; default=None -> (1.02, 1.)
+            legend location (same as plot_vg_vf)
         show : bool; default=True
             show the plot
         clear : bool; default=False
@@ -935,6 +997,8 @@ class FlutterResponse:
             1.0 - no transparency / opaque
             0.0 - fully transparent
 
+        The point size scales with velocity (over all plotted modes).
+
         """
         assert isinstance(freq_tol, float_types), freq_tol
         assert isinstance(freq_tol_remove, float_types), freq_tol_remove
@@ -952,6 +1016,7 @@ class FlutterResponse:
             show=show, clear=clear, close=close, legend=legend,
             freq_tol=freq_tol, freq_tol_remove=freq_tol_remove,
             png_filename=png_filename,
+            bbox_to_anchor=bbox_to_anchor,
             **legend_kwargs)
         return fig, axes
 
@@ -1017,10 +1082,22 @@ class FlutterResponse:
         legend_kwargs = get_legend_kwargs(self.font_size, legend_kwargs)
         if fig is None:
             fig = plt.figure()
-            axes = fig.add_subplot(111)
+            # ax1 = fig.add_subplot(2, 1, 1)                      # Left subplot  (2 row, 1 columns, index 1)
+            # ax2 = fig.add_subplot(2, 1, 2, projection='polar')  # Right subplot (2 row, 1 columns, index 2)
+            # gs = fig.add_gridspec(2, 1, height_ratios=[1, 0.7])
+            # ax1 = fig.add_subplot(gs[0])
+            # ax2 = fig.add_subplot(gs[1], projection='polar')
+        else:
+            fig.clear()
+            # ax1 = fig.add_subplot(2, 1, 1)                      # Left subplot  (2 row, 1 columns, index 1)
+            # ax2 = fig.add_subplot(2, 1, 2, projection='polar')  # Right subplot (2 row, 1 columns, index 2)
+        gs = fig.add_gridspec(2, 1, height_ratios=[1, 0.5])
+        ax1 = fig.add_subplot(gs[0])
+        ax2 = fig.add_subplot(gs[1], projection='polar')
 
-        xlabel = r'Eigenvalue (Real); $\omega \zeta$'
-        ylabel = r'Eigenvalue (Imaginary); $\omega$'
+
+        xlabel = r'Modal Participation (Real)'
+        ylabel = r'Modal Participation (Imaginary)'
         # ix = self.ieigr
         # iy = self.ieigi
         # scatter = True
@@ -1060,18 +1137,35 @@ class FlutterResponse:
         iomega = (omega != 0.0)
         damping_g[iomega] = 2 * omega_damping[iomega] / omega[iomega]
 
+        # standard eigenvalue (not flutter)
+        #
+        # For a complex eigenvalue λ = σ ± jω:
+        #   Natural frequency: ωₙ = |λ| = √(σ² + ω²)
+        #   Frequency in Hz: f = ωₙ / (2π)
+        #   Damping ratio: ζ = −σ / ωₙ
+        #   Damped frequency: ωd = ω (the imaginary part)
+        #
+        # eigenvalue = complex(-0.5, 10.0)  # example: σ + jω
+        # omega_n = abs(eigenvalue)  # natural frequency (rad/s)
+        # freq_hz = omega_n / (2 * np.pi)  # frequency (Hz)
+        # damping_ratio = -eigenvalue.real / omega_n  # ζ
+
         title = self._get_title(nlines=1)
         title += f'\nModal Participation Factors of Mode {mode}\n'
         title += rf'$\omega$={omega:.2f}; freq={freq:.2f} Hz; g={damping_g:.3g}'
-        if np.isfinite(velocityi):
-            title += f' V={velocityi:.1f}'
-        # print(title)
-        axes.set_title(title)  # , fontsize=self.font_size)
-        axes.grid(True)
-        axes.set_xlabel(xlabel)  # , fontsize=self.font_size)
-        axes.set_ylabel(ylabel)  # , fontsize=self.font_size)
 
-        _set_ticks(self, axes, 0)
+        eas_units = self.out_units['eas']
+        if np.isfinite(velocityi):
+            title += f' V={velocityi:.1f} ({eas_units})'
+        # print(title)
+        fig.suptitle(title)  # , fontsize=self.font_size)
+        ax1.grid(True)
+        ax2.grid(True)
+        ax1.set_xlabel(xlabel)  # , fontsize=self.font_size)
+        ax1.set_ylabel(ylabel)  # , fontsize=self.font_size)
+
+        # TODO: this was on...what does it do???
+        # _set_ticks(self, ax1, 0)
 
         # print(f'eigr_eigi_velocity:\n{self.eigr_eigi_velocity}')
         # print(f'eigenvector:\n{self.eigenvector}')
@@ -1087,6 +1181,8 @@ class FlutterResponse:
         # if abs_eigi == 0.0:
         #     abs_eigi = 1.0
         mag = np.sqrt(eigr**2 + eigi**2)
+        phase = np.arctan2(eigi, eigr)
+        isort = np.argsort(mag)[::-1]
         # print(f'eigr = {eigr}')
         # print(f'mag = {mag}')
 
@@ -1115,34 +1211,122 @@ class FlutterResponse:
         # reals = eigr / abs_eigr
         # imags = eigi / abs_eigi
 
-        reals = eigr / abs_eigr
-        imags = eigi / abs_eigi
-        # print(f'reals = {reals}')
+        real_sort = eigr[isort] / abs_eigr
+        imag_sort = eigi[isort] / abs_eigi
+        # print(f'real_sort = {real_sort}')
+
+        mag_sort = mag[isort]
+        phase_sort = phase[isort]
+        modes = modes[isort]
+        imodes = imodes[isort]
 
         symbols, colors = self._get_symbols_colors_from_modes(modes)
         jcolor = 0
+        line_text_mags = []
+        min_max_list = []
         for i, imodei, mode in zip(count(), imodes, modes):
             symbol = symbols[jcolor]
             color = colors[jcolor]
 
-            reali = reals[i]
-            imagi = imags[i]
-            magi = mag[i]
+            reali = real_sort[i]
+            imagi = imag_sort[i]
+            magi = mag_sort[i]
+            phasei = phase_sort[i]
             if magi < mag_tol:
                 continue
             text = str(mode)
             eig_str = f'{reali:.2g}+{imagi:.2g}j; A={magi:.2g}'.replace('+-', '-')
             label = f'Mode {mode:d}; {eig_str}'
             # print(label)
-            axes.scatter(reali, imagi, label=label, alpha=0.7)
             # print(f'{i}: {reali}, {imagi}, {text!r}')
-            axes.text(reali, imagi, text, ha='center', va='center')
+            ax1.scatter(reali, imagi, label=label, alpha=0.7)
+            text1 = ax1.text(reali, imagi, text, ha='center', va='center')
                       # fontsize=self.font_size)
+
+            ax2.plot([0, phasei], [0, magi], label=label, alpha=0.7)
+            ax2.scatter(magi, phasei, label=label, alpha=0.7)
+            text2 = ax2.text(phasei, magi, text, ha='center', va='center')  # (theta, r, text)
+            line_text_mags.append((text1, text2, magi))
+            min_max_list.append((reali, imagi))
+        min_max = np.array(min_max_list)
+        xmin = min_max[:, 0].min()
+        xmax = min_max[:, 0].max()
+        ymin = min_max[:, 1].min()
+        ymax = min_max[:, 1].max()
+        xmin = -0.5 if xmin > -0.5 else None
+        ymin = -0.5 if ymin > -0.5 else None
+        xmax = 0.5 if xmax < 0.5 else None
+        ymax = 0.5 if ymax < 0.5 else None
+
+        ax1.set_xlim(xmin, xmax)
+        ax1.set_ylim(ymin, ymax)
+
+
+        ax2.set_rlim(0, 1.1)
+
+        if 0:  # pragma: no cover
+            from matplotlib.widgets import TextBox
+            ax_box = fig.add_axes([0.7, 0.01, 0.1, 0.04])
+            text_box = TextBox(ax_box, 'Filter: ', initial='0')
+            def on_submit(text: str) -> float:
+                print('---------------')
+                print('on_submit')
+                try:
+                    filter_value = float(text)
+                except ValueError:
+                    filter_value = 0.
+                print(f'filter_value = {filter_value}')
+                is_visibles = []
+
+                print(f'nlines1 = {len(ax1.get_lines())}')
+                print(f'nlines2 = {len(ax2.get_lines())}')
+                for line in ax1.get_lines():
+                    reali = line.get_xdata()  # theta (radians)
+                    imagi = line.get_ydata()  # r (magnitude)
+                    mag = np.sqrt(reali**2 + imagi**2).max()
+                    is_visible = (mag > filter_value)
+                    line.set_visible(is_visible)
+                    is_visibles.append(is_visible)
+
+                nlines = len(ax2.get_lines())
+                print(f'is_visibles = {is_visibles}; nlines={nlines}')
+                for i, line in enumerate(ax2.get_lines()):
+                    xdata = line.get_xdata()  # theta (radians)
+                    ydata = line.get_ydata()  # r (magnitude)
+                    r = max(ydata)
+                    # print(f'r = {r}')
+                    is_visible = (r > filter_value)
+                    # is_visible = is_visibles[i]
+                    line.set_visible(is_visible)
+
+                for text1, text2, mag in line_text_mags:
+                    is_visible = (mag >= filter_value)
+                    text1.set_visible(is_visible)
+                    text2.set_visible(is_visible)
+
+                handles, labels = ax1.get_legend_handles_labels()
+                handles2 = []
+                labels2 = []
+                for is_visible, handle, label in zip(is_visibles, handles, labels):
+                    if not is_visible:
+                        continue
+                    handles.append(handle)
+                    labels.append(label)
+                ax1.legend(handles2, labels2)
+                fig.canvas.draw_idle()
+            text_box.on_submit(on_submit)
 
         if legend:
             # bbox_to_anchor=(1.125, 1.), ncol=ncol,
-            axes.legend(**legend_kwargs)
-
+            if 'bbox_to_anchor' not in legend_kwargs:
+                legend_kwargs['bbox_to_anchor'] = (1.02, 1)
+            if 'loc' not in legend_kwargs:
+                legend_kwargs['loc'] = 'upper left'
+            # if 'borderaxespad' not in legend_kwargs:
+            #     legend_kwargs['borderaxespad'] = 0
+            ax1.legend(**legend_kwargs)
+            # ax1.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize='x-small', borderaxespad=0)
+            fig.subplots_adjust(right=0.7)
         _show_save_clear_close(
             fig, show, png_filename, clear, close)
     # for imode1 in range(nmodes1):
@@ -1163,6 +1347,7 @@ class FlutterResponse:
                   freq_tol: float=-1.0,
                   freq_tol_remove: float=-1.0,
                   png_filename=None,
+                  bbox_to_anchor: Optional[tuple[float, float]]=None,
                   **legend_kwargs) -> tuple[plt.Figure, plt.Axes]:
         """
         builds the plot for:
@@ -1170,6 +1355,7 @@ class FlutterResponse:
          - root-locus
         """
         legend_elements = []
+        legend_handles = []  # what's in the legend
         self.fix()
         # print('plot_xy')
         legend_kwargs = get_legend_kwargs(self.font_size, legend_kwargs)
@@ -1182,17 +1368,29 @@ class FlutterResponse:
         # print(f'plot_xy: ncol   = {ncol}')
 
         if fig is None:
+            # leave room on the right for the legend (like plot_vg_vf)
             fig = plt.figure()
-            axes = fig.add_subplot(111)
+            gridspeci = gridspec.GridSpec(1, 4)
+            axes = fig.add_subplot(gridspeci[0, :3])
 
         symbols, colors = self._get_symbols_colors_from_modes(modes)
         linestyle = 'None' if self.noline else '-'
+
+        if scatter:
+            # root locus: the point size scales with velocity; the range is
+            # over all plotted modes, so the same velocity is the same size
+            vel_all = self.results[imodes, :, self.ivelocity]
+            vel_min = np.nanmin(vel_all)
+            vel_max = np.nanmax(vel_all)
 
         jcolor = 0
         # print('starting plot part; jcolor=0')
         for i, imode, mode in zip(count(), imodes, modes):
             symbol = symbols[jcolor]
             color = colors[jcolor]
+            eas = None
+            if hasattr(self, 'ieas'):
+                eas = self.results[imode, :, self.ieas].ravel()
             freq = self.results[imode, :, self.ifreq].ravel()
             damping = self.results[imode, :, self.idamping].ravel()
             if ix >= 0:
@@ -1201,9 +1399,13 @@ class FlutterResponse:
                 raise RuntimeError(f'ix={ix} is out of bounds')
             ys = self.results[imode, :, iy].ravel()
             # print('freq, xs, ys')
+
+            if len(freq) == 0:
+                # print('no points after remove_eas_range')
+                continue
             jcolor, color2, linestyle2, symbol2, texti, is_removedi = _increment_jcolor(
                 mode, jcolor, color, linestyle, symbol,
-                freq, damping, freq_tol=freq_tol, freq_tol_remove=freq_tol_remove,
+                eas, freq, damping, freq_tol=freq_tol, freq_tol_remove=freq_tol_remove,
                 show_mode_number=self.show_mode_number)
             if is_removedi:
                 continue
@@ -1213,11 +1415,21 @@ class FlutterResponse:
             iplot = np.where(freq != np.nan)
             # iplot = np.where(freq > 0.0)
             label = _get_mode_freq_label(mode, freq[0], freq_ndigits=self.freq_ndigits)
+            if linestyle2 != linestyle:
+                # filtered by freq_tol (gray/dashed); keep it out of the legend
+                label = '_nolegend_'
             # print(f'iplot={iplot}')
             assert len(xs[iplot]) > 0
+            # root locus: the line has no markers; the scatter below draws them
             line = axes.plot(xs[iplot], ys[iplot],
                              color=color2, marker=symbol2, label=label,
-                             linestyle=linestyle2, markersize=0)
+                             linestyle=linestyle2,
+                             markersize=0 if scatter else None)
+            if linestyle2 == linestyle:
+                # same legend entry as plot_vg_vf (_plot_two_axes): color + symbol
+                legend_handles.append(Line2D(
+                    [0], [0], color=color2, marker=symbol2,
+                    label=label, linestyle=linestyle2))
             legend_elements.append(line)
 
             if ivelocity and symbol2 and ivelocity < len(xs):
@@ -1229,18 +1441,19 @@ class FlutterResponse:
                 line = axes.scatter(xs[ivelocity], ys[ivelocity], **plot_kwargs)
                 legend_elements.append(line)
 
-            if scatter:
+            if scatter and symbol2:
                 # used for the root locus
-                # velocity increases driving an incrase in the point size
-                scatteri = np.linspace(.75, 50., len(xs))
-                # assert symbol[2] == '-', symbol
-                # axes.scatter(xs[iplot], ys[iplot], s=scatteri, color=symbol[0], marker=symbol[1])
-                line = axes.scatter(xs[iplot], ys[iplot], s=scatteri, color=color, marker=symbol2)
+                # velocity increases driving an increase in the point size
+                # a mode filtered by freq_tol has no symbol (gray dashed line only)
+                vel = self.results[imode, :, self.ivelocity].ravel()
+                scatteri = _velocity_to_point_size(vel[iplot], vel_min, vel_max)
+                line = axes.scatter(xs[iplot], ys[iplot], s=scatteri, color=color2, marker=symbol2)
                 legend_elements.append(line)
 
         legend_elementsi = _add_vertical_lines(
             [axes], v_lines, plot_type, xunit)
         legend_elements.extend(legend_elementsi)
+        legend_handles.extend(legend_elementsi)
 
         axes.grid(True)
         # axes.set_xlabel(xlabel  + '; _plot_x_y', fontsize=self.font_size)
@@ -1253,8 +1466,12 @@ class FlutterResponse:
         title = self._get_title(nlines=2)
         fig.suptitle(title)
         if legend:
-            # bbox_to_anchor=(1.125, 1.), ncol=ncol,
-            axes.legend(**legend_kwargs)
+            # same placement as plot_vg_vf: outside, to the right of the axes
+            if bbox_to_anchor is None:
+                bbox_to_anchor = (1.02, 1.)
+            legend_kwargs.setdefault('loc', 2)
+            axes.legend(handles=legend_handles, bbox_to_anchor=bbox_to_anchor,
+                        ncol=ncol, **legend_kwargs)
 
         _show_save_clear_close(
             fig, show, png_filename, clear, close)
@@ -1280,6 +1497,7 @@ class FlutterResponse:
                    freq_tol: float=-1.0,
                    freq_tol_remove: float=-1.0,
                    png_filename=None,
+                   bbox_to_anchor: Optional[tuple[float, float]]=None,
                    **legend_kwargs) -> tuple[plt.Figure,
                                              tuple[plt.Axes, plt.Axes]]:
         """
@@ -1329,17 +1547,25 @@ class FlutterResponse:
         legend_elements = []
         jcolor = 0
         for i, imode, mode in zip(count(), imodes, modes):
+            ioffset = jcolor % self.noffset
             symbol = symbols[jcolor]
             color = colors[jcolor]
 
             freq = self.results[imode, :, self.ifreq].ravel()
             damping = self.results[imode, :, self.idamping].ravel()
             xs = self.results[imode, :, ix].ravel()
+            eas = None
+            if hasattr(self, 'eas'):
+                eas = self.results[imode, :, self.ieas].ravel()
             y1s = self.results[imode, :, iy1].ravel()
             y2s = self.results[imode, :, iy2].ravel()
+
+            if len(freq) == 0:
+                # print('no points after remove_eas_range')
+                continue
             jcolor, color2, linestyle2, symbol2, texti, is_removedi = _increment_jcolor(
                 mode, jcolor, color, linestyle, symbol,
-                freq, damping, freq_tol=freq_tol, freq_tol_remove=freq_tol_remove,
+                eas, freq, damping, freq_tol=freq_tol, freq_tol_remove=freq_tol_remove,
                 show_mode_number=self.show_mode_number)
             if is_removedi:
                 continue
@@ -1374,17 +1600,21 @@ class FlutterResponse:
                 axes2.plot(xs[iplot], y2s[iplot], marker=symbol2,
                            color=color2, markersize=markersize, linestyle=linestyle2)
             else:
+                # same as plot_vg_vf: constant point size; freq_tol-filtered
+                # modes are gray/dashed (color2/linestyle2)
                 legend_elementsi = _plot_two_axes(
                     axes1, axes2,
                     xs[iplot], y1s[iplot], y2s[iplot],
-                    color, symbol2, linestyle, label, texti,
-                    self.markevery, markersize=markersize,
+                    color2, symbol2, linestyle2, label, texti, ioffset,
+                    self.markevery, markersize=None,
                 )
                 # axes1.plot(xs[iplot], y1s[iplot], marker=symbol2, label=label,
                 #            color=color2, markersize=markersize, linestyle=linestyle2)
                 # axes2.plot(xs[iplot], y2s[iplot], marker=symbol2,
                 #            color=color2, markersize=markersize, linestyle=linestyle2)
-            legend_elements.append(legend_element)
+            if linestyle2 == linestyle:
+                # filtered by freq_tol (gray/dashed) modes aren't in the legend
+                legend_elements.append(legend_element)
 
         axes1.grid(True)
         axes1.set_xlabel(xlabel)  # , fontsize=self.font_size)
@@ -1406,7 +1636,12 @@ class FlutterResponse:
             #         continue
             #     legend_kwargs[key] = value
 
-            axes1.legend(handles=legend_elements, **legend_kwargs)              # TODO: switch to figure...
+            # same placement as plot_vg_vf: outside, to the right of the axes
+            if bbox_to_anchor is None:
+                bbox_to_anchor = (1.02, 1.)
+            legend_kwargs.setdefault('loc', 2)
+            axes1.legend(handles=legend_elements, bbox_to_anchor=bbox_to_anchor,
+                         ncol=ncol, **legend_kwargs)
             # axes1.legend(handles=legend_elements, ncol=ncol, **legend_kwargs)  # TODO: switch to figure...
             # fig.legend(handles=legend_elements, ncol=ncol, **legend_kwargs)
 
@@ -1427,32 +1662,44 @@ class FlutterResponse:
                            png_filename=None,
                            damping_limit=None,
                            v_lines: list[LineData]=None,
+                           ncol: int=0,
+                           bbox_to_anchor: Optional[tuple[float, float]]=None,
                            **kwargs) -> tuple[plt.Figure,
                                               tuple[plt.Axes, plt.Axes]]:
         """
         Plots a kfreq vs. damping curve
 
         See ``plot_root_locus`` for arguments
+        ncol : int; default=0 -> auto
+            number of columns for the legend
+        bbox_to_anchor : tuple[float, float]; default=None -> (1.02, 1.)
+            legend location (same as plot_vg_vf)
         """
         assert damping_limit is None or isinstance(damping_limit, float_types), damping_limit
 
         ylabel1 = r'Structural Damping; $g = 2 \gamma $'
         ylabel2 = r'KFreq [rad]; $ \omega c / (2 V)$'
 
-        ix, xlabel, unused_xunit = self._plot_type_to_ix_xlabel(plot_type)
+        ix, xlabel, xunit = self._plot_type_to_ix_xlabel(plot_type)
         iy1 = self.idamping
         iy2 = self.ikfreq
-        scatter = True
+        scatter = False  # velocity-scaled point size is only for the root locus
         # print(f"plot_kfreq_damping; plot_type={plot_type}")
         fig, axes2 = self._plot_x_y2(
             ix, iy1, iy2, xlabel, ylabel1, ylabel2, scatter,
             modes=modes, fig=fig, axes1=damp_axes, axes2=freq_axes,
             xlim=xlim, ylim1=ylim_damping, ylim2=ylim_kfreq,
+            ncol=ncol,
             show=show, clear=clear, close=close,
             legend=legend,
             freq_tol=freq_tol, freq_tol_remove=freq_tol_remove,
             png_filename=png_filename,
+            bbox_to_anchor=bbox_to_anchor,
             **kwargs)
+
+        ax_damp, ax_kfreq = axes2
+        _add_damping_limit(plot_type, ax_damp, None, damping_limit)
+        _add_vertical_lines([ax_damp, ax_kfreq], v_lines, plot_type, xunit)
         return fig, axes2
 
     def plot_kfreq_damping2(self, modes=None,
@@ -1477,7 +1724,7 @@ class FlutterResponse:
         ix = self.ikfreq
         iy1 = self.idamping
         iy2 = self.ifreq
-        scatter = True
+        scatter = False  # velocity-scaled point size is only for the root locus
         fig, axes2 = self._plot_x_y2(
             ix, iy1, iy2, xlabel, ylabel1, ylabel2, scatter,
             modes=modes,
@@ -1597,33 +1844,32 @@ class FlutterResponse:
         """
         # print('plot_zimmerman')
         modes, imodes = _get_modes_imodes(self.modes, modes)
-        imodes = np.array([0, 1, 0, 1])
         nmodes = len(imodes)
         # print(f'nmodes = {nmodes}')
         if nmodes < 2:
             print(f'less than 2 modes specified; modes={modes}')
             return
 
-        if fig is None or 1:
+        # draw into the given fig (the GUI/report figure) instead of a new one
+        if fig is None:
             fig = plt.figure()  # figsize=(12,9), self.subcase
-            if nmodes == 2:
-                # print('nmodesA')
-                ax = fig.gca()
-                axes = np.array([[fig.gca()]])
-            else:
-                # print('nmodesB')
-                # print(nmodes, '*******')
-                fig, axes = plt.subplots(ncols=nmodes-1, nrows=nmodes-1)
-                # print(axes[0])
-                # print(axes[1])
-                # print(axes[2])
-                # print(axes[3])
-        # fig.clear()
+        if nmodes == 2 and axes is not None:
+            axes = np.array([[axes]])
+        else:
+            # 1 subplot per mode pair
+            fig.clear()
+            axes = fig.subplots(ncols=nmodes-1, nrows=nmodes-1, squeeze=False)
 
         ix, xlabel, xunit = self._plot_type_to_ix_xlabel(plot_type)
         ix = self.ieas
         xvalues = self.results[0, :, ix]
-        print(f'imodes = {imodes}')
+        print(f'zimmerman imodes={imodes}')
+
+        # lines/points like the other flutter plots, so the legend shows
+        # the line and symbol (F: 1st symbol, Fs: 2nd symbol)
+        symbols, colors = self._get_symbols_colors_from_modes(np.arange(2))
+        linestyle = 'None' if self.noline else '-'
+        markevery = None if self.markevery in {0, None} else self.markevery + 1
         for i, imodei, modei in zip(count(), imodes, modes):
             for j, jmodei, modej in zip(count(), imodes[i+1:], modes[i+1:]):
                 if modei == modej:
@@ -1634,8 +1880,10 @@ class FlutterResponse:
                 # print(axes)
                 print((i, j), (int(jmodei), int(jmodei)), f'shape={axes.shape}')
                 ax = axes[i, j]
-                ax.plot(xvalues, Fi, label=f'F({modei}, {modej})')
-                ax.plot(xvalues, Fsi, label=f'Fs({modei}, {modej})')
+                ax.plot(xvalues, Fi, label=f'F({modei}, {modej})',
+                        marker=symbols[0], linestyle=linestyle, markevery=markevery)
+                ax.plot(xvalues, Fsi, label=f'Fs({modei}, {modej})',
+                        marker=symbols[1], linestyle=linestyle, markevery=markevery)
 
         for ax in axes.ravel():
             ax.grid(True)
@@ -1650,7 +1898,7 @@ class FlutterResponse:
 
             title = self._get_title(nlines=1)
             title += f'\nModes: {modes[0]}, {modes[1]}'
-            plt.suptitle(title)
+            fig.suptitle(title)
 
         else:
             fig.suptitle('Zimmerman Flutter Margin Criterion')
@@ -1707,7 +1955,7 @@ class FlutterResponse:
                    damping_crossings: list[dict[float, float]]=None,
                    show_detailed_mode_info: bool=False,
                    divergence_legend_loc: str='best',
-                   flutter_bbox_to_anchor: Optional[tuple[float, float]]=None,
+                   bbox_to_anchor: Optional[tuple[float, float]]=None,
                    filter_damping: bool=False,
                    eas_range: Optional[tuple[float, float]]=None,
                    png_filename=None, show: bool=False,
@@ -1797,8 +2045,8 @@ class FlutterResponse:
         # print(f'filter_freq = {filter_freq}')
 
         ncol = 0 if ncol is None else ncol
-        if flutter_bbox_to_anchor is None:
-            flutter_bbox_to_anchor = (1.02, 1.)
+        if bbox_to_anchor is None:
+            bbox_to_anchor = (1.02, 1.)
         self._apply_mode_switch_method(mode_switch_method)
 
         # assert vl_limit is None or isinstance(vl_limit, float_types), vl_limit
@@ -1840,6 +2088,7 @@ class FlutterResponse:
         # print(f'modes={modes}')
         nmodes = 0
         for i, imode, mode in zip(count(), imodes, modes):
+            ioffset = jcolor % self.noffset
             # print(f'ith_mode = {i}, imode = {imode}, mode = {mode}')
             color = colors[jcolor]
             symbol = symbols[jcolor]
@@ -1866,9 +2115,12 @@ class FlutterResponse:
             if len(freq) == 0:
                 # print('no points after remove_eas_range')
                 continue
+            if len(freq_calc) == 0:
+                # print('no points after remove_eas_range')
+                continue
             jcolor, color, linestyle2, symbol2, texti, is_removedi = _increment_jcolor(
                 mode, jcolor, color, linestyle, symbol,
-                freq, damping, freq_tol=freq_tol, freq_tol_remove=freq_tol_remove,
+                vel_calc, freq_calc, damping_calc, freq_tol=freq_tol, freq_tol_remove=freq_tol_remove,
                 show_mode_number=self.show_mode_number)
             if is_removedi:
                 # print("removed?")
@@ -1914,10 +2166,12 @@ class FlutterResponse:
                 damp_axes, freq_axes,
                 vel, damping, freq,
                 color, symbol2, linestyle2,
-                label, texti,
+                label, texti, ioffset,
                 self.markevery,
                 markersize=None)
-            legend_elements_damp.extend(legend_elementsi)
+            if linestyle2 == linestyle:
+                # filtered by freq_tol (gray/dashed) modes aren't in the legend
+                legend_elements_damp.extend(legend_elementsi)
             if ivelocity and symbol2 and ivelocity < len(vel):
                 markersize = 10
                 plot_kwargs = {
@@ -1984,7 +2238,7 @@ class FlutterResponse:
                 damp_axes.legend(
                     handles=legend_elements_damp,
                     # bbox_to_anchor=(1.125, 1.), loc=2, ncol=ncol,  # OG
-                    bbox_to_anchor=flutter_bbox_to_anchor, loc=2, ncol=ncol,  # tighter gap for legend
+                    bbox_to_anchor=bbox_to_anchor, loc=2, ncol=ncol,  # tighter gap for legend
                     # fontsize=10,
                 )
             # damp_axes.legend(fontsize=10, bbox_to_anchor=(1.125, 1.), loc=2, ncol=ncol)
@@ -2082,8 +2336,8 @@ class FlutterResponse:
                         imodes: np.ndarray,
                         modes: np.ndarray,
                         imodes_crossing: np.ndarray,
-                        vl_vf_crossing_dict: dict[float, dict[int, list[Crossing]]],
-                        vd_crossing_dict: dict[float, dict[int, list[Crossing]]],
+                        vl_vf_crossing_dict: VCrossingDict,
+                        vd_crossing_dict: VCrossingDict,
                         colors: list[str],
                         symbols: list[str],
                         eas_max: Optional[float]=None,
@@ -2639,8 +2893,8 @@ class FlutterResponse:
     #     return vl_array3, vf_array3
 
     @staticmethod
-    def xcrossing_dict_to_VL_VF_VD(vl_vf_crossing_dict: dict[int, list[Crossing]],
-                                   vd_crossing_dict: dict[int, list[Crossing]],
+    def xcrossing_dict_to_VL_VF_VD(vl_vf_crossing_dict: VCrossingDict,
+                                   vd_crossing_dict: VCrossingDict,
                                    log: SimpleLogger,
                                    freq_target: float,
                                    vl_target: float,
@@ -2648,16 +2902,17 @@ class FlutterResponse:
                                    v_baseline: float=1000.,
                                    ) -> tuple[npt.floating, npt.floating,
                                               npt.floating, npt.floating,
-                                              npt.floating, npt.floating]:
+                                              npt.floating, npt.floating,
+                                              npt.floating, npt.floating, npt.floating]:
         """
         Parameters
         ----------
-        vl_vf_crossing_dict: dict[int, list[Crossing]]
+        vl_vf_crossing_dict: VCrossingDict
             mode_num: int
                 mode number
             Crossing: (damping, freq, vel)
                 3 floats
-        vd_crossing_dict: dict[int, list[Crossing]]
+        vd_crossing_dict: VCrossingDict
             mode_num: int
                 mode number
             Crossing: (damping, freq, vel)
@@ -2676,7 +2931,7 @@ class FlutterResponse:
         Returns
         -------
         vl : float
-            limit frequency (typically 0% crossing)
+            limit speed (typically 0% crossing)
         freql : float
             limit frequency
         vf : float
@@ -2687,6 +2942,12 @@ class FlutterResponse:
             divergence speed
         freqd : float
             divergence frequency
+        mode0 : int
+            critical mode number for VL
+        mode3 : int
+            critical mode number for VF
+        moded : int
+            critical mode number for VD
         """
         # print('mode\tdamping\tfreq\tvel')
         vd_array = _get_vd_array(
@@ -2697,9 +2958,10 @@ class FlutterResponse:
             v_baseline, log)
 
         # find minimum velocity in [mode, velocity, frequency] table
-        ivl = np.where(vl_array[:, 1] == vl_array[:, 1].min())[0]
-        ivf = np.where(vf_array[:, 1] == vf_array[:, 1].min())[0]
-        ivd = np.where(vd_array[:, 1] == vd_array[:, 1].min())[0]
+        # skip sentinel row (index 0) which has mode=-1
+        vl_real = vl_array[1:]
+        vf_real = vf_array[1:]
+        vd_real = vd_array[1:]
 
         # if the array is not empty, pull the lowest value
         vl = v_baseline
@@ -2708,17 +2970,20 @@ class FlutterResponse:
         freql = np.nan
         freqf = np.nan
         freqd = np.nan
-        if len(ivl):
-            ivl = ivl[0]
-            mode0, vl, freql = vl_array[ivl, :]  # limit
-        if len(ivf):
-            ivf = ivf[0]
-            mode3, vf, freqf = vf_array[ivf, :]  # flutter
-        if len(ivd):
-            ivd = ivd[0]
-            moded, vd, freqd = vd_array[ivd, :]  # divergence
+        mode0 = -1
+        mode3 = -1
+        moded = -1
+        if len(vl_real):
+            ivl = np.argmin(vl_real[:, 1])
+            mode0, vl, freql = vl_real[ivl, :]  # limit
+        if len(vf_real):
+            ivf = np.argmin(vf_real[:, 1])
+            mode3, vf, freqf = vf_real[ivf, :]  # flutter
+        if len(vd_real):
+            ivd = np.argmin(vd_real[:, 1])
+            moded, vd, freqd = vd_real[ivd, :]  # divergence
 
-        return vl, freql, vf, freqf, vd, freqd
+        return vl, freql, vf, freqf, vd, freqd, mode0, mode3, moded
 
 
 def _imodes(results_shape: tuple[int, int],
@@ -3008,7 +3273,17 @@ def _asarray(results: list[list[str]],
                     row2.append(row_entry2)
                 mode_result2.append(row2)
             results2.append(mode_result2)
-        results = np.array(results2, dtype='float64')
+        try:
+            results = np.array(results2, dtype='float64')
+        except ValueError:  # pragma: no cover
+            for imode, resi in enumerate(results2):
+                try:
+                    resi_array = np.array(resi, dtype='float64')
+                    # print(resi_array.shape)
+                except ValueError:
+                    # print(resi)
+                    raise RuntimeError(f'check your file for an incomplete download on mode={imode+1:d}')
+            raise
 
         if fix_kfreq:
             # inan = np.isnan(results[:, :, :])
@@ -3125,7 +3400,6 @@ def _update_ncol(nmodes: int, ncol: int=0,
     ncol = min(ncol, nmodes)
     return ncol
 
-
 def _symbols_colors_from_nlines(colors: list[str], symbols: list[str],
                                 nlines: int) -> tuple[list[str], list[str]]:
     """
@@ -3169,10 +3443,28 @@ def _get_mode_freq_label(mode: int, freq: float,
     return label
 
 
+def _velocity_to_point_size(vel: np.ndarray,
+                            vel_min: float, vel_max: float,
+                            size_min: float=0.75,
+                            size_max: float=50.) -> np.ndarray:
+    """
+    Linearly maps velocity to a scatter point size (area in points^2),
+    so vel_min -> size_min and vel_max -> size_max.
+    A constant velocity or NaN velocity gets the middle size.
+    """
+    size_mid = 0.5 * (size_min + size_max)
+    dvel = vel_max - vel_min
+    if not np.isfinite(dvel) or dvel <= 0.:
+        return np.full(vel.shape, size_mid)
+    sizes = size_min + (size_max - size_min) * (vel - vel_min) / dvel
+    sizes[~np.isfinite(sizes)] = size_mid
+    return sizes
+
+
 def _increment_jcolor(mode: int,
                       jcolor: int, color: str,
                       linestyle: str, symbol: str,
-                      freq: np.ndarray, damping: np.ndarray,
+                      eas: np.ndarray, freq: np.ndarray, damping: np.ndarray,
                       freq_tol: float=-1.0,
                       freq_tol_remove: float=-1.0,
                       show_mode_number: bool=False,
@@ -3211,7 +3503,8 @@ def _increment_jcolor(mode: int,
     assert isinstance(freq_tol_remove, float_types), freq_tol_remove
     is_filtered = False
     dfreq = freq.max() - freq.min()
-    if dfreq <= freq_tol and damping.max() < 0.:
+    #print(f'mode={mode:d} eas_range=[{eas.min():.3f},{eas.max():.3f}] freq_range=[{freq.min():.3f},{freq.max():.3f}] damping.max()={damping.max()} freq_tol={freq_tol}')
+    if dfreq <= freq_tol and damping.max() <= 0.:
         color = 'gray'
         is_filtered = True
         jcolor -= 1
@@ -3349,7 +3642,7 @@ def _get_min_damping(damping_crossings: dict[float, float]) -> float:
 def _plot_two_axes(damp_axes: plt.Axes, freq_axes: plt.Axes,
                    vel: np.ndarray, damping: np.ndarray, freq: np.ndarray,
                    color: str, symbol: str, linestyle: str,
-                   label: str, text: str,
+                   label: str, text: str, ioffset: int,
                    markevery: Optional[int]=None,
                    markersize=None) -> list[Line2D]:
     legend_element = Line2D([0], [0], color=color,
@@ -3380,7 +3673,7 @@ def _plot_two_axes(damp_axes: plt.Axes, freq_axes: plt.Axes,
             freq_axes.scatter(vel2, freq2, color=color, marker=symbol, s=markersize)
     if text:
         # annotate the mode number
-        for xi, y1i, y2i in zip(vel2, damping2, freq2):
+        for xi, y1i, y2i in zip(vel2[ioffset:], damping2[ioffset:], freq2[ioffset:]):
             damp_axes.text(xi, y1i, text, color=color, clip_on=True)
             freq_axes.text(xi, y2i, text, color=color, clip_on=True)
     return legend_elements
@@ -3432,7 +3725,13 @@ def _reshape_eigenvectors(eigenvectors: np.array,
     #         i += 1
 
     # was 1,2
-    eigenvectors3 = eigenvectors.reshape(nmodes1, nvel, nmodes).swapaxes(0, 1).swapaxes(1, 2)
+    try:
+        reshaped_eigenvectors = eigenvectors.reshape(nmodes1, nvel, nmodes)
+    except ValueError:
+        warnings.warn('cannot reshape eigenvectors; expected output shape of '
+                      f'(nmodes1={nmodes1}, nvel={nvel}, nmodes={nmodes}); got {eigenvectors.shape}')
+        raise
+    eigenvectors3 = reshaped_eigenvectors.swapaxes(0, 1).swapaxes(1, 2)
     eigr_eigi_vel3 = eigr_eigi_vel.reshape((nvel, nmodes, 3))
     # assert eigenvectors2.shape == eigenvectors3.shape, (eigenvectors2.shape, eigenvectors3.shape)
     #assert np.allclose(eigenvectors2, eigenvectors3)
@@ -3451,7 +3750,6 @@ def _reshape_eigenvectors(eigenvectors: np.array,
     # print(eigenvectors.shape)
     # mpf = eigenvectors[:, imode, ivel]
     # eig.scale(mpf)
-    # asdf
     return eigenvectors3, eigr_eigi_vel3
 
 
@@ -3665,7 +3963,7 @@ def _sort_vd_crossings_by_mode(vd_crossing_dict: dict[float, dict[int, list[Cros
     return vd_crossing_dict_modes_sort
 
 
-def _get_vd_array(vd_crossing_dict: dict[int, list[Crossing]],
+def _get_vd_array(vd_crossing_dict: VCrossingDict,
                   V_baseline: float, freq_target: float,
                   log: SimpleLogger) -> np.ndarray:
     vd_list = [(-1, V_baseline, np.nan)]
@@ -3683,16 +3981,48 @@ def _get_vd_array(vd_crossing_dict: dict[int, list[Crossing]],
     return vd_array
 
 
-def _get_vl_vf_array(vl_vf_crossing_dict: dict[float, list[Crossing]],
+def _get_vl_vf_array(vl_vf_crossing_dict: VCrossingDict,
                      VL_target: float, VF_target: float,
                      V_baseline: float,
                      log: SimpleLogger) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Converts the VCrossingDict into an array
+
+    Parameters
+    ----------
+    vl_vf_crossing_dict: dict[percent_damping, dict[mode, [(freq, velocity), ...]]
+        the flutter crossings
+    VL_target : float
+        definition of the 0% crossing
+    VF_target : float
+        definition of the 3% crossing
+    V_baseline : float
+        fake flutter speed for when there's no crossing
+    log : SimpleLogger
+        a logger
+
+    Returns
+    -------
+    v0_array :  (ncrossing_vl, 3) float ndarray
+        The 0% crossings
+        (-1, V_baseline, np.nan)  # null crossing
+        (10, 200.0,      30.2)    mode 10 crosses 0% at 200 KEAS and 30.2 Hz
+    v3_array : (ncrossing_vf, 3) float ndarray
+        The 3% crossings
+
+    """
     V0s = [(-1, V_baseline, np.nan)]
     V3s = [(-1, V_baseline, np.nan)]
     for damping_target, vl_vf_crossings in vl_vf_crossing_dict.items():
         if damping_target == 0.0:  # VL
             for mode, crossings in vl_vf_crossings.items():
-                # [(0.0, array([116., 686.01, 0., 0.]), array([118., 691., 0., 0.]), array([117., 686.007, 0., 0.]))]
+                # [(
+                #     0.0,
+                #     array([116., 686.01, 0., 0.]),
+                #     array([118., 691., 0., 0.]),
+                #     array([117., 686.007, 0., 0.]),
+                #  ),]
+                #
                 # iy, eas, damping, freq
                 for (damping, p1, p2, pmax) in crossings:
                     iy, vel, damping, freq = p1
@@ -3814,6 +4144,11 @@ def _get_divergence(self,
 
             if ifreq >= len(freqi):
                 continue
+
+            # Divergence requires g >= 0 (static instability).
+            # freq -> 0 with g < 0 is stable overdamped (supercritical damping).
+            if dampi[ifreq] < 0:
+                continue
             freq0 = freqi[ifreq]
             eas0 = easi[ifreq]
             # if imode == 17:
@@ -3896,3 +4231,349 @@ def get_damping_crossings(damping_required: float,
         damping_crossings[damping_limit] = damping_limit
     # print(f'damping_crossings, damping_required_tol = {damping_crossings}, {damping_required_tol}')
     return damping_crossings, damping_required_tol
+
+
+def _sort_eigenvectors(self,
+                       eigenvector, eigr_eigi_velocity,
+                       eigr, eigi):
+    """
+    eigenvectors/eigr_eigi_velocity is unsorted, which causes havoc when doing MPFs
+
+    Parameters
+    ----------
+    eigenvector : (nvel_request, nmodes, nmodes)
+        The modal participation factors
+        corresponding to the -1 velocities
+    eigr_eigi_velocity : (nvel_request, nmodes, 3)
+        the [eigr, eigi, velocity] table (velocity is nan for NX)
+        corresponding to the -1 velocities
+    eigr : (nmodes, nvel)
+        real eigenvalues for all points
+    eigi : (nmodes, nvel)
+        imag eigenvalues for all points
+    """
+    # return eigenvector, eigr_eigi_velocity
+    debug = False
+    eigenvectors_out = eigenvector.copy()
+    eigr_eigi_velocity_out = eigr_eigi_velocity.copy()
+    # eigenvector.shape       =(nvel_request, nmodes, nmodes)
+    # eigr_eigi_velocity.shape=(nvel_request, nmodes, 3)
+    # eigr.shape=(nmodes, nvel)
+
+    # eigenvector.shape       =(2, 81, 81)
+    # eigr_eigi_velocity.shape=(2, 81, 3)
+    # eigr.shape=(81, 201)
+
+    # eigenvector.shape       =(4, 40, 40)
+    # eigr_eigi_velocity.shape=(4, 40, 3)
+    # eigr.shape=(40, 7)
+
+    # mode "1" factors
+    # eigrs = eigrs_eigis[:, 0]
+    # for ivel in range(nvel):
+    #     log.warning(f'creating ivel={ivel}')
+    #     # (nmodes, nmodes) where each column is a complex mode shape
+    #     eigenvector = response.eigenvector[ivel, :nmodes_to_keep, :].T
+
+    nvel_request, nmodes = eigenvector.shape[:2] # (2, 81, 81)
+    # nmodes2 = nmodes * 2
+
+    if debug:
+        print(f'eigenvector.shape={eigenvector.shape}')
+        print(f'eigr_eigi_velocity.shape={eigr_eigi_velocity.shape}')
+
+        #self.results[imode, :, self.ieigr]
+        print(f'eigr.shape={eigr.shape}')
+
+        # print(f'eigr_eigi_velocity={eigr_eigi_velocity}')
+        # print(f'eigr={eigr}')
+        print(f'nmodes={nmodes}')
+
+    eigr_eigi = eigr_eigi_velocity[:, :, [0, 1]]
+    ivels_out, vels_out = _get_velocity_sort(
+        self, eigr_eigi_velocity,
+        eigr, eigi,
+        nvel_request, nmodes)
+
+    # velocities are identified now
+    #------------------------------------------------------------
+
+    debug = False
+    irow0 = 0
+    if debug:
+        print(f'vels_out (KEAS) = {vels_out}')
+        print('sort_the_modes')
+        print(f'ivels_out = {ivels_out}')
+
+    # sort the modes
+    for ivel_request, ivel0 in enumerate(ivels_out):
+        if debug:
+            print(f'ivel_request={ivel_request}; ivel0={ivel0}')
+            print(f'eigr.shape = {eigr.shape}')
+
+        eig_data = eigr_eigi[ivel_request, :, :]
+        if debug:
+            print(f'eig_data.shape = {eig_data.shape}')
+        # print(eigr.shape)  # (81, 201)
+        # eigr_vel = eigr[:, ivel0]
+        # eigi_vel = eigi[:, ivel0]
+
+        eigr_vel = self.results[:, ivel0, self.ieigr]
+        eigi_vel = self.results[:, ivel0, self.ieigi]
+        if debug:
+            print(f'eigr_vel = {eigr_vel}')
+
+        row_map = _get_modal_sort(
+            eigr_vel, eigi_vel,
+            eig_data, irow0, debug=False)
+
+        # print(f'row_map[{ivel_request}]:')
+        # for irow, imode_full in sorted(row_map.items()):
+        #     if irow != imode_full:
+        #         print(f' *{irow}: {imode_full}')
+        #     else:
+        #         print(f'  {irow}: {imode_full}')
+
+        # eigenvectors_array = np.column_stack(eigenvectors)
+        # eigenvector = response.eigenvector[ivel, :nmodes_to_keep, :].T
+
+        eigenvectors_in = eigenvector[ivel_request, :, :]
+        eigr_eigi_velocity_in = eigr_eigi_velocity[ivel_request, :, :]
+        if debug:
+            print(f'eigenvector.shape = {eigenvector.shape}')
+            print(f'eigenvectors_in.shape = {eigenvectors_in.shape}')
+            print(f'eigr_eigi_velocity.shape = {eigr_eigi_velocity.shape}')
+            print(f'eigr_eigi_velocity_in.shape = {eigr_eigi_velocity_in.shape}')
+            print('----------')
+        eigenvector_outi, eigr_eigi_velocity_outi = _post_eigenvectors(
+            eigenvectors_in, eigr_eigi_velocity_in, row_map)
+        eigenvectors_out[ivel_request, :, :] = eigenvector_outi
+        eigr_eigi_velocity_out[ivel_request, :, :] = eigr_eigi_velocity_outi
+        if debug:
+            print('back..')
+
+        irow = nmodes
+        irow0 += irow
+
+    # imodes: nmodes that trigger the eigr/eigi check
+        # counts_imode = Counter(imodes)
+        # print(f'counts_imode = {counts_imode}')
+
+    # print(f'eigrs:\n{eigr_eigi_velocity[:, :, 0]}')
+    # print(f'eigis:\n{eigr_eigi_velocity[:, :, 1]}')
+    # print(f'eigen_velocity:\n{eigr_eigi_velocity[:, :, 2]}')
+
+    # aaaa
+    return eigenvectors_out, eigr_eigi_velocity_out
+
+def _post_eigenvectors(eigenvectors_in: np.ndarray,
+                       eigr_eigi_velocity_in: np.ndarray,
+                       row_map: dict[int, int]) -> np.ndarray:
+    debug = False
+    if debug:
+        print(f'_post_eigenvectors: eigenvectors_in.shape = {eigenvectors_in.shape}')
+        print(f'_post_eigenvectors: eigr_eigi_velocity_in.shape = {eigr_eigi_velocity_in.shape}')
+
+    # eigenvector.shape       =(nvel_request, nmodes, nmodes)
+    # eigr_eigi_velocity.shape=(nvel_request, nmodes, 3)
+    # eigr.shape=(nmodes, nvel)
+    reverse_row_map = {value: key for key, value in row_map.items()}
+
+    assert eigenvectors_in.ndim == 2, eigenvectors_in.shape
+    nmodes_a, nmodes_b = eigenvectors_in.shape
+    assert nmodes_a == nmodes_b, (nmodes_a, nmodes_b)
+
+    # debugging to check that we produce the same result with the same sort
+    # should be false
+    is_same = False
+
+    eigenvector_out_list = []
+    eigr_eigi_velocity_out_list = []
+    for imode_in in range(nmodes_a):
+        imode_out = reverse_row_map[imode_in]
+        if is_same:
+            imode_out = imode_in
+        # eigenvector = response.eigenvector[ivel, :nmodes_to_keep, :].T
+        eigenvector_out = eigenvectors_in[:, imode_out]
+        eigr_eigi_velocityi = eigr_eigi_velocity_in[imode_out]
+        eigr_eigi_velocity_out_list.append(eigr_eigi_velocityi)
+        eigenvector_out_list.append(eigenvector_out)
+
+    eigenvector_out = np.column_stack(eigenvector_out_list)
+    eigr_eigi_velocity_out = np.array(eigr_eigi_velocity_out_list)
+    if is_same:
+        assert np.array_equal(eigenvectors_in, eigenvector_out)
+
+    assert eigenvector_out.shape == eigenvectors_in.shape, (eigenvector_out.shape, eigenvectors_in.shape)
+    assert eigr_eigi_velocity_out.shape == eigr_eigi_velocity_in.shape, (eigr_eigi_velocity_out.shape, eigr_eigi_velocity_in.shape)
+    return eigenvector_out, eigr_eigi_velocity_out
+
+
+def _get_velocity_sort(self,
+                       eigr_eigi_velocity,
+                       eigr, eigi,
+                       nvel_request: int,
+                       nmodes: int):
+    debug = False
+    nmodes2 = 2 * nmodes
+    eigr_eigi = eigr_eigi_velocity[:, :, [0, 1]]
+    eigen_velocity = eigr_eigi_velocity[:, :, 2]
+    nvel_requestb, nmodes_, two = eigr_eigi.shape
+    # print(eigr_eigi_velocity)
+    assert nvel_request == nvel_requestb
+    assert two == 2, two
+
+    irow_target = 10
+    irow0 = 0
+    ivels_out = []
+    vels_out = []
+    for ivel_request in range(nvel_request):
+        irow = 0
+        if debug:
+            print(f'ivel = {ivel_request}/{nvel_request}')
+            # print(f'  eigr_eigi_velocity={eigr_eigi_velocity[ivel, :, :]}')
+        imodes = []
+        ivels = []
+
+        # neigr = 2; eigr_eigi.shape=(2, 81, 2) eig_data.shape=(81, 2)
+        eig_data = eigr_eigi[ivel_request, :, :]
+        if debug:
+            print(f'  eigr_eigi.shape={eigr_eigi.shape} eig_data.shape={eig_data.shape}')
+        for irow, (eigri, eigii) in enumerate(eig_data):
+            ieigr_mode, ieigr_vel = np.where(eigr == eigri)
+            ieigi_mode, ieigi_vel = np.where(eigi == eigii)
+            imode = np.hstack([ieigr_mode, ieigi_mode]).flatten()
+            ivel = np.hstack([ieigr_vel, ieigi_vel]).flatten()
+            if debug:
+                if irow0+irow == irow_target:
+                    print('    ', irow0+irow, eigri, eigii, (imode, ivel))
+                # else:
+                #     print('    ', irow0 + irow, eigri, eigii)
+            # imodes.extend(imode.tolist())
+            ivels.extend(ivel.tolist())
+
+        # ivel: nmodes that trigger the eigr/eigi check
+        counts_ivel = Counter(ivels)
+
+        # nmodes2: 2*nmodes; we have eigr and eigi checks
+        # print(f'counts = {counts}')
+        # print(f'nmodes2 = {nmodes2}')
+        counts2_ivel = {key: value for key, value in counts_ivel.items() if value >= nmodes}
+        if debug:
+            print(f'  counts2_ivel = {counts2_ivel}')
+
+        if len(counts2_ivel) == 1:
+            pass
+        elif len(counts2_ivel) > 1:
+            counts2_ivel = {key: value for key, value in counts2_ivel.items() if value == nmodes2}
+            if debug:
+                print(f'  counts2_ivel = {counts2_ivel}')
+        else:
+            warnings.warn(f'  Invalid Velocity Sort (length != 1); counts2_ivel={counts2_ivel}; n={len(counts2_ivel)}')
+
+        assert len(counts2_ivel) == 1, counts2_ivel
+        ivel0 = list(counts2_ivel)[0]
+        # veli = results_velocity[0, ivel0]
+        veli = self.results[0, ivel0, self.ieas]
+        if debug:
+            print(f'  ivel_request={ivel_request} ivel0={ivel0}; veli (KEAS)={veli}')  #, {self.out_units}')
+            print(eigen_velocity.shape)  # (nvel_request, nmodes)
+        eigen_velocity[ivel_request, :] = veli
+        # print(counts)
+        # print(counts2)
+
+        # imodes_count = np.hstack()
+        # break
+        irow0 = irow
+        ivels_out.append(ivel0)
+        vels_out.append(veli)
+    return ivels_out, vels_out
+
+def _get_modal_sort(eigr_vel, eigi_vel,
+                    eig_data, irow0, debug=False):
+    # print(len(eigi_vel))
+    imodes = []
+    irow_map = {}
+    irow_map_bad = {}
+    for irow, (eigri, eigii) in enumerate(eig_data):
+        # print('    ', irow0 + irow, eigri, eigii)
+        deigr = np.abs(eigr_vel - eigri)
+        deigi = np.abs(eigi_vel - eigii)
+        ieigr_mode = np.where(deigr == deigr.min())
+        ieigi_mode = np.where(deigi == deigi.min())
+        imode = np.hstack([ieigr_mode, ieigi_mode]).flatten()
+        # ivel = np.hstack([ieigr_vel, ieigi_vel]).flatten()
+        # print('    ', irow0+irow, eigri, eigii)
+        # if irow0+irow == irow_target:
+        # print('    ', irow0+irow, eigri, eigii, imode)
+        # else:
+        #     print('    ', irow0 + irow, eigri, eigii)
+        # print('    ', irow0+irow, eigri, eigii, (imode, ivel))
+        imodes.extend(imode.tolist())
+        # ivels.extend(ivel.tolist())
+        if len(imode) == 2:
+            imode0 = int(imode[0])
+            if debug:
+                print('    ', irow0 + irow, eigri, eigii, [imode0])
+            irow_map[irow] = imode0
+        else:
+            irow_map_bad[irow] = imode
+            if debug:
+                print('    ', irow0 + irow, eigri, eigii, imode.tolist())
+    if debug:
+        print(f'irow_map = {irow_map}')
+        print(f'irow_map_bad = {irow_map_bad}')
+
+    imap_values = list(irow_map.values())
+    for irow, imode_full in irow_map_bad.items():
+        imode_filtered = [int(imode) for imode in imode_full if imode not in imap_values]
+        counts_imode = Counter(imode_filtered)
+        if debug:
+            print(f'irow={irow} imode_full={imode_full}')
+            print(f'  imode_filtered = {imode_filtered}')
+            print(f'  counts_imode = {counts_imode}')
+
+        for key, value in counts_imode.items():
+            if value == 2:
+                imode0 = key
+                irow_map[irow] = imode0
+                # print(f'  -> imode0 = {imode0}')
+                break
+        else:
+            raise RuntimeError('bad')
+    return irow_map
+
+def setup_colormap(cmap_name: str, n: int=30) -> None:
+    """
+    import matplotlib as mpl
+    # mpl.set_prop_cycle('color', plt.cm.tab20.colors)
+    # plt.rcParams['axes.prop_cycle'] = plt.cycler('color', ['black'])
+    # plt.rcParams['axes.prop_cycle'] = plt.cycler('color', plt.cm.viridis.colors)
+    plt.rcParams['axes.prop_cycle'] = plt.cycler('color', plt.cm.tab10.colors)  # default
+
+    # Get the cycle as a list of colors
+    cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    """
+    if cmap_name == 'black':
+        plt.rcParams['axes.prop_cycle'] = plt.cycler('color', [cmap_name])
+    else:
+        cmap = getattr(plt.cm, cmap_name)
+
+        # prevent viridis/flag from making 255 colors...
+        mode = 2 if cmap_name in ['viridis', 'flag'] else 1
+
+        if hasattr(cmap, 'colors') and mode == 1:
+            # tab10, tab20, tab20b
+            colors_list = cmap.colors
+            if cmap_name == 'tab20':
+                # cut out 15,16
+                colors_list = colors_list[:14] + colors_list[16:]
+
+            # plt.rcParams['axes.prop_cycle'] = plt.cycler('color', plt.cm.tab20.colors)
+            plt.rcParams['axes.prop_cycle'] = plt.cycler('color', colors_list)
+        else:
+            # viridis, flag
+            colors_list = cmap(np.linspace(0, 1, n))
+            # plt.rc('axes', prop_cycle=cycler(color=custom_colors))
+            plt.rcParams['axes.prop_cycle'] = plt.cycler('color', colors_list)
+

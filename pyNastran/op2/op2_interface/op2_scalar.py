@@ -43,6 +43,7 @@ Defines the sub-OP2 class.  This should never be called outside of the OP2 class
 import os
 from struct import Struct, unpack
 from collections import defaultdict
+import inspect
 from typing import Optional, Callable, Any
 
 from numpy import array
@@ -107,10 +108,10 @@ OES1C	OES	Modal Element Stress Table
 OES1X	OES	Modal Element Stress Table
 OSTR1C	OES	Modal Element Strain Table
 OSTR1X	OSTR	Modal Element Strain Table
-RAQCONS	OUG	Constraint mode MPC force table
+RAQCONS	OES	Constraint mode ply strain table
 RADCONS	OUG	Constraint mode displacement table
 RADEFFM	OUG	Effective inertia displacement table
-RAQEATC	OUG	Attachment mode  MPC force table
+RAQEATC	OES	Attachment mode ply strain table
 RADEATC	OUG	Attachment mode displacement table
 OUGV1	OUG	Eigenvector Table
 RAFCONS	OEF	Constraint mode element force table
@@ -365,7 +366,7 @@ SATK_STR_PARAMS1 = {
 STR_PARAMS_1 = SATK_STR_PARAMS1 | {
     b'PRTMAXIM',
     b'POSTEXT', b'PRTMAXIM', b'AUTOSPC', b'OGEOM', b'PRGPST',
-    b'RESVEC', b'RESVINER', b'ALTRED', b'OGPS', b'OIBULK', b'OMACHPR',
+    b'RESVEC', b'RESVINER', b'RVMASS', b'ALTRED', b'OGPS', b'OIBULK', b'OMACHPR',
     b'UNITSYS', b'F56', b'OUGCORD', b'OGEM', b'EXTSEOUT',
     b'CDIF', b'SUPAERO', b'RSCON', b'AUTOMPC', b'AUTOQSET', b'DBCCONV',
     b'AUTOSPRT', b'PBRPROP', b'OMID', b'HEATSTAT', b'SECOMB', b'ELEMITER',
@@ -750,14 +751,15 @@ class OP2_Scalar(OP2Common, FortranFormat):
             b'RADEATC': [reader_oug._read_oug1_3, reader_oug._read_oug_4, 'Displacement Equivalent Inertia Attachment mode'], # Displacement Equivalent Inertia Attachment mode (OUG)
 
             # broken - isat_launch_100hz.op2 - wrong numwide
-            # spc forces
-            b'RAQCONS': [reader_oqg._read_oqg1_3, reader_oqg._read_oqg_4, 'Constraint mode MPC force'], # Constraint mode MPC force table (OQG)
-            b'RAQEATC': [reader_oqg._read_oqg1_3, reader_oqg._read_oqg_4, 'Attachment mode MPC force'], # Attachment mode MPC force table (OQG)
+            # ply strains (per NX DMAP: Q = ply strains)
+            b'RAQCONS': [reader_oes._read_oes1_3, reader_oes._read_ostr1_4, 'Constraint mode ply strain'], # Constraint mode ply strain table (OES)
+            b'RAQEATC': [reader_oes._read_oes1_3, reader_oes._read_ostr1_4, 'Attachment mode ply strain'], # Attachment mode ply strain table (OES)
             #b'RAQCONS': [self._table_passer, self._table_passer], # temporary
             #b'RAQEATC': [self._table_passer, self._table_passer], # temporary
 
-            b'RAREATC': [reader_oqg._read_oqg1_3, reader_oqg._read_oqg_4, 'spc forces?'], # spc forces?
-            b'RARCONS': [reader_oqg._read_oqg1_3, reader_oqg._read_oqg_4, 'spc forces?'], # spc forces?
+            # reaction forces (SPC forces)
+            b'RAREATC': [reader_oqg._read_oqg1_3, reader_oqg._read_oqg_4, 'Reaction Force Equivalent Inertia Attachment mode'], # Reaction Force Attachment Mode (OQG)
+            b'RARCONS': [reader_oqg._read_oqg1_3, reader_oqg._read_oqg_4, 'Reaction Force Constraint Mode'], # Reaction Force Constraint Mode (OQG)
 
             # element forces
             b'RAFCONS': [reader_oef._read_oef1_3, reader_oef._read_oef1_4, 'Element Force Constraint Mode'], # Element Force Constraint Mode (OEF)
@@ -767,9 +769,9 @@ class OP2_Scalar(OP2Common, FortranFormat):
 
             # grid point forces
             b'RAGCONS': [reader_ogpf._read_ogpf1_3, reader_ogpf._read_ogpf1_4, 'Grid Point Force Constraint Mode'], # Grid Point Forces Constraint Mode (OGPFB)
-            b'RAGEATC': [reader_ogpf._read_ogpf1_3, reader_ogpf._read_ogpf1_4, 'Grid Point Force Equivalent Inertia Attachment mode'], # Grid Point Forces Equivalent Inertia Attachment mode (OEF)
+            b'RAGEATC': [reader_ogpf._read_ogpf1_3, reader_ogpf._read_ogpf1_4, 'Grid Point Force Equivalent Inertia Attachment mode'], # Grid Point Forces Equivalent Inertia Attachment mode (OGPFB)
             #b'RAGCONS': [self._table_passer, self._table_passer], # Grid Point Forces Constraint Mode (OGPFB)
-            #b'RAGEATC': [self._table_passer, self._table_passer], # Grid Point Forces Equivalent Inertia Attachment mode (OEF)
+            #b'RAGEATC': [self._table_passer, self._table_passer], # Grid Point Forces Equivalent Inertia Attachment mode (OGPFB)
 
             # stress
             b'RAPCONS': [reader_oes._read_oes1_3, reader_oes._read_oes1_4, 'Constraint mode ply stress'], # Constraint mode ply stress table (OES)
@@ -818,6 +820,7 @@ class OP2_Scalar(OP2Common, FortranFormat):
             b'OEFITSTN' : [reader_oef._read_oef1_3, reader_oef._read_oef1_4, 'failure indices strain????'],
             b'OEFIT' : [reader_oef._read_oef1_3, reader_oef._read_oef1_4, 'failure indices'],  # failure indices
             b'OEF1X' : [reader_oef._read_oef1_3, reader_oef._read_oef1_4, 'element force at intermediate stations'],  # element forces at intermediate stations
+            b'OEF1XMC' : [reader_oef._read_oef1_3, reader_oef._read_oef1_4, 'element force at intermediate stations'],  # XMC variant of OEF1X; format-identical
             b'OEF1'  : [reader_oef._read_oef1_3, reader_oef._read_oef1_4, 'element force/heat flux'],  # element forces or heat flux
             b'HOEF1' : [reader_oef._read_oef1_3, reader_oef._read_oef1_4, 'element heat flux'],  # element heat flux
 
@@ -872,6 +875,7 @@ class OP2_Scalar(OP2Common, FortranFormat):
             b'OES1X1' : [reader_oes._read_oes1_3, reader_oes._read_oes1_4, 'linear/nonlinear stress'], # stress - nonlinear elements
             b'OES1'   : [reader_oes._read_oes1_3, reader_oes._read_oes1_4, 'linear stress'], # stress - linear only
             b'OES1X'  : [reader_oes._read_oes1_3, reader_oes._read_oes1_4, 'linear stress'], # element stresses at intermediate stations & nonlinear stresses
+            b'OES1XMC'  : [reader_oes._read_oes1_3, reader_oes._read_oes1_4, 'linear stress'], # XMC variant of OES1X; format-identical
             b'OES1C'  : [reader_oes._read_oes1_3, reader_oes._read_oes1_4, 'composite stress'], # stress - composite
             b'OESCP'  : [reader_oes._read_oes1_3, reader_oes._read_oes1_4, 'nonlinear? stress'], # stress - nonlinear???
             b'OESRT'  : [reader_oes._read_oes1_3, reader_oes._read_oes1_4, 'ply strength ratio'], # ply strength ratio
@@ -880,6 +884,7 @@ class OP2_Scalar(OP2Common, FortranFormat):
             # strain
             b'OSTR1' : [reader_oes._read_oes1_3, reader_oes._read_ostr1_4, 'linear strain'],  # strain - autodesk/9zk6b5uuo.op2
             b'OSTR1X'  : [reader_oes._read_oes1_3, reader_oes._read_ostr1_4, 'isotropic linear strain'],  # strain - isotropic
+            b'OSTR1XMC'  : [reader_oes._read_oes1_3, reader_oes._read_ostr1_4, 'isotropic linear strain'],  # XMC variant of OSTR1X; format-identical
             b'OSTR1C'  : [reader_oes._read_oes1_3, reader_oes._read_ostr1_4, 'composite strain'],  # strain - composite
             b'OESTRCP' : [reader_oes._read_oes1_3, reader_oes._read_ostr1_4, 'composite ply strain'],  # strain - composite ply
 
@@ -1248,8 +1253,10 @@ class OP2_Scalar(OP2Common, FortranFormat):
             b'OUGATO2' : [reader_oug._read_oug2_3, reader_oug._read_oug_ato, 'g-set auto-correlation for U'],
             b'OUGCRM2' : [reader_oug._read_oug2_3, reader_oug._read_oug_crm, 'g-set cumulative RMS for U'],
             b'OUGPSD2' : [reader_oug._read_oug2_3, reader_oug._read_oug_psd, 'g-set PSD for U'],
-            b'OUGRMS2' : [self._table_passer, self._table_passer, 'g-set RMS for U'],  # buggy on isat random
-            b'OUGNO2'  : [self._table_passer, self._table_passer, 'g-set number of crossings for U'],  # buggy on isat random
+            # *RMS2/*NO2 tables are actually SORT1 (all nodes in 1 record, nid*10+device),
+            # so use the SORT1 table3 parser; the SORT2 one treats the nid as dt
+            b'OUGRMS2' : [reader_oug._read_oug1_3, reader_oug._read_oug_rms, 'g-set RMS for U'],
+            b'OUGNO2'  : [reader_oug._read_oug1_3, reader_oug._read_oug_no, 'g-set number of crossings for U'],
             #b'OUGRMS2' : [reader_oug._read_oug2_3, reader_oug._read_oug_rms],  # buggy on isat random
             #b'OUGNO2'  : [reader_oug._read_oug2_3, reader_oug._read_oug_no],  # buggy on isat random
 
@@ -1310,8 +1317,9 @@ class OP2_Scalar(OP2Common, FortranFormat):
             b'OQGATO2' : [reader_oqg._read_oqg2_3, reader_oqg._read_oqg_4, 'g-set auto-correlation for spc/mpc force'],
             b'OQGCRM2' : [reader_oqg._read_oqg2_3, reader_oqg._read_oqg_4, 'g-set cumulative RMS for spc/mpc force'],
             b'OQGPSD2' : [reader_oqg._read_oqg2_3, reader_oqg._read_oqg_4, 'g-set PSD for spc/mpc force'],
-            b'OQGRMS2' : [self._table_passer, self._table_passer, 'g-set RMS for spc/mpc force'],  # buggy on isat random
-            b'OQGNO2'  : [self._table_passer, self._table_passer, 'g-set number of crossings for spc/mpc force'],  # buggy on isat random
+            # *RMS2/*NO2 are actually SORT1 (see OUGRMS2)
+            b'OQGRMS2' : [reader_oqg._read_oqg1_3, reader_oqg._read_oqg_4, 'g-set RMS for spc/mpc force'],
+            b'OQGNO2'  : [reader_oqg._read_oqg1_3, reader_oqg._read_oqg_4, 'g-set number of crossings for spc/mpc force'],
             #b'OQGRMS2' : [reader_oqg._read_oqg2_3, reader_oqg._read_oqg_4, 'g-set RMS for spc/mpc force'],  # buggy on isat random
             #b'OQGNO2'  : [reader_oqg._read_oqg2_3, reader_oqg._read_oqg_4, 'g-set number of crossings for spc/mpc force'],  # buggy on isat random
 
@@ -1329,8 +1337,9 @@ class OP2_Scalar(OP2Common, FortranFormat):
             b'OQMATO2' : [reader_oqg._read_oqg2_3, reader_oqg._read_oqg_mpc_ato, 'g-set auto-correlation for mpc force'],
             b'OQMCRM2' : [reader_oqg._read_oqg2_3, reader_oqg._read_oqg_mpc_crm, 'g-set cumulative RMS for mpc force'],
             b'OQMPSD2' : [reader_oqg._read_oqg2_3, reader_oqg._read_oqg_mpc_psd, 'g-set PSD for mpc force'],
-            b'OQMRMS2' : [self._table_passer, self._table_passer, 'g-set RMS for mpc force'],  # buggy on isat random
-            b'OQMNO2'  : [self._table_passer, self._table_passer, 'g-set number of crossings for mpc force'],  # buggy on isat random
+            # *RMS2/*NO2 are actually SORT1 (see OUGRMS2)
+            b'OQMRMS2' : [reader_oqg._read_oqg1_3, reader_oqg._read_oqg_mpc_rms, 'g-set RMS for mpc force'],
+            b'OQMNO2'  : [reader_oqg._read_oqg1_3, reader_oqg._read_oqg_mpc_no, 'g-set number of crossings for mpc force'],
             #b'OQMRMS2' : [reader_oqg._read_oqg2_3, reader_oqg._read_oqg_mpc_rms, 'g-set RMS for mpc force'],  # buggy on isat random
             #b'OQMNO2'  : [reader_oqg._read_oqg2_3, reader_oqg._read_oqg_mpc_no, 'g-set number of crossings for mpc force'],  # buggy on isat random
 
@@ -1367,8 +1376,9 @@ class OP2_Scalar(OP2Common, FortranFormat):
             b'OESPSD2' : [reader_oes._read_oes2_3, reader_oes._read_oes2_4, 'PSD for stress'],
             #b'OESRMS2' : [reader_oes._read_oes1_3, reader_oes._read_oes1_4, 'RMS for stress'],  # buggy on isat random
             #b'OESNO2'  : [reader_oes._read_oes1_3, reader_oes._read_oes1_4, 'number of crossings for stress'],  # buggy on isat random
-            b'OESRMS2' : [self._table_passer, self._table_passer, 'RMS for stress'],  # buggy on isat random
-            b'OESNO2'  : [self._table_passer, self._table_passer, 'number of crossings for stress'],  # buggy on isat random
+            # *RMS2/*NO2 are actually SORT1 (see OUGRMS2)
+            b'OESRMS2' : [reader_oes._read_oes1_3, reader_oes._read_oes1_4, 'RMS for stress'],
+            b'OESNO2'  : [reader_oes._read_oes1_3, reader_oes._read_oes1_4, 'number of crossings for stress'],
 
             b'OESPSD2C' : [reader_oes._read_oes2_3, reader_oes._read_oes2_4, 'PSD for composite stress'],  # isat_random (nx)
             b'OSTPSD2C' : [reader_oes._read_oes2_3, reader_oes._read_ostr2_4, 'PSD for composite strain'], # isat_random (nx)
@@ -1384,8 +1394,9 @@ class OP2_Scalar(OP2Common, FortranFormat):
             b'OSTRATO2' : [reader_oes._read_oes2_3, reader_oes._read_ostr2_4, 'auto-correlation for strain'],
             b'OSTRCRM2' : [reader_oes._read_oes2_3, reader_oes._read_ostr2_4, 'cumulative RMS for strain'],
             b'OSTRPSD2' : [reader_oes._read_oes2_3, reader_oes._read_ostr2_4, 'PSD for composite strain'],
-            b'OSTRRMS2' : [self._table_passer, self._table_passer, 'RMS for composite strain'], # buggy on isat random
-            b'OSTRNO2' : [self._table_passer, self._table_passer, 'number of crossings for strain'],  # buggy on isat random
+            # *RMS2/*NO2 are actually SORT1 (see OUGRMS2)
+            b'OSTRRMS2' : [reader_oes._read_oes1_3, reader_oes._read_ostr1_4, 'RMS for strain'],
+            b'OSTRNO2' : [reader_oes._read_oes1_3, reader_oes._read_ostr1_4, 'number of crossings for strain'],
             #b'OSTRRMS2' : [reader_oes._read_oes2_3, reader_oes._read_ostr2_4, 'RMS for composite strain'], # buggy on isat random
             #b'OSTRNO2' : [reader_oes._read_oes2_3, reader_oes._read_ostr2_4, 'number of crossings for strain'],  # buggy on isat random
 
@@ -1402,15 +1413,16 @@ class OP2_Scalar(OP2Common, FortranFormat):
             b'OEFATO2' : [reader_oef._read_oef2_3, reader_oef._read_oef2_4, 'auto-correlation for element force'],
             b'OEFCRM2' : [reader_oef._read_oef2_3, reader_oef._read_oef2_4, 'cumulative RMS for element force'],
             b'OEFPSD2' : [reader_oef._read_oef2_3, reader_oef._read_oef2_4, 'PSD for composite element force'],
-            b'OEFRMS2' : [self._table_passer, self._table_passer, 'RMS for element force'], # buggy on isat random
-            b'OEFNO2'  : [self._table_passer, self._table_passer, 'number of crossings for element force'],
+            # *RMS2/*NO2 are actually SORT1 (see OUGRMS2)
+            b'OEFRMS2' : [reader_oef._read_oef1_3, reader_oef._read_oef1_4, 'RMS for element force'],
+            b'OEFNO2'  : [reader_oef._read_oef1_3, reader_oef._read_oef1_4, 'number of crossings for element force'],
             #b'OEFRMS2' : [reader_oef._read_oef2_3, reader_oef._read_oef2_4, 'number of crossings for element force'], # buggy on isat random
         }
 
         table_mapper.update(table_mapper_geometry)
         table_mapper.update(table_mapper_random)
         table_mapper.update(satk_tables)
-        if self.is_nx and 0:  # pragma: no cover
+        if 0 and self.is_nx:  # pragma: no cover
             _table_mapper = {
                 #b'OUGRMS2' : [self._table_passer, self._table_passer],  # buggy on isat random
                 #b'OUGNO2'  : [self._table_passer, self._table_passer],  # buggy on isat random
@@ -1684,6 +1696,7 @@ class OP2_Scalar(OP2Common, FortranFormat):
             flag_data = data[(i+2)*xword:(i+3)*xword]
             flag = structi.unpack(flag_data)[0]
 
+            # -----------------------------
             # =1
             # 4 INT     I* =2
             # 4 REAL    RS* =3
@@ -1704,19 +1717,21 @@ class OP2_Scalar(OP2Common, FortranFormat):
             # =5 4 CMPLXS  CS*
             # =6 4 CMPLXD  CD
             # =7 4 LOGICAL LOGIC*
+            # -----------------------------
+
+            # Each entry is: name (2 words), flag (1 word), value
+            #   flag=1 int        1 word   -> 4 words total
+            #   flag=2 float      1 word   -> 4 words total
+            #   flag=3 8 bytes    2 words  -> 5 words total
+            #          either text ('YES     ', 'MN-MM   ') or a double
+            #          (e.g., K6ROT=100., WTMASS=.002588); the flag doesn't
+            #          say which, so we check if the bytes look like text
+            #   flag=5 2 floats   2 words  -> 5 words total (e.g., G123)
+            #   flag=7 logical    1 word   -> 4 words total
 
             if debug_param:  # pragma: no cover
                 print(f'word={word!r} flag={flag}')
-            #word = s8.unpack(word)[0]#.decode(self._encoding)
 
-            #if flag == 1:
-                #flag_str = 'int'
-            #elif flag == 2:
-                #flag_str = 'float'
-            #elif flag == 3:
-                #flag_str = 'str'
-
-            # the first two entries are typically trash, then we can get values
             if flag == 1:  # int
                 #self.show_data(data[i*xword:(i+4)*xword], types='isq', endian=None, force=False)
                 assert self.size in [4, 8], (key, self.size, flag)
@@ -1735,10 +1750,8 @@ class OP2_Scalar(OP2Common, FortranFormat):
                 #assert word in FLOAT_PARAMS_1, f'word={word}'
                 i += 4
 
-            elif flag == 3:  # float / string
+            elif flag == 3:  # 8 bytes: string or double
                 assert self.size in [4, 8], (key, self.size, flag)
-                #slot = data[(i+3)*xword:(i+4)*xword]
-                #i += 4
                 slot = data[(i+3)*xword:(i+5)*xword]
                 try:
                     bvalue, = structs8.unpack(slot)
@@ -1761,7 +1774,14 @@ class OP2_Scalar(OP2Common, FortranFormat):
                         else:
                             assert value.isalnum(), f'{key} = {value!r}'
                 except AssertionError:
-                    value, = structf.unpack(slot[4:])
+                    # not text, so it's a double (all 8 bytes);
+                    # e.g., PARAM,K6ROT,100. -> 00 00 00 00 00 00 59 40
+                    if self.size != 4:
+                        # no 64-bit examples of this yet
+                        raise NotImplementedError(
+                            f'PARAM {key} flag=3 numeric value for size={self.size}; '
+                            f'slot={slot!r}')
+                    value, = Struct(self._endian + b'd').unpack(slot)
                 values = [value]
 
                 if isinstance(value, str):
@@ -1933,8 +1953,8 @@ class OP2_Scalar(OP2Common, FortranFormat):
             self._setup_filenames(op2_filename, force=True)
             if not is_binary_file(op2_filename):
                 if os.path.getsize(op2_filename) == 0:
-                    raise IOError(f'op2_filename={op2_filename!r} is empty.')
-                raise IOError(f'op2_filename={op2_filename!r} is not a binary OP2.')
+                    raise IOError(f'op2_filename={str(op2_filename)!r} is empty.')
+                raise IOError(f'op2_filename={str(op2_filename)!r} is not a binary OP2.')
 
         self._create_binary_debug()
         self._setup_op2()
@@ -2056,6 +2076,7 @@ class OP2_Scalar(OP2Common, FortranFormat):
             self._endian = None
             #: the endian in unicode
             self._uendian = None
+            # self.show_ndata(10000, types='ifs', endian='<')
             flag_data = self.f.read(20)
             self.f.seek(0)
 
@@ -2115,6 +2136,15 @@ class OP2_Scalar(OP2Common, FortranFormat):
 
         op2_reader = self.op2_reader
         self.table_count = defaultdict(int)
+        #if table_name.startswith(b'PVT'):
+        #     self.log.warning(f'{table_name} tell={self.n}')
+        #     ia = self.n
+        #else:
+        #    self.log.warning(f'{table_name} tell={self.n}')
+        #    bbb
+        #
+        #     op2_reader.show(700-12, types='ifs')
+        #     asdf
         while table_name is not None:
             self.table_count[table_name] += 1
             table_names.append(table_name)
@@ -2200,8 +2230,19 @@ class OP2_Scalar(OP2Common, FortranFormat):
 
             table_name = op2_reader._read_table_name(last_table_name=table_name,
                                                      rewind=True, stop_on_failure=False)
+            #
+            # if table_name is not None and table_name.startswith(b'PVT'):
+            #      self.log.warning(f'{table_name} tell={self.n}')
+            #      ia = self.n
+            # else:
+            #     self.log.warning(f'{table_name} tell={self.n}')
+            #     ib = self.n
+                # ndata = ib - ia
+                # op2_reader._goto(ia)
+                # self.show(ndata)
+                # eee
 
-    def set_additional_generalized_tables_to_read(self, tables: dict[bytes, Any]) -> None:
+    def set_additional_generalized_tables_to_read(self, tables: dict[bytes, Callable]) -> None:
         """
         Adds methods to call a generalized table.
         Everything is left to the user.
@@ -2223,6 +2264,10 @@ class OP2_Scalar(OP2Common, FortranFormat):
         """
         assert isinstance(tables, dict), tables
         self._update_generalized_tables(tables)
+
+        for key, func in tables.items():
+            assert isinstance(key, bytes), key
+            assert inspect.isfunction(func), f'{key!r}: {func} must be a function'
         self.generalized_tables = tables
 
     def set_additional_result_tables_to_read(
@@ -2266,7 +2311,7 @@ class OP2_Scalar(OP2Common, FortranFormat):
         assert hasattr(self, '_get_table_mapper'), 'missing _get_table_mapper'
         self._get_table_mapper = func
 
-    def _update_generalized_tables(self, tables: dict[bytes, Any]) -> None:
+    def _update_generalized_tables(self, tables: dict[bytes, Callable]) -> None:
         """
         helper function for:
          - set_additional_generalized_tables_to_read

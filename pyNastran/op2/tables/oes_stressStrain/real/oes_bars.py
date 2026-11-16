@@ -1,13 +1,17 @@
+import copy
 from typing import TextIO, Optional
+
 import numpy as np
 from numpy import zeros, searchsorted, ravel
 
 from pyNastran.utils.numpy_utils import integer_types, integer_float_types
+from pyNastran.utils.mathematics import get_abs_max
+
 from pyNastran.op2.result_objects.op2_objects import (
     get_times_dtype, combination_inplace)
 from pyNastran.op2.result_objects.utils_pandas import build_dataframe_transient_header, build_pandas_transient_elements
 from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import (
-    StressObject, StrainObject, OES_Object, oes_real_data_code,
+    StressObject, StrainObject, OES_Object, oes_real_data_code, slice_eids_by_index,
     set_element_case, set_static_case, set_modal_case,
     set_transient_case, set_post_buckling_case,
 )
@@ -15,6 +19,8 @@ from pyNastran.f06.f06_formatting import (
     write_floats_13e, write_floats_13e_long, _eigenvalue_header)
 from pyNastran.op2.op2_interface.write_utils import (
     to_column_bytes, view_dtype, view_idtype_as_fdtype)
+from pyNastran.op2.writer.utils import op2_stringify
+
 
 ELEMENT_NAME_TO_ELEMENT_TYPE = {
     'CBAR' : 34,
@@ -42,6 +48,45 @@ class RealBarArray(OES_Object):
             #self.add = self.add_sort2
             #self.add_new_eid = self.add_new_eid_sort2
             #self.addNewNode = self.addNewNodeSort2
+
+    def h5_table_dict(self) -> dict:
+        from tables import Int64Col, Float64Col
+        h5_table_dict = {
+            'EID': Int64Col(pos=0),
+            'SD': Float64Col(pos=1),
+            'XC': Float64Col(pos=2),
+            'XD': Float64Col(pos=3),
+            'XE': Float64Col(pos=4),
+            'XF': Float64Col(pos=5),
+            'AX': Float64Col(pos=6),
+            'MAX': Float64Col(pos=7),
+            'MIN': Float64Col(pos=8),
+            'MS': Float64Col(pos=9),
+            'DOMAIN_ID': Int64Col(pos=10),
+        }
+        return h5_table_dict
+
+    def add_to_h5_array(self, arr,
+                        ntime_neid0: int, ntime_neid1: int,
+                        itime: int):
+        arr["EID"][ntime_neid0:ntime_neid1] = self.element
+        arr["SD"][ntime_neid0:ntime_neid1] = self.data[itime, :, 0]
+        arr["XC"][ntime_neid0:ntime_neid1] = self.data[itime, :, 1]
+        arr["XD"][ntime_neid0:ntime_neid1] = self.data[itime, :, 2]
+        arr["XE"][ntime_neid0:ntime_neid1] = self.data[itime, :, 3]
+        arr["XF"][ntime_neid0:ntime_neid1] = self.data[itime, :, 4]
+        arr["AX"][ntime_neid0:ntime_neid1] = self.data[itime, :, 5]
+        arr["MAX"][ntime_neid0:ntime_neid1] = self.data[itime, :, 6]
+        arr["MIN"][ntime_neid0:ntime_neid1] = self.data[itime, :, 7]
+        arr["MS"][ntime_neid0:ntime_neid1] = self.data[itime, :, 8]
+
+    def slice_by_element_id(self, eids: np.ndarray, assume_exists: bool=False, inplace: bool=False):
+        eids, ieid, neid2 = slice_eids_by_index(self.element, eids, assume_exists)
+        obj = self if inplace else copy.deepcopy(self)
+        obj.element = obj.element[ieid]
+        obj.data = obj.data[:, ieid, :]
+        obj.nelements = len(ieid)
+        return obj
 
     @property
     def is_real(self) -> bool:
@@ -184,6 +229,9 @@ class RealBarArray(OES_Object):
             ntimes = self.ntotal
             #ss
 
+        # 1 row per element; self.nelements was accumulated over all times
+        self.nelements = ntotal
+
         _times = np.zeros(ntimes, dtype=self.analysis_fmt)
         element = np.zeros(ntotal, dtype=idtype)
 
@@ -220,6 +268,75 @@ class RealBarArray(OES_Object):
             data_frame.index.name = 'ElementID'
             data_frame.columns.names = ['Static']
         self.data_frame = data_frame
+
+    def envelope(self,
+                 eids: np.ndarray,
+                 result_name: str) -> np.ndarray:
+        is_min = (result_name == 'min')
+        func_name = 'min' if is_min else 'max'
+        max_min_func = getattr(np, func_name)
+
+        # print(''.join(self.get_stats()))
+        element = self.element
+        # print(f'element = {element}')
+        ielement = np.searchsorted(element, eids)
+        assert np.array_equal(element[ielement], eids)
+
+        #[s1a, s2a, s3a, s4a, axial, smaxa, smina, MS_tension,
+        # s1b, s2b, s3b, s4b,        sminb, sminb, MS_compression]
+        # data = np.zeros((ntime, ntotal, 15), dtype=fdtype)
+        stress_strain_dict_map = {
+            'axial': 4,
+        }
+        ntime, neid, _ = self.data.shape
+        # if result_name == 'von_mises':
+        #     data = self.von_mises()
+        # elif result_name == 'max_shear':
+        #     data = self.max_shear()
+        if result_name == 'abs_max':
+            # TODO: wrong, but ok...
+            data = np.abs(self.abs_principal())
+            assert data.shape == (ntime, neid), data.shape
+        elif result_name == 'max':
+            data = self.max_principal()
+        elif result_name == 'min':
+            data = self.min_principal()
+        elif result_name in stress_strain_dict_map:
+            iresult = stress_strain_dict_map[result_name]
+            data = self.data[:, :, iresult]
+        else:  # pragma: No cover
+            raise NotImplementedError(result_name)
+
+        assert data.ndim == 2, data.shape
+        # ntime, nelement = data.shape
+
+        # data.shape = (ntime, neid)
+        eid_data = max_min_func(data, axis=0)
+        assert eid_data.shape == (neid, ), eid_data.shape
+        return eid_data[ielement]
+
+    # def von_mises(self) -> np.ndarray:
+    #     asdf
+    # def max_shear(self) -> np.ndarray:
+    #     asdf
+
+    def abs_principal(self) -> np.ndarray:
+        omax = self.max_principal()
+        omin = self.min_principal()
+        abs_max = get_abs_max(omin, omax, omax.dtype)
+        return abs_max
+
+    def max_principal(self) -> np.ndarray:
+        #[s1a, s2a, s3a, s4a, axial, smaxa, smina, MS_tension,
+        # s1b, s2b, s3b, s4b,        sminb, sminb, MS_compression]
+        data = self.data[:, :, [5, 12]]
+        omax = data.max(axis=2)
+        return omax
+
+    def min_principal(self) -> np.ndarray:
+        data = self.data[:, :, [6, 12]]
+        omin = data.min(axis=2)
+        return omin
 
     def __eq__(self, table):  # pragma: no cover
         assert self.is_sort1 == table.is_sort1
@@ -573,7 +690,7 @@ class RealBarArray(OES_Object):
                     data = [eid_device,
                             s1ai, s2ai, s3ai, s4ai, axiali, smaxai, sminai, MSti,
                             s1bi, s2bi, s3bi, s4bi,         smaxbi, sminbi, MSci]
-                    op2_ascii.write('  eid_device=%s data=%s\n' % (eid_device, str(data)))
+                    op2_ascii.write('  eid_device=%s data=%s\n' % (eid_device, op2_stringify(data)))
                     op2_file.write(struct1.pack(*data))
 
             itable -= 1

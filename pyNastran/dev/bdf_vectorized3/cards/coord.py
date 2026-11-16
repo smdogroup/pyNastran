@@ -1,5 +1,6 @@
 from __future__ import annotations
 from itertools import count
+from collections import defaultdict
 from typing import Any, TYPE_CHECKING
 import numpy as np
 #from pyNastran.bdf.field_writer_8 import print_float_8 # print_card_8
@@ -84,6 +85,12 @@ class COORD(VectorizedBaseCard):
         #i = cls.index(coord_id)
         #coord = cls.slice_card_by_index(i)
         #return coord
+
+    @property
+    def coord_type_int(self) -> np.ndarray:
+        mapper = {'R': 1, 'C': 2, 'S': 3}
+        coord_type_int = np.array([mapper[coord_type] for coord_type in self.coord_type])
+        return coord_type_int
 
     def set_used(self, used_dict: dict[str, list[np.ndarray]]) -> None:
         is_cord1 = (self.icoord == 1)
@@ -608,7 +615,10 @@ class COORD(VectorizedBaseCard):
 
         grid = self.model.grid
         if grid.n:
-            grid.sort()
+            unids = np.unique(grid.node_id)
+            if len(grid.node_id) != len(unids) or not np.array_equal(grid.node_id, unids):
+                # model.log.warning(f'node_id = {grid.node_id}')
+                grid.sort()
         assert len(np.unique(self.coord_id)) == len(self.coord_id)
 
         debug = False
@@ -908,19 +918,97 @@ class COORD(VectorizedBaseCard):
     def max_id(self) -> int:
         return max(self.coord_id.max(), self.nodes.max(), self.ref_coord_id.max())
 
+    def write_h5(self, h5file, coord_group):
+        ncoord = len(self.coord_id) - 1
+        if ncoord == 0:
+            return
+
+        transform_group = h5file.create_group(coord_group, 'TRANSFORMATION')
+        from tables import Int64Col, Float64Col
+        xform_data_dict = {'DATA': Float64Col()}
+        h5_dict = {
+            'CID': Int64Col(pos=0),  # Signed 64-bit integer
+            'RID': Int64Col(pos=1),  # Signed 64-bit integer
+            'A1': Float64Col(pos=2),  # double (double-precision)
+            'A2': Float64Col(pos=3),
+            'A3': Float64Col(pos=4),
+            'B1': Float64Col(pos=5),
+            'B2': Float64Col(pos=6),
+            'B3': Float64Col(pos=7),
+            'C1': Float64Col(pos=8),
+            'C2': Float64Col(pos=9),
+            'C3': Float64Col(pos=10),
+            'DOMAIN_ID': Int64Col(pos=6),
+        }
+        coords_by_type = defaultdict(list)
+        rdata_list = []
+        for i, icoord, coord_type, cid, e1 in zip(count(), self.icoord, self.coord_type,
+                                                  self.coord_id, self.e1):
+            if cid == 0:
+                continue
+            class_name = f'CORD{icoord}{coord_type}'
+            coords_by_type[class_name].append(i)
+            xform = self.T[i, :, :].ravel()
+            rdata_list.append(e1)
+            rdata_list.append(xform)
+        rdata = np.hstack(rdata_list, dtype='float64')
+        assert len(rdata) > 0
+        table_rdata = h5file.create_table(transform_group, 'RDATA', xform_data_dict)
+        arr_rdata = np.empty(len(rdata), dtype=table_rdata.dtype)
+        arr_rdata['DATA'] = rdata
+        table_rdata.append(arr_rdata)
+
+        xform_identity_dict = {
+            'CID': Int64Col(pos=0),  # Signed 64-bit integer
+            'TYPE': Int64Col(pos=1),
+            'INDEX': Int64Col(pos=2),
+            'RINDEX': Int64Col(pos=3),
+            'DOMAIN_ID': Int64Col(pos=4),
+        }
+        table_identity = h5file.create_table(transform_group, 'INDENTITY', xform_identity_dict)
+        arr_identity = np.empty(ncoord, dtype=table_identity.dtype)
+        arr_identity['CID'] = self.coord_id[1:]
+        arr_identity['TYPE'] = self.coord_type_int[1:]
+        arr_identity['INDEX'] = self.coord_id[1:] * 0
+        arr_identity['RINDEX'] = np.arange(ncoord) * 12 + 1
+        arr_identity['DOMAIN_ID'] = np.ones(ncoord)
+        table_identity.append(arr_identity)
+
+        for coord_type, icoords in coords_by_type.items():
+            table = h5file.create_table(coord_group, coord_type, h5_dict)
+            ncoord = len(icoords)
+            arr = np.empty(ncoord, dtype=table.dtype)
+            arr["CID"] = self.coord_id[icoords]
+            arr["RID"] = self.ref_coord_id[icoords]
+            arr["A1"] = self.e1[icoords, 0]
+            arr["A2"] = self.e1[icoords, 1]
+            arr["A3"] = self.e1[icoords, 2]
+            arr["B1"] = self.e2[icoords, 0]
+            arr["B2"] = self.e2[icoords, 1]
+            arr["B3"] = self.e2[icoords, 2]
+            arr["C1"] = self.e3[icoords, 0]
+            arr["C2"] = self.e3[icoords, 1]
+            arr["C3"] = self.e3[icoords, 2]
+            arr["DOMAIN_ID"] = np.ones(ncoord)
+            table.append(arr)
+
     @parse_check
     def write_file(self, bdf_file: TextIOLike,
                    size: int=8, is_double: bool=False,
                    write_card_header: bool=False) -> None:
         print_card, size = get_print_card_size(size, self.max_id)
+        if size == 8 and not is_double:
+            self.write_file_8(bdf_file, write_card_header=write_card_header)
+            return
 
-        class_name = self.type
+        # class_name = self.type
         nodes = array_str(self.nodes, size=size)
         ref_coord_ids = array_default_int(self.ref_coord_id, default=0, size=size)
         #array_str
         e1s = array_float(self.e1, size=size, is_double=is_double)
         e2s = array_float(self.e2, size=size, is_double=is_double)
         e3s = array_float(self.e3, size=size, is_double=is_double)
+        lines = []
         if size == 8:
             for icoord, coord_type, cid, rid, nodesi, origin, zaxis, xzplane in zip(
                     self.icoord, self.coord_type,
@@ -941,7 +1029,7 @@ class COORD(VectorizedBaseCard):
                         xzplane[0], xzplane[1], xzplane[2],
                     )
                     assert rid != '-1'
-                bdf_file.write(msg)
+                lines.append(msg)
         else:
             for icoord, coord_type, cid, rid, nodesi, origin, zaxis, xzplane in zip(
                     self.icoord, self.coord_type,
@@ -960,8 +1048,57 @@ class COORD(VectorizedBaseCard):
                               xzplane[0], xzplane[1], xzplane[2],
                               ]
                     assert rid != '-1'
-                bdf_file.write(print_card(fields))
+                lines.append(print_card(fields))
+        bdf_file.writelines(lines)
         return
+
+    @parse_check
+    def write_file_8(self, bdf_file: TextIOLike,
+                     write_card_header: bool=False) -> None:
+        if self.max_id >= 100_000_000:
+            self.write_file(bdf_file, size=16, write_card_header=write_card_header)
+            return
+
+        is_cord2 = (self.icoord == 2)
+        is_cord1 = (self.icoord == 1)
+        non_zero = (self.coord_id != 0)
+
+        # batch CORD2x cards
+        mask2 = is_cord2 & non_zero
+        if np.any(mask2):
+            cids = np.char.rjust(array_str(self.coord_id[mask2], size=8), 8).tolist()
+            rids = np.char.rjust(array_default_int(self.ref_coord_id[mask2], default=0, size=8), 8).tolist()
+            e1 = np.char.rjust(array_float(self.e1[mask2], size=8, is_double=False), 8)
+            e2 = np.char.rjust(array_float(self.e2[mask2], size=8, is_double=False), 8)
+            e3 = np.char.rjust(array_float(self.e3[mask2], size=8, is_double=False), 8)
+            o1 = e1[:, 0].tolist()
+            o2 = e1[:, 1].tolist()
+            o3 = e1[:, 2].tolist()
+            z1 = e2[:, 0].tolist()
+            z2 = e2[:, 1].tolist()
+            z3 = e2[:, 2].tolist()
+            x1 = e3[:, 0].tolist()
+            x2 = e3[:, 1].tolist()
+            x3 = e3[:, 2].tolist()
+            ctypes = self.coord_type[mask2]
+            lines = [f'CORD2{ct}  {cid}{rid}{a1}{a2}{a3}{b1}{b2}{b3}\n        {c1}{c2}{c3}\n'
+                     for ct, cid, rid, a1, a2, a3, b1, b2, b3, c1, c2, c3
+                     in zip(ctypes.tolist(), cids, rids, o1, o2, o3, z1, z2, z3, x1, x2, x3)]
+            bdf_file.writelines(lines)
+
+        # batch CORD1x cards
+        mask1 = is_cord1 & non_zero
+        if np.any(mask1):
+            cids = np.char.rjust(array_str(self.coord_id[mask1], size=8), 8).tolist()
+            nodes_ = np.char.rjust(array_str(self.nodes[mask1], size=8), 8)
+            n1s = nodes_[:, 0].tolist()
+            n2s = nodes_[:, 1].tolist()
+            n3s = nodes_[:, 2].tolist()
+            ctypes = self.coord_type[mask1]
+            lines = [f'CORD1{ct}  {cid}{n1}{n2}{n3}\n'
+                     for ct, cid, n1, n2, n3
+                     in zip(ctypes.tolist(), cids, n1s, n2s, n3s)]
+            bdf_file.writelines(lines)
 
     def transform_force_local_to_global(self, force: np.ndarray, local_coord_id: int=0) -> np.ndarray:
         force2 = np.full(force.shape, np.nan, dtype=force.dtype)
@@ -1023,7 +1160,8 @@ class COORD(VectorizedBaseCard):
         #xyz2 = xyz @ T + origin
         return xyz2
 
-    def transform_node_to_local_coord_id(self, node_id: np.ndarray, local_coord_id: int) -> np.ndarray:
+    def transform_node_to_local_coord_id(self, node_id: np.ndarray,
+                                         local_coord_id: int) -> np.ndarray:
         # transform_node_to_local_xyz
         # transform_node_to_local_coord_id
         ## TODO: this is redundant

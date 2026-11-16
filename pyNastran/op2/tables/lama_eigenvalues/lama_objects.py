@@ -1,6 +1,7 @@
+from __future__ import annotations
 from math import sqrt
 from struct import Struct, pack
-from typing import TextIO
+from typing import TextIO, TYPE_CHECKING
 
 import numpy as np
 
@@ -8,6 +9,8 @@ from pyNastran.op2.result_objects.op2_objects import BaseScalarObject
 from pyNastran.op2.op2_interface.write_utils import write_table_header # set_table3_field,
 from pyNastran.f06.f06_formatting import write_floats_13e
 from pyNastran.op2.writer.utils import fix_table3_types
+if TYPE_CHECKING:
+    from pyNastran.op2.tables.oug.oug_eigenvectors import RealEigenvectorArray
 
 
 class RealEigenvalues(BaseScalarObject):
@@ -32,8 +35,56 @@ class RealEigenvalues(BaseScalarObject):
         self.generalized_stiffness = np.zeros(nmodes, dtype='float32')
         self.data_frame = None
 
+    def h5_table_dict(self) -> dict:
+        from tables import Int64Col, Float64Col, StringCol
+        h5_table_dict = {
+            'MODE': Int64Col(pos=0),
+            'ORDER': Int64Col(pos=1),
+            'EIGEN': Float64Col(pos=2),
+            'OMEGA': Float64Col(pos=3),
+            'FREQ': Float64Col(pos=4),
+            'MASS': Float64Col(pos=5),
+            'STIFF': Float64Col(pos=6),
+            'RESFLG': Float64Col(pos=7),
+            'FLDFLG': Float64Col(pos=8),
+            'DOMAIN_ID': Int64Col(pos=9),
+        }
+        return h5_table_dict
+
+    def add_to_h5_array(self, arr):
+        arr["MODE"] = self.mode
+        arr["ORDER"] = self.extraction_order
+        arr["EIGEN"] = self.eigenvalues
+        arr["OMEGA"] = self.radians
+        arr["FREQ"] = self.cycles
+        arr["MASS"] = self.generalized_mass
+        arr["STIFF"] = self.generalized_stiffness
+        arr["RESFLG"] = self.cycles
+        arr["FLDFLG"] = self.cycles
+
     def __eq__(self, table):  # pragma: no cover
         return True
+
+    @classmethod
+    def from_eigenvectors(cls, eigenvectors: RealEigenvectorArray,
+                          title: str='', table_name: str='LAMA',):
+        eigns = np.asarray(eigenvectors.eigns)
+        # assert isinstance(eigns, np.ndarray), eigns
+        omega = np.sqrt(np.abs(eigns))
+        freq = omega / (2 * np.pi)
+        nmodes = len(eigns)
+        mode = np.arange(1, nmodes+1)
+
+        eigenvalue_obj = RealEigenvalues(title=title, table_name=table_name, nmodes=nmodes)
+        isort = np.argsort(eigns)
+        eigenvalue_obj.eigenvalues = eigns[isort]
+        eigenvalue_obj.radians = omega[isort]
+        eigenvalue_obj.cycles = freq[isort]
+        eigenvalue_obj.mode = mode[isort]
+        eigenvalue_obj.extraction_order = mode[isort]
+        eigenvalue_obj.generalized_mass = np.ones(nmodes, dtype='float32')
+        eigenvalue_obj.generalized_stiffness = eigns[isort]
+        return eigenvalue_obj
 
     def get_stats(self, short: bool=False) -> list[str]:
         msg = []
@@ -50,6 +101,10 @@ class RealEigenvalues(BaseScalarObject):
 
     @property
     def is_complex(self) -> bool:
+        return False
+
+    @property
+    def is_buckling(self) -> bool:
         return False
 
     def add_f06_line(self, data, imode):
@@ -92,11 +147,11 @@ class RealEigenvalues(BaseScalarObject):
             self.add_f06_line(line, i)
 
     def write_f06(self, f06_file: TextIO, header: list[str], page_stamp: str,
-                  page_num: int=1) -> None:
+                  page_num: int=1) -> int:
         title = ''
         if self.title is not None:
             title = '%s' % str(self.title).center(124).rstrip() + '\n'
-        msg = header + ['                                              R E A L   E I G E N V A L U E S\n', title,
+        msg = header + ['                                              R E A L   E I G E N V A L U E S\n', #title,
                         '   MODE    EXTRACTION      EIGENVALUE            RADIANS             CYCLES            GENERALIZED         GENERALIZED\n',
                         '    NO.       ORDER                                                                       MASS              STIFFNESS\n']
         for (imode, mode_num) in enumerate(self.mode):
@@ -324,7 +379,6 @@ def _write_table_header(table_name: str, op2_file, fascii, date):
     #table_header = [8, 'BOUGV1  ', 8]
     write_table_header(op2_file, fascii, table_name)
 
-
     #read_markers -> [4, -1, 4]
     #get_nmarkers- [4, 0, 4]
     #read_record - marker = [4, 7, 4]
@@ -395,6 +449,29 @@ class ComplexEigenvalues(BaseScalarObject):
         self.damping = np.zeros(nmodes, dtype='float32')
         self.data_frame = None
 
+    def h5_table_dict(self) -> dict:
+        from tables import Int64Col, Float64Col, StringCol
+        h5_table_dict = {
+            'MODE': Int64Col(pos=0),
+            'ORDER': Int64Col(pos=1),
+            'REIGEN': Float64Col(pos=2),
+            'IEIGEN': Float64Col(pos=3),
+            'FREQ': Float64Col(pos=4),
+            'DAMP': Float64Col(pos=5),
+            'SPIN_SPEED': Float64Col(pos=6),
+            'DOMAIN_ID': Int64Col(pos=7),
+        }
+        return h5_table_dict
+
+    def add_to_h5_array(self, arr):
+        arr["MODE"] = self.mode
+        arr["ORDER"] = self.extraction_order
+        arr["REIGEN"] = self.eigenvalues.real
+        arr["IEIGEN"] = self.eigenvalues.imag
+        arr["FREQ"] = self.cycles
+        arr["DAMP"] = self.damping
+        arr["SPIN_SPEED"] = 1.0
+
     def __eq__(self, table):  # pragma: no cover
         return True
 
@@ -413,6 +490,10 @@ class ComplexEigenvalues(BaseScalarObject):
     @property
     def is_complex(self) -> bool:
         return True
+
+    @property
+    def is_buckling(self) -> bool:
+        return False
 
     def add_op2_line(self, data, i):
         (root_num, extract_order, eigr, eigi, cycle, damping) = data
@@ -673,6 +754,53 @@ class BucklingEigenvalues(BaseScalarObject):
         self.generalized_stiffness = np.zeros(nmodes, dtype='float32')
         self.data_frame = None
 
+    def h5_table_dict(self) -> dict:
+        from tables import Int64Col, Float64Col, StringCol
+        h5_table_dict = {
+            'MODE': Int64Col(pos=0),
+            'ORDER': Int64Col(pos=1),
+            'EIGEN': Float64Col(pos=2),
+            'OMEGA': Float64Col(pos=3),
+            'FREQ': Float64Col(pos=4),
+            'MASS': Float64Col(pos=5),
+            'STIFF': Float64Col(pos=6),
+            'RESFLAG': Int64Col(pos=7),
+            'FLDFLAG': Int64Col(pos=8),
+            'DOMAIN_ID': Int64Col(pos=9),
+        }
+        return h5_table_dict
+
+    def add_to_h5_array(self, arr):
+        arr["MODE"] = self.mode
+        arr["ORDER"] = self.extraction_order
+        arr["EIGEN"] = self.eigenvalues
+        arr["OMEGA"] = self.omegas
+        arr["FREQ"] = self.freqs
+        arr["MASS"] = self.generalized_mass
+        arr["STIFF"] = self.generalized_stiffness
+        arr["RESFLAG"] = 0
+        arr["FLDFLAG"] = 0
+
+    @classmethod
+    def add_from_solution(cls,
+                          mode: np.ndarray,
+                          extraction_order: np.ndarray,
+                          eigenvalue: np.ndarray,
+                          freq: np.ndarray,
+                          omega: np.ndarray,
+                          generalized_mass: np.ndarray,
+                          generalized_stiffness: np.ndarray,
+                          title: str, table_name: str):
+        obj = BucklingEigenvalues(title, table_name, 0)
+        obj.mode = mode
+        obj.extraction_order = extraction_order
+        obj.eigenvalues = eigenvalue
+        obj.freqs = freq
+        obj.omegas = omega
+        obj.generalized_mass = generalized_mass
+        obj.generalized_stiffness = generalized_stiffness
+        return obj
+
     def __eq__(self, table):  # pragma: no cover
         return True
 
@@ -692,6 +820,7 @@ class BucklingEigenvalues(BaseScalarObject):
     def is_complex(self) -> bool:
         return False
 
+    @property
     def is_buckling(self) -> bool:
         return True
 

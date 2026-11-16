@@ -165,7 +165,8 @@ def _pressure_factor(pressure_units_in: str, pressure_units_out: str) -> float:
     return factor
 
 
-def convert_velocity(velocity: float, velocity_units_in: str,
+def convert_velocity(velocity: float | np.ndarray,
+                     velocity_units_in: str,
                      velocity_units_out: str) -> float:
     """nominal unit is ft/s"""
     if velocity_units_in == velocity_units_out:
@@ -318,7 +319,7 @@ def _force_factor(force_units_in: str, force_units_out: str) -> float:
     elif force_units_in == 'N':
         factor *= 0.2248094
     elif force_units_in == 'cN':
-        factor *= 0.0022480894
+        factor *= 0.002248094
     elif force_units_in == 'mN':
         factor *= 0.0002248094
     elif force_units_in == 'lbf':
@@ -332,7 +333,7 @@ def _force_factor(force_units_in: str, force_units_out: str) -> float:
     elif force_units_out == 'N':
         factor /= 0.2248094
     elif force_units_out == 'cN':
-        factor /= 0.0022480894
+        factor /= 0.002248094
     elif force_units_out == 'mN':
         factor /= 0.0002248094
     elif force_units_out == 'lbf':

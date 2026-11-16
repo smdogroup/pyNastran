@@ -4,8 +4,12 @@ import unittest
 from pathlib import Path
 from io import StringIO
 
-from docopt import DocoptExit
 import numpy as np
+try:
+    import scipy
+    IS_SCIPY = True
+except ImportError:
+    IS_SCIPY = False
 from cpylog import SimpleLogger
 
 import pyNastran
@@ -17,15 +21,18 @@ from pyNastran.bdf.cards.test.utils import save_load_deck
 from pyNastran.bdf.mesh_utils.export_mcids import export_mcids
 from pyNastran.bdf.mesh_utils.split_cbars_by_pin_flag import split_cbars_by_pin_flag
 from pyNastran.bdf.mesh_utils.split_elements import split_line_elements
-from pyNastran.bdf.mesh_utils.pierce_shells import (
-    pierce_shell_model) #, quad_intersection, triangle_intersection)
+if IS_SCIPY:
+    from pyNastran.bdf.mesh_utils.pierce_shells import (
+        pierce_shell_model) #, quad_intersection, triangle_intersection)
+from pyNastran.bdf.mesh_utils.cmd_line.bdf_cmd_line import (
+    cmd_line, CMD_MAPS)
+
 from pyNastran.bdf.mesh_utils.mirror_mesh import (
     write_bdf_symmetric, bdf_mirror, bdf_mirror_plane)
 from pyNastran.bdf.mesh_utils.mass_properties import (
     mass_properties, mass_properties_nsm)  #mass_properties_breakdown
 from pyNastran.bdf.mesh_utils.make_half_model import make_half_model
-from pyNastran.bdf.mesh_utils.bdf_merge import bdf_merge
-from pyNastran.bdf.mesh_utils.cmd_line.bdf_cmd_line import cmd_line, CMD_MAPS
+from pyNastran.bdf.mesh_utils.bdf_merge import bdf_merge, DuplicateNodeError
 from pyNastran.bdf.mesh_utils.find_closest_nodes import find_closest_nodes
 from pyNastran.bdf.mesh_utils.find_coplanar_elements import find_coplanar_triangles
 from pyNastran.bdf.mesh_utils.force_to_pressure import force_to_pressure
@@ -66,6 +73,7 @@ class TestRbeTools(unittest.TestCase):
     def test_rbe2_to_rbe3_to_rbe2(self):
         log = SimpleLogger(level='warning')
         model = BDF(log=log)
+        model.sol = 101
         model.add_grid(1, [0., 0., 0.])
         model.add_grid(2, [0., 0., 0.])
         model.add_grid(3, [0., 0., 0.])
@@ -84,14 +92,35 @@ class TestRbeTools(unittest.TestCase):
         bdf_filename1 = DIRNAME / 'rbe3_test_1.bdf'
         bdf_filename2 = DIRNAME / 'rbe3_test_2.bdf'
         bdf_filename3 = DIRNAME / 'rbe3_test_3.bdf'
-        model.write_bdf(bdf_filename1)
         rbe_eids_to_fix = list(model.rigid_elements)
+        eid0 = rbe_eids_to_fix[0]
+        model.pop_parse_errors()
+        model.write_bdf(bdf_filename1)
+
+        log.debug(f'rbe_eids = {rbe_eids_to_fix}; eid0={eid0}')
+        elem = model.rigid_elements[eid0]
+        assert elem.type == 'RBE2', elem
+
         rbe2_to_rbe3(model, rbe_eids_to_fix)
+        elem = model.rigid_elements[eid0]
+        assert elem.type == 'RBE3', elem
+
         rbe3_to_rbe2(model, rbe_eids_to_fix)
-        args = ['bdf', 'rbe3_to_rbe2', str(bdf_filename1), '-o', str(bdf_filename2)]
-        cmd_line(args, quiet=True)
+        elem = model.rigid_elements[eid0]
+        assert elem.type == 'RBE2', elem
+
+        log.debug('starting cmd_line rbe2_to_rbe3-1')
+        # print(msg)
+        args = ['bdf', 'rbe2_to_rbe3', str(bdf_filename1), '-o', str(bdf_filename2)]
+        model32 = cmd_line(args, quiet=True, log=log)
+        assert len(model32.rigid_elements) == 3, model32.rigid_elements
+        # print(model32.get_bdf_stats())
+
+        log.debug('starting cmd_line rbe3_to_rbe2-2')
         args = ['bdf', 'rbe3_to_rbe2', str(bdf_filename2), '-o', str(bdf_filename3)]
-        cmd_line(args, quiet=True)
+        cmd_line(args, quiet=True, log=log)
+
+        log.debug('finished')
         for fname in [bdf_filename1, bdf_filename2, bdf_filename3]:
             os.remove(fname)
 
@@ -171,7 +200,6 @@ class TestMeshUtilsCmdLine(unittest.TestCase):
         model.write_bdf(bdf_filename)
         model, out_nids = cmd_line(args, quiet=True)
         assert len(out_nids) == 1, out_nids
-
         os.remove(bdf_filename)
 
     def test_cmdline_inclzip_bwb(self):
@@ -204,6 +232,13 @@ class TestMeshUtilsCmdLine(unittest.TestCase):
         bdf_filename2 = MODEL_PATH / 'sol_101_elements' / 'mode_solid_shell_bar.bdf'
         args = ['bdf', 'diff', str(bdf_filename1), str(bdf_filename2)]
         cmd_line(args, quiet=True)
+
+    def test_cmdline_bdf_replace(self):
+        """tests ```bdf diff```"""
+        bdf_filename1 = MODEL_PATH / 'sol_101_elements' / 'static_solid_shell_bar.bdf'
+        bdf_filename2 = MODEL_PATH / 'sol_101_elements' / 'mode_solid_shell_bar.bdf'
+        args = ['bdf', 'replace', str(bdf_filename1), str(bdf_filename2), '--blk_punch', 'F']
+        cmd_line(args, quiet=False)
 
     def test_cmdline_free_edges(self):
         """Finds the free_edges
@@ -525,9 +560,9 @@ class TestMeshUtils(unittest.TestCase):
             label = f's{eid}'
             atti = [eid]
             model.add_dresp1(dresp_id, label, response_type, property_type,
-                            region, atta, attb,
-                            atti, validate=True,
-                            comment=comment)
+                             atta, attb, atti,
+                             region=region, validate=True,
+                             comment=comment)
             dresp_id += 1
             comment = ''
 
@@ -599,7 +634,6 @@ class TestMeshUtils(unittest.TestCase):
         args = ['bdf', 'list_conm2', str(bdf_filename)]
         cmd_line(args, quiet=True)
 
-
     def test_breakdown_01(self):
         """run the various breakdowns"""
         log = SimpleLogger(level='error')
@@ -613,6 +647,75 @@ class TestMeshUtils(unittest.TestCase):
         get_thickness_breakdown(model)
         get_material_mass_breakdown_table(model)
         get_property_mass_breakdown_table(model)
+
+    def test_merge_blind(self):
+        """
+        blind merge: GRID ids are load bearing, so a shared id is a weld when the
+        two locations agree and an error when they don't.  Element/property/
+        material ids are still renumbered out of each other's way.
+        """
+        log = SimpleLogger(level='error')
+
+        def make_deck(nids, xyzs):
+            """3 grids in a row wired with CRODs; every deck reuses eid/pid/mid"""
+            model = BDF(log=log)
+            for nid, xyz in zip(nids, xyzs):
+                model.add_grid(nid, xyz)
+            model.add_prod(100, 1000, A=1.0, j=0.0)
+            model.add_mat1(1000, 3.0e7, None, 0.3)
+            for i in range(len(nids) - 1):
+                model.add_crod(10 + i, 100, [nids[i], nids[i + 1]])
+            model.validate()
+            return model
+
+        left = [[0., 0., 0.], [1., 0., 0.], [2., 0., 0.]]
+        # node 3 is the shared joint, at exactly the same place in both decks
+        right_ok = [[2., 0., 0.], [3., 0., 0.], [4., 0., 0.]]
+
+        model, unused_mappers = bdf_merge(
+            [make_deck([1, 2, 3], left), make_deck([3, 4, 5], right_ok)],
+            blind=True, log=log)
+
+        # the shared id collapsed; nothing was renumbered away
+        self.assertEqual(sorted(model.nodes), [1, 2, 3, 4, 5])
+        # ...but the colliding eid/pid/mid were all pushed apart
+        self.assertEqual(len(model.elements), 4)
+        self.assertEqual(len(model.properties), 2)
+        self.assertEqual(len(model.materials), 2)
+        for elem in model.elements.values():
+            self.assertIn(elem.Pid(), model.properties)
+            for nid in elem.node_ids:
+                self.assertIn(nid, model.nodes)
+
+        # blind implies renumber=False -- the final 1..n compaction would throw
+        # away the ids we just went to the trouble of preserving
+        model, unused_mappers = bdf_merge(
+            [make_deck([1, 2, 3], left), make_deck([3, 4, 5], right_ok)],
+            blind=True, renumber=True, log=log)
+        self.assertEqual(sorted(model.nodes), [1, 2, 3, 4, 5])
+
+        # same id, different location -> hard error naming the offender
+        right_bad = [[2., 0., 99.], [3., 0., 0.], [4., 0., 0.]]
+        with self.assertRaises(DuplicateNodeError) as cm:
+            bdf_merge([make_deck([1, 2, 3], left), make_deck([3, 4, 5], right_bad)],
+                      blind=True, log=log)
+        self.assertIn('nid=3', str(cm.exception))
+
+        # a near-miss is exact-compared by default, and absorbed by dup_node_tol
+        right_close = [[2. + 1e-6, 0., 0.], [3., 0., 0.], [4., 0., 0.]]
+        with self.assertRaises(DuplicateNodeError):
+            bdf_merge([make_deck([1, 2, 3], left), make_deck([3, 4, 5], right_close)],
+                      blind=True, log=log)
+        model, unused_mappers = bdf_merge(
+            [make_deck([1, 2, 3], left), make_deck([3, 4, 5], right_close)],
+            blind=True, dup_node_tol=1e-3, log=log)
+        self.assertEqual(sorted(model.nodes), [1, 2, 3, 4, 5])
+
+        # a plain (non-blind) merge still renumbers everything apart
+        model, unused_mappers = bdf_merge(
+            [make_deck([1, 2, 3], left), make_deck([3, 4, 5], right_ok)],
+            renumber=False, log=log)
+        self.assertEqual(len(model.nodes), 6)
 
     def test_merge_01(self):
         """merges multiple bdfs into a single deck"""
@@ -663,7 +766,7 @@ class TestMeshUtils(unittest.TestCase):
 
         argv = ['bdf', 'export_mcids', str(bdf_filename), '-o', str(csv_filename),
                 '--iplies', '0,1,2,3,4,5,6,7,8,9,10', '--no_x', '--no_y']
-        with self.assertRaises(DocoptExit):
+        with self.assertRaises(SystemExit):
             # can't define both --no_x and --no_y
             cmd_line(argv=argv, quiet=True)
 
@@ -968,7 +1071,7 @@ class TestMeshUtils(unittest.TestCase):
         assert len(model.mpcs) == 1, model.mpcs
         assert len(model.mpcs[42]) == 1, model.mpcs[42]
         model, unused_mirror_model, unused_nid_offset, unused_eid_offset = bdf_mirror_plane(
-            model, plane, mirror_model=None, log=None, debug=True,
+            model, plane, mirror_model=None, log=None, debug=False,
             use_nid_offset=False)
         #for nid, node in sorted(mirror_model.nodes.items()):
             #print(nid, node.xyz)
@@ -1016,7 +1119,7 @@ class TestMeshUtils(unittest.TestCase):
         model.validate()
         model.cross_reference()
 
-        bdf_mirror(model, plane='xz', log=None, debug=True)
+        bdf_mirror(model, plane='xz', log=None, debug=False)
         model.cross_reference()
         #for eid, elem in model.elements.items():
             #print(eid, elem.Volume())
@@ -1052,7 +1155,7 @@ class TestMeshUtils(unittest.TestCase):
         model.validate()
         model.cross_reference()
 
-        bdf_mirror(model, plane='xz', log=None, debug=True)
+        bdf_mirror(model, plane='xz', log=None, debug=False)
         model.cross_reference()
         #for eid, elem in model.elements.items():
             #print(eid, elem.Volume())

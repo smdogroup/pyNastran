@@ -8,6 +8,7 @@ Defines the Solid Stress/Strain Result
 
 """
 # pylint: disable=C0301,C0103,R0913,R0914,R0904,C0111,R0201,R0902
+import copy
 from itertools import count
 from struct import Struct, pack
 
@@ -18,7 +19,7 @@ from pyNastran.utils.numpy_utils import float_types
 from pyNastran.f06.f06_formatting import write_floats_13e, _eigenvalue_header
 from pyNastran.op2.result_objects.op2_objects import get_times_dtype
 from pyNastran.op2.result_objects.utils_pandas import build_dataframe_transient_header, build_pandas_transient_element_node
-from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import StressObject, StrainObject, OES_Object
+from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import StressObject, StrainObject, OES_Object, slice_eids_by_index
 from .oes_solids import RealSolidStressArray, RealSolidStrainArray
 from pyNastran.op2.stress_reduction import principal_components_3d, ovm_shear_3d
 
@@ -38,6 +39,24 @@ class RealSolidArrayNx(OES_Object):
             #self.add_eid = self.add_eid_sort1
         #else:
             #raise NotImplementedError('SORT2')
+
+    def slice_by_element_id(self, eids: np.ndarray, assume_exists: bool=False, inplace: bool=False):
+        nnode = self.nnodes_per_element
+        neid = self.get_neid()
+        ntime, _, nresult = self.data.shape
+
+        element_node = self.element_node.reshape(neid, nnode, 2)
+        element = element_node[:, :, 0]
+        eids, ieid, neid2 = slice_eids_by_index(element, eids, assume_exists)
+        obj = self if inplace else copy.deepcopy(self)
+        element_node2 = element_node[ieid, :, :]
+        data = self.data.reshape(ntime, neid, 2, nresult)
+        
+        obj.element_cid = obj.element_cid[ieid, :]
+        obj.element_node = element_node2.reshape(neid2*nnode, 2)
+        obj.data = data[:, ieid, :, :].reshape(ntime, neid2*nnode, nresult)
+        obj.nelements = len(ieid)
+        return obj
 
     @property
     def is_real(self) -> bool:

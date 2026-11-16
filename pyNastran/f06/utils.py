@@ -28,7 +28,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 USAGE_144 = (
     'Usage:\n'
-    '  f06 plot_144 F06_FILENAME [--aerobox AEROBOX_CAERO_FILENAME] | [--bdf BDF_FILENAME]\n'
+    '  f06 plot_144 F06_FILENAME [--aerobox AEROBOX_CAERO_FILENAME] | [--bdf BDF_FILENAME] [--cp] [--force] [--moment]\n'
 )
 
 
@@ -40,13 +40,15 @@ def cmd_line_plot_trim(argv=None, plot: bool=True, show: bool=True,
         '  f06 plot_144 -h | --help\n'
         '  f06 plot_144 -v | --version\n'
         '\n'
-
         'Positional Arguments:\n'
         '  F06_FILENAME            path to input F06 file\n'
-        
+        '\n'
         'Options:\n'
         '  --aerobox AEROBOX_CAERO_FILENAME  path to exported CAERO file\n'
         '  --bdf     BDF_FILENAME            path to input BDF file containing CAEROs\n'
+        '  --cp                              plot Cp (pressure coefficients)\n'
+        '  --force                           plot aerodynamic forces (Fz)\n'
+        '  --moment                          plot aerodynamic moments (My)\n'
         '\n'
         'Info:\n'
         '  -h, --help      show this help message and exit\n'
@@ -80,12 +82,21 @@ def cmd_line_plot_trim(argv=None, plot: bool=True, show: bool=True,
         bdf_aero_group.add_argument('--bdf', type=str, help='path to input BDF file containing CAEROs')
         bdf_aero_group.add_argument('--aerobox', type=str, help='path to exported CAERO file')
         #bdf_aero_group.add_argument('--encoding', help=f'the encoding method (default=None -> {repr(encoding)})', type=str)
+
+        parent_parser.add_argument('--cp', help='plot Cp (pressure coefficients)', action='store_true')
+        parent_parser.add_argument('--force', help='plot aerodynamic forces (Fz)', action='store_true')
+        parent_parser.add_argument('--moment', help='plot aerodynamic moments (My)', action='store_true')
+        parent_parser.add_argument('--debug', help='add debug messages', action='store_true')
         parent_parser.add_argument('-v', '--version', action='version', version=ver)
         args = parent_parser.parse_args(args=argv[1:])
 
         f06_filename = args.F06_FILENAME
         aerobox_caero_filename = args.aerobox
         bdf_filename = args.bdf
+        plot_cp = args.cp
+        plot_force = args.force
+        plot_moment = args.moment
+        debug = args.debug
     else:  # pragma: no cover
         if argv is None:  # pragma: no cover
             argv = sys.argv
@@ -125,17 +136,23 @@ def cmd_line_plot_trim(argv=None, plot: bool=True, show: bool=True,
     if f06_filename.lower().endswith(('.bdf', '.op2')):
         f06_filename = base + '.f06'
 
+    from cpylog import get_logger
     from pyNastran.f06.f06_to_pressure_loads import f06_to_pressure_loads
     nid_csv_filename = os.path.join(dirname, 'nid_pyNastran.csv')
     eid_csv_filename = os.path.join(dirname, 'eid_pyNastran.csv')
+
+    log = get_logger(log, debug, encoding='utf-8')
     loads = f06_to_pressure_loads(f06_filename,
                                   aerobox_caero_filename,
                                   loads_filename,
                                   nid_csv_filename=nid_csv_filename,
                                   eid_csv_filename=eid_csv_filename,
-                                  log=None,
+                                  log=log,
                                   nlines_max=1_000_000,
-                                  debug=False)
+                                  debug=False,
+                                  plot_cp=plot_cp,
+                                  plot_force=plot_force,
+                                  plot_moment=plot_moment)
     return loads
 
 
@@ -149,9 +166,74 @@ USAGE_145 = (
     '[--in_units IN] [--out_units OUT] [--rhoref] '
     f'[--vd_limit VD_LIMIT] [--damping_limit DAMPING_LIMIT] {AXES} '
     f'[--noline] [--nopoints] [--ncol NCOL] {EXPORTS} '
-    '[--modal IVEL MODE] [--freq_tol FREQ_TOL] [--freq_tol_remove FREQ_TOL_REMOVE] [--mag_tol MAG_TOL]\n'
+    '[--modal IVEL MODE] [--freq_tol FREQ_TOL] [--freq_tol_remove FREQ_TOL_REMOVE] [--mag_tol MAG_TOL] [--zaero]\n'
 )
 
+
+def cmd_line_degif(argv=None, plot: bool=True, show: bool=True,
+                   log: Optional[SimpleLogger]=None) -> None:
+    if argv is None:
+        argv = sys.argv[1:]
+    else:
+        # FILE = os.path.abspath(__file__)
+        argv = ['f06'] + argv[2:]
+        # print(argv)
+
+    import argparse
+    ver = str(pyNastran.__version__)
+
+    parent_parser = argparse.ArgumentParser(prog='degif')
+    # positional arguments
+    parent_parser.add_argument('GIF_FILENAME', help='path to input GIF file', type=str)
+    # _add_parser_arguments(parent_parser, ['--lax'])
+
+    # bdf_aero_group = parent_parser.add_mutually_exclusive_group()
+    # bdf_aero_group.add_argument('--bdf', type=str, help='path to input BDF file containing CAEROs')
+    # bdf_aero_group.add_argument('--aerobox', type=str, help='path to exported CAERO file')
+    # bdf_aero_group.add_argument('--encoding', help=f'the encoding method (default=None -> {repr(encoding)})', type=str)
+
+    # parent_parser.add_argument('--cp', help='plot Cp (pressure coefficients)', action='store_true')
+    # parent_parser.add_argument('--force', help='plot aerodynamic forces (Fz)', action='store_true')
+    # parent_parser.add_argument('--moment', help='plot aerodynamic moments (My)', action='store_true')
+    parent_parser.add_argument('-v', '--version', action='version', version=ver)
+    args = parent_parser.parse_args(args=argv[1:])
+
+    gif_filename = args.GIF_FILENAME
+    import os
+    from PIL import Image
+
+    # Open the static GIF image
+    # with Image.open("image.gif") as img:
+    #     # Save the file as a PNG
+    #     img.save("output.png", "PNG")
+
+    dirname = os.path.dirname(gif_filename)
+    basename = os.path.basename(gif_filename)
+    gif_dirname = os.path.splitext(basename)[0]
+    output_folder = os.path.join(dirname, gif_dirname)
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    with Image.open(gif_filename) as img:
+        frame_num = 0
+
+        while True:
+            # Define a unique filename for each frame
+            frame_filename = os.path.join(output_folder, f"frame_{frame_num:03d}.png")
+
+            # Convert the frame to RGBA to preserve transparency correctly
+            frame_rgba = img.convert("RGBA")
+            frame_rgba.save(frame_filename, "PNG")
+
+            print(f"Saved: {frame_filename}")
+            frame_num += 1
+
+            try:
+                # Move to the next frame in the animation sequence
+                img.seek(img.tell() + 1)
+            except EOFError:
+                # Break the loop when the end of the GIF file is reached
+                break
 
 def cmd_line_plot_flutter(argv=None, plot: bool=True, show: bool=True,
                           log: Optional[SimpleLogger]=None) -> dict[int, FlutterResponse]:
@@ -162,13 +244,13 @@ def cmd_line_plot_flutter(argv=None, plot: bool=True, show: bool=True,
 
     is_gui = '--gui' in argv
     is_trade = '--trade' in argv
-    if is_gui:
-        argv.remove('--gui')
-        from pyNastran.f06.dev.flutter.gui_flutter import main as gui_flutter
-    elif is_trade:
+    if is_trade:
         is_gui = True
         argv.remove('--trade')
-        from pyNastran.f06.dev.flutter.gui_flutter_plot import main as gui_flutter
+        from pyNastran.f06.dev.flutter.gui.gui_flutter_plot import main as gui_flutter
+    elif is_gui:
+        argv.remove('--gui')
+        from pyNastran.f06.dev.flutter.gui.gui_flutter import main as gui_flutter
 
     if len(argv) == 2 and is_gui:
         gui_flutter()
@@ -220,7 +302,7 @@ def cmd_line_plot_flutter(argv=None, plot: bool=True, show: bool=True,
         '  --ncol NCOL      the number of columns for the legend\n'
         "  --nopoints       don't plot the points\n"
         "  --noline         don't plot the lines\n"
-        '  --rhoref         use sea level rho0 (density is actually density ratio; rho/rhoSL)'
+        '  --rhoref         use sea level rho0 (density is actually density ratio; rho/rhoSL)\n'
         '  --export_zaero   export a ZAERO file\n'
         '  --export_csv     export a CSV file\n'
         '  --export_f06     export an F06 file (temporary)\n'
@@ -230,6 +312,7 @@ def cmd_line_plot_flutter(argv=None, plot: bool=True, show: bool=True,
         '  --freq_tol FREQ_TOL            sets the delta frequency tolerance for Vg-Vf and kfreq to dash a line\n'
         '  --freq_tol_remove HIDE_FREQ_TOL  sets the delta frequency tolerance for Vg-Vf and kfreq to hide a line\n'
         '  --mag_tol MAG_TOL              sets the magnitude tolerance for modal participation\n'
+        '  --zaero          flag a zaero file\n'
         '\n'
         'Info:\n'
         '  -h, --help      show this help message and exit\n'
@@ -259,6 +342,7 @@ def cmd_line_plot_flutter(argv=None, plot: bool=True, show: bool=True,
     if is_gui:
         gui_flutter(f06_filename)
         return
+    is_zaero = data['--zaero']
     modes = split_int_colon(data['--modes'], start_value=1)
 
     subcases = None
@@ -386,6 +470,36 @@ def cmd_line_plot_flutter(argv=None, plot: bool=True, show: bool=True,
     assert vd_limit is None or isinstance(vd_limit, float_types), vd_limit
     assert damping_limit is None or isinstance(damping_limit, float_types), damping_limit
 
+    ylim_kfreq = None
+    if is_zaero:
+        plot_vg = False
+        plot_vg_vf = False
+        from pyNastran.f06.dev.flutter.read_zaero_out import read_zaero_out, SimpleLogger
+        log = SimpleLogger(level='debug')
+        flutters, mass = read_zaero_out(f06_filename, log=log)
+
+        from pyNastran.f06.parse_flutter import make_flutter_plots
+        make_flutter_plots(modes, flutters, xlim, ylim_damping, ylim_freq, ylim_kfreq,
+                           plot_type,
+                           plot_vg, plot_vg_vf, plot_root_locus, plot_kfreq_damping,
+                           nopoints, noline, ncol=ncol,
+                           ivelocity=ivelocity, mode=mode,
+                           vd_limit=vd_limit, damping_limit=damping_limit,
+                           freq_tol=freq_tol, freq_tol_remove=freq_tol_remove,
+                           mag_tol=mag_tol,
+                           export_csv_filename=export_csv_filename,
+                           export_zaero_filename=export_zaero_filename,
+                           export_veas_filename=export_veas_filename,
+                           export_f06_filename=export_f06_filename,
+                           vg_filename=vg_filename,
+                           vg_vf_filename=vg_vf_filename,
+                           root_locus_filename=root_locus_filename,
+                           modal_participation_filename=modal_participation_filename,
+                           kfreq_damping_filename=kfreq_damping_filename,
+                           subcases=subcases,
+                           show=show, clear=False, close=False)
+        return flutters
+
     flutter_responses = plot_flutter_f06(
         f06_filename, modes=modes,
         subcases=subcases,
@@ -395,7 +509,7 @@ def cmd_line_plot_flutter(argv=None, plot: bool=True, show: bool=True,
         plot_root_locus=plot_root_locus, plot_vg_vf=True, plot_vg=False,
         plot_kfreq_damping=plot_kfreq_damping,
         xlim=xlim,
-        ylim_damping=ylim_damping, ylim_freq=ylim_freq,
+        ylim_damping=ylim_damping, ylim_freq=ylim_freq, ylim_kfreq=ylim_kfreq,
         vd_limit=vd_limit,
         damping_limit=damping_limit,
         freq_tol=freq_tol, freq_tol_remove=freq_tol_remove,
@@ -427,7 +541,7 @@ def get_cmd_line_float(data: dict[str, str], key: str) -> float:
     return value
 
 
-def split_float_colons(string_values: str) -> list[float]:
+def split_float_colons(string_values: str | None) -> list[float]:
     """
     Uses numpy-ish syntax to parse a set of two floats.  Blanks are interpreted as None.
 
@@ -614,6 +728,7 @@ def cmd_line(argv=None, plot: bool=True, show: bool=True,
         '\n'
         '  f06 plot_144 -h | --help\n'
         '  f06 plot_145 -h | --help\n'
+        '  f06 degif -h | --help\n'
         '  f06 plot_200 -h | --help\n'
         '  f06 -v | --version\n'
         '\n'
@@ -626,6 +741,8 @@ def cmd_line(argv=None, plot: bool=True, show: bool=True,
         cmd_line_plot_trim(argv=argv, plot=plot, show=show, log=log)
     elif argv[1] == 'plot_145':
         cmd_line_plot_flutter(argv=argv, plot=plot, show=show, log=log)
+    elif argv[1] == 'degif':
+        cmd_line_degif(argv=argv, plot=plot, show=show, log=log)
     elif argv[1] == 'plot_200':
         cmd_line_plot_optimization(argv=argv, plot=plot, show=show, log=log)
     else:  # pragma: no cover

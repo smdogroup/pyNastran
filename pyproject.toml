@@ -72,7 +72,7 @@ readme = {file="README.md", content-type="text/markdown"}
 #readme = {file="README.rst", content-type="text/x-rst"}
 #readme = "README.rst"
 
-requires-python = '>=3.10,<3.15'
+requires-python = '>=3.11,<3.16'  # 3.15 is dev
 
 #keywords = ["packaging", "dependency", "infer", "pyproject.toml"]
 keywords = ["nastran"]
@@ -88,11 +88,11 @@ classifiers = [
     'Programming Language :: Python',
     'Programming Language :: Python :: 3 :: Only',
     'Programming Language :: Python :: 3',
-    'Programming Language :: Python :: 3.10',
     'Programming Language :: Python :: 3.11',
     'Programming Language :: Python :: 3.12',
     'Programming Language :: Python :: 3.13',
     'Programming Language :: Python :: 3.14',
+    'Programming Language :: Python :: 3.15',
 ]
 #include = [
 #    'gui/icons/*.png',
@@ -139,7 +139,7 @@ gui_pyqt5 = [
     'pandas>=1.4,<3.0',
     'h5py',     # hdf5
     'PyQt5',    # gui library
-    'vtk>=9.0', # rendering library
+    'vtk>=9.0,<9.6', # rendering library
     #'qtpy',
     'imageio < 3.0',
     'pillow >= 8.4.0',  # 2021/10
@@ -190,6 +190,7 @@ test_op4  = 'pyNastran.op4.test.test_op4:main'
 #pynastrangui = 'pyNastran.gui.gui:cmd_line'
 pyNastranGUI = 'pyNastran.gui.gui:cmd_line'
 bdf = 'pyNastran.bdf.mesh_utils.utils:cmd_line'
+op2 = 'pyNastran.op2.tools.utils:cmd_line'
 f06 = 'pyNastran.f06.utils:cmd_line'
 format_converter = 'pyNastran.converters.format_converter:cmd_line_format_converter'
 abaqus_to_nastran = 'pyNastran.converters.abaqus.abaqus_to_nastran:cmd_abaqus_to_nastran'
@@ -368,6 +369,8 @@ external = [
   "E302",
   "E703",
 ]
+[tool.ruff.lint]
+unfixable = ["F401"] # Stops Ruff from auto-deleting unused imports
 
 target-version = "py39"
 

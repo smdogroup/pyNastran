@@ -7,7 +7,7 @@ import numpy as np
 from .geom1_writer import write_geom_header, close_geom_table
 from .geom4_writer import write_spcadd
 from pyNastran.op2.op2_interface.op2_reader import mapfmt
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # pragma: no cover
     from pyNastran.bdf.bdf import BDF
 
 
@@ -81,34 +81,8 @@ def write_ept(op2_file, op2_ascii, model: BDF, endian=b'<',
             # log.warning(f'reading EPT-{name}')
             itable = func(name, pids, itable, op2_file, op2_ascii, model, endian=endian,
                           nastran_format=nastran_format)
-            # itable = write_pfast(name, pids, itable, op2_file, op2_ascii, obj, endian=endian,
-            #                      nastran_format=nastran_format)
-            continue
         else:
             model.log.warning(f'skipping {name}')
-            continue
-        #else:  # pragma: no cover
-            #raise NotImplementedError(name)
-
-        # doesn't include the key
-        nvalues = nfields * nproperties
-        nbytes = _write_table_header(
-            op2_file, op2_ascii, name, key, nvalues, size)
-
-        try:
-            write_card(op2_file, op2_ascii, model, name, pids, spack, endian)
-        except Exception:
-            model.log.error('failed EPT-%s' % name)
-            raise
-        op2_file.write(pack('i', nbytes))
-        itable -= 1
-
-        data = [
-            4, itable, 4,
-            4, 1, 4,
-            4, 0, 4]
-        op2_file.write(pack('9i', *data))
-        op2_ascii.write(str(data) + '\n')
 
     #-------------------------------------
     #print('itable', itable)
@@ -431,7 +405,6 @@ def write_prod(name: str, pids: np.ndarray, itable: int,
     return itable
 
 
-
 def write_ptube(name: str, pids: np.ndarray, itable: int,
                 op2_file: BinaryIO, op2_ascii, model: BDF, endian: bytes=b'<',
                 nastran_format: str='nx') -> int:
@@ -460,6 +433,30 @@ def write_ptube(name: str, pids: np.ndarray, itable: int,
     itable = _write_table_footer(op2_file, op2_ascii, nbytes, itable)
     return itable
 
+def write_pmic(name: str, pids: np.ndarray, itable: int,
+               op2_file: BinaryIO, op2_ascii, model: BDF, endian: bytes=b'<',
+               nastran_format: str='nx') -> int:
+    """writes the PMIC"""
+    size = 4
+    key = (7001, 70, 632)
+    nfields = 1
+    spack = Struct(endian + b'i')
+
+    nproperties = len(pids)
+    nvalues = nfields * nproperties
+    nbytes = _write_table_header(
+        op2_file, op2_ascii, name, key, nvalues, size)
+
+    for pid in sorted(pids):
+        prop = model.properties[pid]
+        # op2.add_pmic(val)
+        # print(prop.get_stats())
+        data = [pid]
+        op2_ascii.write('  pid=%s\n' % pid)
+        op2_file.write(spack.pack(*data))
+
+    itable = _write_table_footer(op2_file, op2_ascii, nbytes, itable)
+    return itable
 
 
 def write_pshear(name: str, pids: np.ndarray, itable: int,
@@ -1035,9 +1032,38 @@ def write_nsmadd(card_type: str, cards: list, itable: int,
                  nastran_format: str='nx', size: int=4) -> int:
     ncards = len(cards)
     nbytes = write_spcadd(card_type, cards, ncards, op2_file, op2_ascii,
-                          endian)
+                          endian, model.log, nastran_format=nastran_format)
     itable = _write_table_footer(op2_file, op2_ascii, nbytes, itable)
     return itable
+
+def write_pconvm(name: str, pids: np.ndarray, itable: int,
+                op2_file: BinaryIO, op2_ascii, model: BDF,
+                endian: bytes=b'<',
+                nastran_format: str='nx') -> int:
+    """writes the PCONMV"""
+    key = (2902, 29, 420)
+    size = 4
+
+    nfields = 8  # 8*4
+    structi = Struct(endian + b'4i 4f')
+    # (pconid, mid, form, flag, coeff, expr, expri, exppo) = out
+
+    nproperties = len(pids)
+    nvalues = nfields * nproperties
+    nbytes = _write_table_header(
+        op2_file, op2_ascii, name, key, nvalues, size)
+    for prop in sorted(pids):
+        # print(pid)
+        # prop = model.convection_properties[pid]
+        # print(prop.get_stats())
+        data = [prop.pconid, prop.mid, prop.form, prop.flag, prop.coeff, prop.expr, prop.exppi, prop.exppo]
+        assert None not in data, data
+        op2_file.write(structi.pack(*data))
+        op2_ascii.write(str(data) + '\n')
+
+    itable = _write_table_footer(op2_file, op2_ascii, nbytes, itable)
+    return itable
+
 
 def write_nsm(name: str, nsms: list, itable: int,
               op2_file: BinaryIO, op2_ascii, model: BDF, endian: bytes=b'<',
@@ -1474,22 +1500,18 @@ def write_pcomp(name: str, pids: np.ndarray, itable: int,
     for pid in sorted(pids):
         prop = model.properties[pid]
 
-        if prop.ft is None:
-            ft = 0
-        elif prop.ft == 'HILL':
-            ft = 1
-        elif prop.ft == 'HOFF':
-            ft = 2
-        elif prop.ft == 'TSAI':
-            ft = 3
-        elif prop.ft == 'STRN':
-            ft = 4
-        elif prop.ft == 'HFAI':  # secret MSC
-            ft = 5
-        elif prop.ft == 'HTAP':  # secret MSC
-            ft = 6
-        elif prop.ft == 'HFAB':  # secret MSC
-            ft = 7
+        mapper = {
+            None: 0,
+            'HILL': 1,
+            'HOFF': 2,
+            'TSAI': 3,
+            'STRN': 4,
+            'HFAI': 5,  # secret MSC
+            'HTAP': 6,  # secret MSC
+            'HFAP': 7,  # secret MSC
+        }
+        if prop.ft in mapper:
+            ft = mapper[prop.ft]
         else:
             raise RuntimeError(f'unsupported ft.  pid={pid} ft={prop.ft!r}.'
                                f'\nPCOMP = {prop}')
@@ -1506,11 +1528,14 @@ def write_pcomp(name: str, pids: np.ndarray, itable: int,
         op2_file.write(s1.pack(*data))
         op2_ascii.write(str(data) + '\n')
 
+        mapper = {'NO': 0, 'YES': 1}
         for (mid, t, theta, sout) in zip(prop.mids, prop.thicknesses, prop.thetas, prop.souts):
-            if sout == 'NO':
-                sout = 0
-            elif sout == 'YES':
-                sout = 1
+            if sout in mapper:
+                sout = mapper[sout]
+            # if sout == 'NO':
+            #     sout = 0
+            # elif sout == 'YES':
+            #     sout = 1
             else:
                 raise RuntimeError(f'unsupported sout.  sout={sout!r} and must be 0 or 1.'
                                    f'\nPCOMP = {data}')
@@ -1699,68 +1724,70 @@ def write_pbush1d(name: str, pids: np.ndarray, itable: int,
          #typef, idtf, idcf,
          #unused_ut, unused_uc) = out
 
-        typea = cvt = cvc = expvt = expvc = idtsu = idtcu = idtsud = idcsud = 0
-        if 'SHOCKA' in prop.vars:
-            #optional_vars['SHOCKA'] = [typea_str, cvt, cvc, expvt, expvc,
-                                       #idts, idets, idtcu, idtsud, idcsud]
-            #shock_cvc : None
-            #shock_cvt : 1000.0
-            #shock_exp_vc : 1.0
-            #shock_exp_vt : 1.0
-            #shock_idecs : None
-            #shock_idecsd : None
-            #shock_idets : None
-            #shock_idetsd : None
-            #shock_idts : None
-            #shock_type : 'TABLE'
-            typea = type_map[prop.shock_type]
-            cvt = prop.shock_cvc if prop.shock_cvc is not None else 0
-            cvc = prop.shock_cvt if prop.shock_cvt is not None else 0
-            expvt = prop.shock_exp_vc if prop.shock_exp_vc is not None else 0
-            expvc = prop.shock_exp_vt if prop.shock_exp_vt is not None else 0
-            idtsu = prop.shock_idts if prop.shock_idts is not None else 0
-            idtcu = prop.shock_idecs if prop.shock_idecs is not None else 0
-            idtsud = prop.shock_idetsd if prop.shock_idetsd is not None else 0
-            idcsud = prop.shock_idecsd if prop.shock_idecsd is not None else 0
+        # if 'SHOCKA' in prop.vars:
+        #optional_vars['SHOCKA'] = [typea_str, cvt, cvc, expvt, expvc,
+                                   #idts, idets, idtcu, idtsud, idcsud]
+        #shock_cvc : None
+        #shock_cvt : 1000.0
+        #shock_exp_vc : 1.0
+        #shock_exp_vt : 1.0
+        #shock_idecs : None
+        #shock_idecsd : None
+        #shock_idets : None
+        #shock_idetsd : None
+        #shock_idts : None
+        #shock_type : 'TABLE'
+        typea = type_map[prop.shock_type]
+        cvt = prop.shock_cvc if prop.shock_cvc is not None else 0
+        cvc = prop.shock_cvt if prop.shock_cvt is not None else 0
+        expvt = prop.shock_exp_vc if prop.shock_exp_vc is not None else 0
+        expvc = prop.shock_exp_vt if prop.shock_exp_vt is not None else 0
+        idtsu = prop.shock_idts if prop.shock_idts is not None else 0
+        idtcu = prop.shock_idecs if prop.shock_idecs is not None else 0
+        idtsud = prop.shock_idetsd if prop.shock_idetsd is not None else 0
+        idcsud = prop.shock_idecsd if prop.shock_idecsd is not None else 0
 
-        types = idts = idcs = idtdus = idcdus = 0
-        if 'SPRING' in prop.vars:
-            #optional_vars['SPRING'] = [types_str, idts, idcs, idtdus, idcdus]
-            #spring_idc : None
-            #spring_idcdu : None
-            #spring_idt : 205
-            #spring_idtc : None
-            #spring_idtdu : None
-            #spring_type : 'TABLE'
-            types = type_map[prop.spring_type]
-            idts = prop.spring_idt if prop.spring_idt is not None else 0
-            idcs = prop.spring_idc if prop.spring_idc is not None else 0
-            idtdus = prop.spring_idtdu if prop.spring_idtdu is not None else 0
-            idcdus = prop.spring_idcdu if prop.spring_idcdu is not None else 0
+        # if 'SPRING' in prop.vars:
+        #optional_vars['SPRING'] = [types_str, idts, idcs, idtdus, idcdus]
+        #spring_idc : None
+        #spring_idcdu : None
+        #spring_idt : 205
+        #spring_idtc : None
+        #spring_idtdu : None
+        #spring_type : 'TABLE'
+        types = type_map[prop.spring_type]
+        idts = prop.spring_idt if prop.spring_idt is not None else 0
+        idcs = prop.spring_idc if prop.spring_idc is not None else 0
+        idtdus = prop.spring_idtdu if prop.spring_idtdu is not None else 0
+        idcdus = prop.spring_idcdu if prop.spring_idcdu is not None else 0
 
-        typed = idtd = idcd = idtdvd = idcdvd = 0
-        if 'DAMPER' in prop.vars:
-            #optional_vars['DAMPER'] = [typed_str, idtd, idcd, idtdvd, idcdvd]
-            #damper_idc : None
-            #damper_idcdv : None
-            #damper_idt : 206
-            #damper_idtdv : None
-            #damper_type : 'TABLE'
-            typed = type_map[prop.damper_type]
-            idtd = prop.damper_idt if prop.damper_idt is not None else 0
-            idcd = prop.damper_idc if prop.damper_idc is not None else 0
-            idtdvd = prop.damper_idtdv if prop.damper_idtdv is not None else 0
-            idcdvd = prop.damper_idcdv if prop.damper_idcdv is not None else 0
+
+        # typed = idtd = idcd = idtdvd = idcdvd = 0
+        # if 'DAMPER' in prop.vars:
+        #optional_vars['DAMPER'] = [typed_str, idtd, idcd, idtdvd, idcdvd]
+        #damper_idc : None
+        #damper_idcdv : None
+        #damper_idt : 206
+        #damper_idtdv : None
+        #damper_type : 'TABLE'
+        typed = type_map[prop.damper_type]
+        idtd = prop.damper_idt if prop.damper_idt is not None else 0
+        idcd = prop.damper_idc if prop.damper_idc is not None else 0
+        idtdvd = prop.damper_idtdv if prop.damper_idtdv is not None else 0
+        idcdvd = prop.damper_idcdv if prop.damper_idcdv is not None else 0
 
         typeg = idtg = idcg = idtdug = idcdug = idtdvg = idcdvg = 0
-        if 'GENER' in prop.vars:
+        geners = [prop.gener_idt, prop.gener_idc,
+                  prop.gener_idtdu, prop.gener_idcdu,
+                  prop.gener_idtdv, prop.gener_idcdv]
+        if any(val is not None for val in geners):
             #typeg = type_map[typeg_str]
             #optional_vars['GENER'] = [idtg, idcg, idtdug, idcdug, idtdvg, idcdvg]
             gener
 
         typef = idtf = idcf = 0  #type_map[typef_str]  # FUSE...what is this???
         ut = uc = 0
-        data = [pid, prop.k, prop.c, prop.m, alpha, prop.sa, prop.se,
+        data = [pid, prop.k, prop.c, prop.mass, alpha, prop.sa, prop.se,
                 typea, cvt, cvc, expvt, expvc, idtsu, idtcu, idtsud, idcsud,
                 types, idts, idcs, idtdus, idcdus,
                 typed, idtd, idcd, idtdvd, idcdvd,
@@ -1802,7 +1829,6 @@ def write_pelas(name: str, props: list, itable: int,
                 endian: bytes=b'<',
                 nastran_format: str='nx', size: int=4) -> int:
     key = (302, 3, 46)
-
     nfieldsi = len(props) * 4
     nbytes = _write_table_header(
         op2_file, op2_ascii, name, key, nfieldsi, size)
@@ -1842,6 +1868,140 @@ def write_pdamp(name: str, props: list, itable: int,
     itable = _write_table_footer(op2_file, op2_ascii, nbytes, itable)
     return itable
 
+
+def write_paabsf(name: str, props: list, itable: int,
+                 op2_file: BinaryIO, op2_ascii,
+                 model: BDF, endian: bytes=b'<',
+                 nastran_format: str='nx', size: int=4) -> int:
+    """
+    PAABSF(1502,15,36)
+    Defines the properties of a frequency-dependent acoustic absorber
+    Word Name Type Description
+    1 PID     I Property identification number
+    2 TZREID  I TABLEDi entry identification number for resistance
+    3 TZMID   I TABLEDi entry identification number for reactance
+    4 S      RS Impedance scale factor
+    5 A      RS Area factor when only 1 or 2 grid points are specified
+    6 B      RS Equivalent structural damping
+    7 K      RS Equivalent stiffness
+    8 RHOC   RS Constant used for absorption coefficient
+    """
+    key = (1502, 15, 36)
+    # ntotal = 8 * size  # 8*4
+    spack = Struct(mapfmt(endian + b'3i 5f', size))
+
+    nfieldsi = len(props) * 8
+    nbytes = _write_table_header(
+        op2_file, op2_ascii, name, key, nfieldsi, size)
+
+    for pid in sorted(props):
+        prop = model.properties[pid]
+        tzreid = prop.tzreid if prop.tzreid is not None else 0
+        tzimid = prop.tzimid if prop.tzimid is not None else 0
+        data = [pid, tzreid, tzimid, prop.s, prop.a, prop.b, prop.k, prop.rhoc]
+        assert None not in data, (data, data.index(None))
+        op2_file.write(spack.pack(*data))
+        op2_ascii.write(str(data) + '\n')
+    itable = _write_table_footer(op2_file, op2_ascii, nbytes, itable)
+    return itable
+
+def write_pacbar(name: str, props: list, itable: int,
+                 op2_file: BinaryIO, op2_ascii,
+                 model: BDF, endian: bytes = b'<',
+                 nastran_format: str = 'nx', size: int = 4) -> int:
+    """
+    prop = model.add_pacbar(pid, mback, mseptm, freson, kreson, comment='pacbar')
+    """
+    key = (8500, 85, 384)
+    # ntotal = 8 * size  # 8*4
+    spack = Struct(mapfmt(endian + b'i 4f', size))
+
+    nfieldsi = len(props) * 5
+    nbytes = _write_table_header(
+        op2_file, op2_ascii, name, key, nfieldsi, size)
+
+    for pid in sorted(props):
+        prop = model.properties[pid]
+        # tzreid = prop.tzreid if prop.tzreid is not None else 0
+        # tzimid = prop.tzimid if prop.tzimid is not None else 0
+        # prop = model.add_pacbar(pid, mback, mseptm, freson, kreson, comment='pacbar')
+        data = [pid, prop.mback, prop.mseptm, prop.freson, prop.kreson]
+        assert None not in data, (data, data.index(None))
+        op2_file.write(spack.pack(*data))
+        op2_ascii.write(str(data) + '\n')
+    itable = _write_table_footer(op2_file, op2_ascii, nbytes, itable)
+    return itable
+
+def write_pacbar(name: str, props: list, itable: int,
+                 op2_file: BinaryIO, op2_ascii,
+                 model: BDF, endian: bytes = b'<',
+                 nastran_format: str = 'nx', size: int = 4) -> int:
+    """
+    prop = model.add_pacbar(pid, mback, mseptm, freson, kreson, comment='pacbar')
+    """
+    key = (8500, 85, 384)
+    # ntotal = 8 * size  # 8*4
+    spack = Struct(mapfmt(endian + b'i 4f', size))
+
+    nfieldsi = len(props) * 5
+    nbytes = _write_table_header(
+        op2_file, op2_ascii, name, key, nfieldsi, size)
+
+    for pid in sorted(props):
+        prop = model.properties[pid]
+        # tzreid = prop.tzreid if prop.tzreid is not None else 0
+        # tzimid = prop.tzimid if prop.tzimid is not None else 0
+        # prop = model.add_pacbar(pid, mback, mseptm, freson, kreson, comment='pacbar')
+        data = [pid, prop.mback, prop.mseptm, prop.freson, prop.kreson]
+        assert None not in data, (data, data.index(None))
+        op2_file.write(spack.pack(*data))
+        op2_ascii.write(str(data) + '\n')
+    itable = _write_table_footer(op2_file, op2_ascii, nbytes, itable)
+    return itable
+
+def write_pacabs(name: str, props: list, itable: int,
+                 op2_file: BinaryIO, op2_ascii,
+                 model: BDF, endian: bytes = b'<',
+                 nastran_format: str = 'nx', size: int = 4) -> int:
+    """
+    def add_pacabs(self, pid: int, cutfr: float,
+                   b: float, k: float, m: float,
+                   synth: bool=True,
+                   tid_resistance: int=0,
+                   tid_reactance: int=0,
+                   tid_weight: int=0, comment: str='') -> PACABS:
+    TODO: wrong...
+    """
+    key = (8300, 83, 382)
+    # ntotal = 8 * size  # 8*4
+    spack = Struct(mapfmt(endian + b'i 4f 4s 3i', size))  # TODO: should be 10?
+
+    nfieldsi = len(props) * 9
+    nbytes = _write_table_header(
+        op2_file, op2_ascii, name, key, nfieldsi, size)
+
+    for pid in sorted(props):
+        prop = model.properties[pid]
+        # def add_pacabs(self, pid: int, cutfr: float,
+        #                b: float, k: float, m: float,
+        #                synth: bool = True,
+        #                tid_resistance: int = 0,
+        #                tid_reactance: int = 0,
+        #                tid_weight: int = 0, comment: str = '') -> PACABS:
+        synth = b'YES ' if prop.synth else b'NO '
+        b = prop.b if prop.b is not None else 0.0
+        k = prop.k if prop.k is not None else 0.0
+        m = prop.k if prop.m is not None else 0.0
+        data = [pid, prop.cutfr,
+                b, k, m,
+                synth, prop.tid_resistance,
+                prop.tid_reactance, prop.tid_weight]
+        model.log.warning(str(data))
+        assert None not in data, (data, data.index(None))
+        op2_file.write(spack.pack(*data))
+        op2_ascii.write(str(data) + '\n')
+    itable = _write_table_footer(op2_file, op2_ascii, nbytes, itable)
+    return itable
 
 def _write_table_header(op2_file: BinaryIO, op2_ascii,
                         name: str, key: tuple[int, int, int],
@@ -1901,4 +2061,9 @@ EPT_MAP = {
     'PELAST': write_pelast,
     'PHBDY': write_phbdy,
     'PGPLSN': write_pgplsn,
+    'PCONVM': write_pconvm,
+    'PAABSF': write_paabsf,
+    'PACBAR': write_pacbar,
+    # 'PACABS': write_pacabs,
+    'PMIC': write_pmic,
 }

@@ -1,8 +1,8 @@
 #import warnings
 #warnings.filterwarnings('ignore', 'missing __init__.py*')
 
-import sys
 import os
+import sys
 try:
     import tables
     IS_TABLES = True
@@ -28,10 +28,10 @@ from pyNastran.bdf.test.all_tests import *
 from pyNastran.op2.test.all_tests import *
 
 #f06
-from pyNastran.f06.test.all_tests import *
+from pyNastran.f06.test.all_tests_no_gui import *
 
 #op4
-from pyNastran.op4.test.op4_unit_tests import TestOP4
+from pyNastran.op4.test.op4_unit_tests import TestOP4, TestOP4Fast
 
 #utils
 from pyNastran.utils.test.all_tests import *
@@ -48,15 +48,12 @@ from pyNastran.gui.test.all_tests_no_gui import *
 # import pyNastran.gui.gui
 
 import pyNastran.dev
-from pyNastran.dev.tools.all_tests import TestInrel, TestPressureMap
-try:
-    from pyNastran.dev.solver.test_solver1_springs import *
-except ImportError:  # pragma: no cover
-    pass
+from pyNastran.dev.tools.all_tests import *
 if IS_TABLES:
     from pyNastran.dev.bdf_vectorized3.test.all_tests import *
 
 
 if __name__ == "__main__":  # pragma: no cover
     import unittest
-    unittest.main()
+    with np.errstate(divide='raise', over='raise', under='raise', invalid='raise'):
+        unittest.main()

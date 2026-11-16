@@ -1,5 +1,6 @@
 # coding: utf-8
 #pylint disable=C0103
+import copy
 from itertools import count
 # import warnings
 from typing import TextIO, Optional
@@ -11,6 +12,7 @@ from pyNastran.op2.op2_interface.write_utils import to_column_bytes, view_dtype,
 from pyNastran.op2.result_objects.utils_pandas import build_dataframe_transient_header, build_pandas_transient_element_node
 from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import (
     StressObject, StrainObject, OES_Object,
+    slice_eids_by_index,
     oes_real_data_code, get_scode,
     set_static_case, set_modal_case, set_transient_case)
 from pyNastran.op2.stress_reduction import von_mises_2d, principal_2d, max_shear, ovm_shear_2d
@@ -72,6 +74,112 @@ class RealPlateArray(OES_Object):
         # else:
         #     raise NotImplementedError('SORT2')
 
+    def h5_table_dict(self) -> dict:
+        from tables import Int64Col, Float64Col, StringCol
+        nnode = self.nnodes_per_element
+        if nnode == 1:
+            h5_table_dict = {
+                'EID': Int64Col(pos=0),
+                'FD1': Float64Col(pos=1),
+                'X1': Float64Col(pos=2),
+                'Y1': Float64Col(pos=3),
+                'TXY1': Float64Col(pos=4),
+                'FD2': Float64Col(pos=5),
+                'X2': Float64Col(pos=6),
+                'Y2': Float64Col(pos=7),
+                'TXY2': Float64Col(pos=8),
+                'DOMAIN_ID': Int64Col(pos=9),
+            }
+        else:
+            h5_table_dict = {
+                'EID': Int64Col(pos=0),
+                'TERM': StringCol(4, pos=0),
+                'GRID': Int64Col(shape=(nnode,), pos=0),
+                'FD1': Float64Col(shape=(nnode,), pos=1),
+                'X1': Float64Col(shape=(nnode,), pos=2),
+                'Y1': Float64Col(shape=(nnode,), pos=3),
+                'TXY1': Float64Col(shape=(nnode,), pos=4),
+                'FD2': Float64Col(shape=(nnode,), pos=5),
+                'X2': Float64Col(shape=(nnode,), pos=6),
+                'Y2': Float64Col(shape=(nnode,), pos=7),
+                'TXY2': Float64Col(shape=(nnode,), pos=8),
+                'DOMAIN_ID': Int64Col(pos=9),
+            }
+
+        return h5_table_dict
+
+    def slice_by_element_id(self, eids: np.ndarray,
+                            assume_exists: bool=False, inplace: bool=False):
+        nnode = self.nnodes_per_element
+        neid = self.get_neid()
+        nlayer = nnode * 2
+        ntime, _, nresult = self.data.shape
+
+        element_node = self.element_node.reshape(neid, nlayer, 2)
+        element = element_node[:, 0, 0]
+        eids, ieid, neid2 = slice_eids_by_index(element, eids, assume_exists)
+        neid2_nlayer = neid2 * nlayer
+        data = self.data.reshape(ntime, neid, nlayer, nresult)
+
+        obj = self if inplace else copy.deepcopy(self)
+        element_node2 = element_node[ieid, :, :]
+        data2 = data[:, ieid, :, :]
+        obj.element_node = element_node2.reshape(neid2_nlayer, 2)
+        obj.data = data2.reshape(ntime, neid2_nlayer, nresult)
+        obj.nelements = len(ieid)
+        return obj
+
+    def get_neid(self) -> int:
+        neid_nnode = self.element_node.shape[0]
+        nnode = self.nnodes_per_element
+        neid = neid_nnode // nnode // 2
+        return neid
+
+    def add_to_h5_array(self, arr, ntime_neid0: int, ntime_neid1: int, itime: int):
+        neid_nnode = self.element_node.shape[0]
+        nnode = self.nnodes_per_element
+        # print(f'neid_nnode = {neid_nnode}')
+        # print(f'nnode = {nnode}')
+        # neid = neid_nnode // nnode // 2
+        neid = self.get_neid()
+        eids_doubled = self.element_node[:, 0]
+        # print(f'{self.element_name}: element_nodes0={self.element_node[:, 1]}')
+        element_nodes = self.element_node[:, 1].reshape(neid, nnode, 2)[:, :, 0]
+        # print(f'{self.element_name}: element_nodes={element_nodes}')
+        # print(f'{self.element_name}: eids_doubled = {eids_doubled}')
+        # print(f'{self.element_name}: neid={neid}')
+        element = eids_doubled.reshape(neid, nnode*2)[:, 0]
+        # print(f'{self.element_name}: element={element}')
+
+        arr["EID"][ntime_neid0:ntime_neid1] = element
+        ntime, neid2, nresult = self.data.shape
+        if nnode == 1:
+            data = self.data.reshape((ntime, neid, 2, nresult))
+            assert self.data.ndim == 3, self.data.shape
+            arr["FD1"][ntime_neid0:ntime_neid1] = data[itime, :, 0, 0]
+            arr["X1"][ntime_neid0:ntime_neid1] = data[itime, :, 0, 1]
+            arr["Y1"][ntime_neid0:ntime_neid1] = data[itime, :, 0, 2]
+            arr["TXY1"][ntime_neid0:ntime_neid1] = data[itime, :, 0, 2]
+
+            arr["FD2"][ntime_neid0:ntime_neid1] = data[itime, :, 1, 0]
+            arr["X2"][ntime_neid0:ntime_neid1] = data[itime, :, 1, 1]
+            arr["Y2"][ntime_neid0:ntime_neid1] = data[itime, :, 1, 2]
+            arr["TXY2"][ntime_neid0:ntime_neid1] = data[itime, :, 1, 2]
+        else:
+            # print(f'ntime={ntime} neid={neid} nnode={nnode} nresult={nresult}')
+            data = self.data.reshape((ntime, neid, nnode, 2, nresult))
+            arr["TERM"][ntime_neid0:ntime_neid1] = 'CEN/'
+            arr["GRID"][ntime_neid0:ntime_neid1] = element_nodes
+            arr["FD1"][ntime_neid0:ntime_neid1] = data[itime, :, :, 0, 0]
+            arr["X1"][ntime_neid0:ntime_neid1] = data[itime, :, :, 0, 1]
+            arr["Y1"][ntime_neid0:ntime_neid1] = data[itime, :, :, 0, 2]
+            arr["TXY1"][ntime_neid0:ntime_neid1] = data[itime, :, :, 0, 2]
+
+            arr["FD2"][ntime_neid0:ntime_neid1] = data[itime, :, :, 1, 0]
+            arr["X2"][ntime_neid0:ntime_neid1] = data[itime, :, :, 1, 1]
+            arr["Y2"][ntime_neid0:ntime_neid1] = data[itime, :, :, 1, 2]
+            arr["TXY2"][ntime_neid0:ntime_neid1] = data[itime, :, :, 1, 2]
+
     @property
     def is_real(self) -> bool:
         return True
@@ -102,7 +210,7 @@ class RealPlateArray(OES_Object):
         self.itotal = 0
         self.ielement = 0
 
-    def is_bilinear(self):
+    def is_bilinear(self) -> bool:
         if self.element_type in [33, 74]:  # CQUAD4, CTRIA3
             return False
         elif self.element_type in [144, 64, 82, 70, 75]:  # CQUAD4
@@ -110,7 +218,7 @@ class RealPlateArray(OES_Object):
         else:  # pragma: no cover
             raise NotImplementedError(f'name={self.element_name} type={self.element_type}')
 
-    def build(self):
+    def build(self) -> None:
         """sizes the vectorized attributes of the RealPlateArray"""
         #print("self.ielement = %s" % self.ielement)
         #print('ntimes=%s nelements=%s ntotal=%s' % (self.ntimes, self.nelements, self.ntotal))
@@ -185,6 +293,13 @@ class RealPlateArray(OES_Object):
         #                       f'sort_method={self.sort_method} nlayers_per_element={nlayers_per_element} nlayers={nlayers}')
 
         assert nlayers >= 2, self.code_information()
+
+        # nlayers is the number of rows (nelements * nnodes_per_element * 2 layers);
+        # nelements is the *actual* number of elements
+        #   CTRIA3:      1 centroid  * 2 layers = 2 rows/element
+        #   CQUAD4-144: (4+1) nodes * 2 layers = 10 rows/element
+        assert nlayers % nlayers_per_element == 0, (nlayers, nlayers_per_element)
+        self.nelements = nlayers // nlayers_per_element
         _times = np.zeros(ntimes, dtype=self.analysis_fmt)
         element_node = np.zeros((nlayers, 2), dtype=idtype)
 
@@ -228,7 +343,7 @@ class RealPlateArray(OES_Object):
         #headers = [fiber_dist, 'oxx', 'oyy', 'txy', 'angle', 'omax', 'omin', ovm]
         omax = self.data[:, :, 5]
         omin = self.data[:, :, 6]
-        max_sheari = max_shear(omax, omin)
+        max_sheari = max_shear(omax, omin, self.is_stress)
         return max_sheari
 
     def build_dataframe(self):
@@ -325,6 +440,69 @@ class RealPlateArray(OES_Object):
             # data_frame = df1.join(df2)
             data_frame = data_frame.reset_index().set_index(['ElementID', 'NodeID', 'Location'])
         self.data_frame = data_frame
+
+    def envelope(self,
+                 eids: np.ndarray,
+                 result_name: str,
+                 consider_corner_nodes: bool=False) -> np.ndarray:
+        is_min = (result_name == 'min')
+        func_name = 'min' if is_min else 'max'
+        max_min_func = getattr(np, func_name)
+
+        # print(''.join(self.get_stats()))
+        element = np.unique(self.element_node[:, 0])
+        # print(f'element = {element}')
+        ielement = np.searchsorted(element, eids)
+        assert np.array_equal(element[ielement], eids)
+
+        # [fiber_dist, oxx, oyy, txy, angle,
+        #  major_principal, minor_principal, ovm]
+        stress_strain_dict_map = {
+            'max': 5,
+            'min': 6,
+        }
+        neid = len(element)
+        ntime, nelement_node_layer, _ = self.data.shape
+        if result_name == 'von_mises':
+            data = self.von_mises()
+        elif result_name == 'max_shear':
+            data = self.max_shear()
+        elif result_name == 'abs_max':
+            # TODO: wrong, but ok...
+            data = np.abs(self.abs_principal())
+            assert data.shape == (ntime, nelement_node_layer), data.shape
+        elif result_name in stress_strain_dict_map:
+            iresult = stress_strain_dict_map[result_name]
+            data = self.data[:, :, iresult]
+        else:  # pragma: No cover
+            raise NotImplementedError(result_name)
+
+        is_corner_nodes = len(self.element_node) > 1 and self.element_node[2, 1] != 0
+        assert data.ndim == 2, data.shape
+        ntime, nelement_nnode = data.shape
+
+        # print(is_corner_nodes, consider_corner_nodes)
+        if is_corner_nodes:
+            data = data.reshape(ntime, neid, self.nnodes_per_element, 2)
+            if consider_corner_nodes:
+                # arr = np.random.rand(3, 4, 5)  # 3 matrices, 4 rows, 5 columns
+                # col_max = arr.max(axis=1)  # Result shape: (3, 5)
+                # eid_data = data[:, :, :].max(axis=(0, 2))
+                eid_data = max_min_func(data, axis=(0, 2, 3))
+                assert eid_data.shape == (neid,), eid_data.shape
+            else:
+                # eid_data = data[:, :, 0].max(axis=0)
+                eid_data = max_min_func(data[:, :, 0, :], axis=(0, 2))
+                assert eid_data.shape == (neid,), eid_data.shape
+        else:
+            # data.shape = (ntime, neid, 2)
+            # print(data.shape)
+            # print(self.element_node)
+            data2 = data.reshape(ntime, neid, 2)
+            # eid_data = data.max(axis=(0,2))
+            eid_data = max_min_func(data2, axis=(0, 2))
+            assert eid_data.shape == (neid, ), eid_data.shape
+        return eid_data[ielement]
 
     @classmethod
     def _add_case(cls,
@@ -900,7 +1078,7 @@ class RealPlateArray(OES_Object):
                 # tria3
                 if is_linear:  # CQUAD4, CTRIA3, CTRIAR linear, CQUADR linear
                     if ilayer == 0:
-                        f06_file.write('0  %6i   %-13s     %-13s  %-13s  %-13s   %8.4f   %-13s   %-13s  %s\n' % (
+                        f06_file.write('0 %7d   %-13s     %-13s  %-13s  %-13s   %8.4f   %-13s   %-13s  %s\n' % (
                             eid, fdi, oxxi, oyyi, txyi, anglei, major, minor, ovmi))
                     else:
                         f06_file.write('   %6s   %-13s     %-13s  %-13s  %-13s   %8.4f   %-13s   %-13s  %s\n' % (
@@ -909,7 +1087,7 @@ class RealPlateArray(OES_Object):
                 elif is_bilinear:  # CQUAD8, CTRIAR, CTRIA6, CQUADR, CQUAD4
                     # bilinear
                     if nid == 0 and ilayer == 0:  # CEN
-                        f06_file.write('0  %8i %8s  %-13s  %-13s %-13s %-13s   %8.4f  %-13s %-13s %s\n' % (
+                        f06_file.write('0 %8d %8s  %-13s  %-13s %-13s %-13s   %8.4f  %-13s %-13s %s\n' % (
                             eid, cen_word, fdi, oxxi, oyyi, txyi, anglei, major, minor, ovmi))
                     elif ilayer == 0:
                         f06_file.write('   %8s %8i  %-13s  %-13s %-13s %-13s   %8.4f  %-13s %-13s %s\n' % (

@@ -1,3 +1,4 @@
+import copy
 from struct import Struct, pack
 import inspect
 
@@ -6,7 +7,7 @@ from numpy import zeros, allclose
 
 from pyNastran.op2.result_objects.op2_objects import get_times_dtype
 from pyNastran.op2.result_objects.utils_pandas import build_dataframe_transient_header, build_pandas_transient_elements
-from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import StressObject, StrainObject, OES_Object
+from pyNastran.op2.tables.oes_stressStrain.real.oes_objects import StressObject, StrainObject, OES_Object, slice_eids_by_index
 from pyNastran.f06.f06_formatting import _eigenvalue_header #, get_key0
 
 
@@ -20,6 +21,14 @@ class RealWeldArray(OES_Object):
             #self.add_new_eid = self.add_new_eid_sort1
         #else:
             #raise NotImplementedError('SORT2')
+
+    def slice_by_element_id(self, eids: np.ndarray, assume_exists: bool=False, inplace: bool=False):
+        eids, ieid, neid2 = slice_eids_by_index(self.element, eids, assume_exists)
+        obj = self if inplace else copy.deepcopy(self)
+        obj.element = obj.element[ieid]
+        obj.data = obj.data[:, ieid, :]
+        obj.nelements = len(ieid)
+        return obj
 
     @property
     def is_real(self) -> bool:
@@ -268,14 +277,7 @@ class RealWeldArray(OES_Object):
             raise NotImplementedError('SORT2')
         struct1 = Struct(endian + b'i 7f')
 
-        fdtype = self.data.dtype
-        if self.size == fdtype.itemsize:
-            pass
-        else:
-            # print(f'downcasting {self.class_name}...')
-            #idtype = np.int32(1)
-            fdtype = np.float32(1.0)
-
+        fdtype = fdtype_from_data(self.data, self.size)
         # [eid, axial, maxa, mina, maxb, minb, max_shear, bearing]
         data_out = np.empty((nelements, 7), dtype=fdtype)
         data_out[:, 0] = eids_device.view(fdtype)

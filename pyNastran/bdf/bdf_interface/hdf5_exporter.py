@@ -64,7 +64,7 @@ dict_int_obj_attrs: list[str] = [
     # contact
     'bconp', 'bcrparas', 'bctadds',
     'bctparas', 'bctsets', 'blseg', 'bsurf', 'bsurfs',
-    'bgadds', 'bgsets', 'bctparms',
+    'bgadds', 'bgsets', 'bctparms', 'bgparm',
     'bfric', 'bcbodys',
 
     # other
@@ -128,7 +128,9 @@ scalar_keys: list[str] = [
     'bdf_filename',
     '_auto_reject', '_encoding', '_iparse_errors', '_is_cards_dict',
     '_is_dynamic_syntax', '_is_long_ids', '_ixref_errors', '_nastran_format', '_nparse_errors',
-    '_nxref_errors', '_sol', '_stop_on_duplicate_error', '_stop_on_parsing_error',
+    '_nxref_errors', '_sol', '_stop_on_duplicate_error',
+    '_stop_on_parsing_error', '_warn_on_equivalent_duplicate',
+    '_warn_on_reject_cards',
     #'_stop_on_xref_error',
     '_xref', 'active_filename',
     'dumplines', 'echo', 'force_echo_off', 'include_dir',
@@ -136,7 +138,6 @@ scalar_keys: list[str] = [
     'read_includes', 'save_file_structure', 'sol', 'sol_iline', 'nastran_format',
     'is_superelements', 'is_zaero', 'sol_method', 'debug',
     #'_unique_bulk_data_cards',
-    #'is_bdf_vectorized',
     #'is_long_ids',
 
 

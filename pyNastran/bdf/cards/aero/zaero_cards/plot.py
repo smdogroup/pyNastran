@@ -1,7 +1,8 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 
-from pyNastran.bdf.field_writer_8 import print_card_8
+from pyNastran.utils.numpy_utils import integer_types
+from pyNastran.bdf.field_writer_8 import print_card_8, print_float_8
 from pyNastran.bdf.cards.base_card import BaseCard
 from pyNastran.bdf.bdf_interface.assign_type import (
     integer, integer_or_blank, double, string,
@@ -23,9 +24,9 @@ class PLTMODE(BaseCard):
     type = 'PLTMODE'
 
     def __init__(self, set_id: int, symmetry: str,
-                 mode: int, max_disp: float,
-                 output_format: str, filename: str,
-                 comment: str=''):
+                 mode: int, output_format: str, filename: str,
+                 mode_type: str='AERO', max_disp: float = 1.0,
+                 aero_filename: str='AEROGEOM.PAT', comment: str=''):
         BaseCard.__init__(self)
 
         if comment:
@@ -36,11 +37,15 @@ class PLTMODE(BaseCard):
         self.set_id = set_id
         self.mode = mode
         self.symmetry = symmetry
+        self.mode_type = mode_type
         self.max_disp = max_disp
         self.output_format = output_format
         self.filename = filename
+        self.aero_filename = aero_filename
         assert output_format in {'TECPLOT', 'FEMAP', 'NASTRAN', 'PATRAN'}, output_format
         assert symmetry in {'SYM', 'ASYM', 'ANTI'}, symmetry
+        assert mode_type in {'AERO', 'BOTH'}, mode_type
+        assert isinstance(self.mode, integer_types), self.mode
 
     @classmethod
     def add_card(cls, card: BDFCard, comment: str=''):
@@ -55,8 +60,8 @@ class PLTMODE(BaseCard):
 
         symmetry = string(card, 2, 'sym/asym')
         mode = integer(card, 3, 'mode')
-        mode_type = '' if card.field(4) is None else card.field(4)
-        max_disp = double(card, 5, 'max_disp')
+        mode_type = string_or_blank(card, 4, 'mode_type', default='AERO')
+        max_disp = double_or_blank(card, 5, 'max_disp', default=1.0)
         # if max_disp is None:
         #     ifield += 1
         #     max_disp = double(card, ifield, 'max_disp')
@@ -64,18 +69,19 @@ class PLTMODE(BaseCard):
         output_format = string(card, 6, 'format')
 
         filename = string_multifield_dollar_int(card, (7, 8), 'filename')
-        # assert filename == 'GAFA_MODE4.PLT', filename
         aero_filename = string_multifield_dollar_int_or_blank(
             card, (9, 10), 'aero_filename', default='AEROGEOM.PAT')
         assert len(card) <= 9, f'len(PLTMODE card) = {len(card):d}\ncard={card}'
-        return PLTMODE(set_id, symmetry, mode, max_disp,
-                       output_format, filename, comment=comment)
+        return PLTMODE(set_id, symmetry, mode, output_format, filename,
+                       mode_type=mode_type, max_disp=max_disp,
+                       aero_filename=aero_filename, comment=comment)
 
     def cross_reference(self, model: BDF) -> None:
         return
 
     def safe_cross_reference(self, model: BDF, xref_errors) -> None:
-        self.cross_reference(model)
+        return
+        # self.cross_reference(model)
 
     def uncross_reference(self) -> None:
         pass
@@ -91,16 +97,29 @@ class PLTMODE(BaseCard):
 
         """
         filenamea, filenameb = split_filename_dollar(self.filename)
-
+        aero_filenamea, aero_filenameb = split_filename_dollar(self.aero_filename)
         list_fields = [
             'PLTMODE', self.set_id, self.symmetry,
-            self.mode, self.max_disp,
-            self.output_format, filenamea, filenameb]
+            self.mode, self.mode_type, self.max_disp,
+            self.output_format, filenamea, filenameb, aero_filenamea, aero_filenameb]
         return list_fields
 
     def write_card(self, size: int=8, is_double: bool=False) -> str:
+        disp_str = str(self.max_disp)
+        assert len(disp_str) < 8, disp_str
+        assert len(self.filename) <= 16, f'filename={self.filename}; n={len(self.filename)} > 16'
+        filename = self.filename if len(self.filename) == 16 else f' {self.filename:15}'
+        if self.aero_filename == 'AEROGEOM.PAT':
+            aero_filename = ''
+        else:
+            aero_filename = self.aero_filename if len(self.aero_filename) == 16 else f' {self.aero_filename:15}'
+        # msg = '$\t' * 7 + '\n'
+        assert isinstance(self.mode, integer_types), self.mode
+        msg = (
+            f'PLTMODE {self.set_id:<8d}{self.symmetry:8}{self.mode:<8d}{self.mode_type:8}{disp_str:8}{self.output_format:8}{filename}\n'
+            f'        {aero_filename}'.rstrip())
         card = self.repr_fields()
-        return self.comment + print_card_8(card)
+        return self.comment + msg + '\n' # print_card_8(card)
 
 
 class PLTAERO(BaseCard):
@@ -150,7 +169,6 @@ class PLTAERO(BaseCard):
         #max_disp = double(card, 4, 'max_disp')
 
         out_format = string(card, 4, 'format')
-
         filename = string_multifield(card, (5, 6), 'filename')
 
         cell = string_or_blank(card, 7, 'cell', default='NO')
@@ -185,9 +203,12 @@ class PLTAERO(BaseCard):
         return list_fields
 
     def write_card(self, size: int=8, is_double: bool=False) -> str:
-        # TODO: needs a better writer
+        assert len(self.filename) <= 16, f'filename={self.filename}; n={len(self.filename)} > 16'
+        filename = self.filename if len(self.filename) == 16 else f' {self.filename:15}'
+        msg = f'PLTAERO {self.set_id:<8d}{self.femgrid:8}{self.offset:<8d}{self.out_format:8}{filename:16s}{self.cell:8}{self.vct:8}\n'
         card = self.repr_fields()
-        return self.comment + print_card_8(card)
+        return self.comment + msg
+
 
 class PLTVG(BaseCard):
     type = 'PLTVG'
@@ -209,8 +230,6 @@ class PLTVG(BaseCard):
         self.filename = filename
         self.rho_ref = rho_ref
         # assert out_format in {'TECPLOT', 'PATRAN', 'IDEAS', 'FEMAP', 'NASTRAN', 'NASTL', 'ANSYS'}, out_format
-        # assert vct in {'YES', 'NO'}, vct
-        # assert cell in {'YES', 'NO'}, cell
         assert xaxis in {'M', 'R', 'Q', 'H', 'V/VR', 'V', 'EQUV'}, f'field4={xaxis!r}'
         assert output_format in {'TABLE', 'IDEAS', 'FEMAP', 'ESA'}, f'output_format={output_format!r}'
 
@@ -265,9 +284,12 @@ class PLTVG(BaseCard):
         return list_fields
 
     def write_card(self, size: int=8, is_double: bool=False) -> str:
-        # TODO: needs a better writer
         card = self.repr_fields()
-        return self.comment + print_card_8(card)
+        assert len(self.filename) <= 16, f'filename={self.filename}; n={len(self.filename)} > 16'
+        filename = self.filename if len(self.filename) == 16 else f' {self.filename:15}'
+        msg = (f'PLTVG   {self.set_id:<8d}{self.flutter_id:<8d}{self.nmode:<8d}'
+               f'{self.xaxis:8}{self.output_format:8}{filename}\n')
+        return self.comment + msg
 
 
 class PLTCP(BaseCard):
@@ -294,8 +316,6 @@ class PLTCP(BaseCard):
         self.aero_filename = aero_filename
         assert sym_flag in {'SYM', 'ANTI'}, sym_flag
         assert out_format in {'TECPLOT',}, out_format
-        # assert vct in {'YES', 'NO'}, vct
-        # assert cell in {'YES', 'NO'}, cell
 
     @classmethod
     def add_card(cls, card: BDFCard, comment: str=''):
@@ -355,7 +375,13 @@ class PLTCP(BaseCard):
     def write_card(self, size: int = 8, is_double: bool = False) -> str:
         # TODO: needs a better writer
         card = self.repr_fields()
-        return self.comment + print_card_8(card)
+        assert len(self.filename) <= 16, f'filename={self.filename}; n={len(self.filename)} > 16'
+        assert len(self.aero_filename) <= 16, f'aero_filename={self.aero_filename}; n={len(self.aero_filename)} > 16'
+        filename = self.filename if len(self.filename) == 16 else f' {self.filename:15}'
+        aero_filename = self.aero_filename if len(self.aero_filename) == 16 else f' {self.aero_filename:15}'
+        msg = f'PLTCP   {self.set_id:<8d}{self.sym_flag:8}{self.mkaeroz_id:<8d}{self.ik:<8d}'\
+              f'{self.mode:<8d}{self.out_format:8}{filename:16s}\n        {aero_filename:16s}\n'
+        return self.comment + msg
 
 
 class PLTMIST(BaseCard):
@@ -434,7 +460,12 @@ class PLTMIST(BaseCard):
     def write_card(self, size: int=8, is_double: bool=False) -> str:
         # TODO: needs a better writer
         card = self.repr_fields()
-        return self.comment + print_card_8(card)
+        assert len(self.filename) <= 16, f'filename={self.filename}; n={len(self.filename)} > 16'
+        filename = self.filename if len(self.filename) == 16 else f' {self.filename:15}'
+        msg = f'PLTMIST {self.set_id:<8d}{self.ase_id:8d}{self.irow:<8d}{self.icol:<8d}'\
+              f'{self.klist:<8d}{self.out_format:8}{filename:16s}\n'
+        return self.comment + msg
+        # return self.comment + print_card_8(card)
 
 
 class PLTSURF(BaseCard):
@@ -506,7 +537,13 @@ class PLTSURF(BaseCard):
     def write_card(self, size: int=8, is_double: bool=False) -> str:
         # TODO: needs a better writer
         card = self.repr_fields()
-        return self.comment + print_card_8(card)
+        assert len(self.filename) <= 16, f'filename={self.filename}; n={len(self.filename)} > 16'
+        filename = self.filename if len(self.filename) == 16 else f' {self.filename:15}'
+        scale_factor = print_float_8(self.scale_factor)
+        msg = f'PLTSURF {self.set_id:<8d}{self.label:8}{scale_factor:8}'\
+              f'{self.out_format:8}{filename:16s}\n'
+        return self.comment + msg
+        # return self.comment + print_card_8(card)
 
 
 class PLTFLUT(BaseCard):
@@ -582,7 +619,14 @@ class PLTFLUT(BaseCard):
     def write_card(self, size: int=8, is_double: bool=False) -> str:
         # TODO: needs a better writer
         card = self.repr_fields()
-        return self.comment + print_card_8(card)
+        assert len(self.filename) <= 16, f'filename={self.filename}; n={len(self.filename)} > 16'
+        filename = self.filename if len(self.filename) == 16 else f' {self.filename:15}'
+        scale_factor = print_float_8(self.scale_factor)
+        blank = ''
+        msg = f'PLTFLUT {self.set_id:<8d}{blank:8}{blank:8}{blank:8}{scale_factor:8}'\
+              f'{self.out_format:8}{filename:16s}\n'
+        return self.comment + msg
+        # return self.comment + print_card_8(card)
 
 
 class PLTBODE(BaseCard):
@@ -750,8 +794,22 @@ class PLTTIME(BaseCard):
         return list_fields
 
     def write_card(self, size: int=8, is_double: bool=False) -> str:
-        # TODO: needs a better writer
         card = self.repr_fields()
+        assert len(self.filename) <= 16, f'filename={self.filename}; n={len(self.filename)} > 16'
+        assert len(self.aero_filename) <= 16, f'aero_filename={self.aero_filename}; n={len(self.aero_filename)} > 16'
+        filename = self.filename if len(self.filename) == 16 else f' {self.filename:15}'
+        aero_filename = self.aero_filename if len(self.aero_filename) == 16 else f' {self.aero_filename:15}'
+        tstart = print_float_8(self.tstart)
+        tend = print_float_8(self.tend)
+        scale_factor = print_float_8(self.scale_factor)
+
+        # PLTTIME IDPLT  IDMLD TS    TE     NDT TYPE    FORM    SCALE
+        #         ---FILENM--- ---AERONM---
+        msg = f'PLTTIME {self.set_id:<8d}{self.mloads_id:8d}{tstart}{tend}{self.ndt:8d}' \
+              f'{self.out_type:8}{self.output_format:8}{scale_factor}\n' \
+              f'        {filename:16s}{aero_filename:16s}\n'
+        return self.comment + msg
+
         return self.comment + print_card_8(card)
 
 
@@ -836,6 +894,18 @@ class PLTTRIM(BaseCard):
         return list_fields
 
     def write_card(self, size: int=8, is_double: bool=False) -> str:
-        # TODO: needs a better writer
         card = self.repr_fields()
-        return self.comment + print_card_8(card)
+        assert len(self.filename) <= 16, f'filename={self.filename}; n={len(self.filename)} > 16'
+        assert len(self.aero_filename) <= 16, f'aero_filename={self.aero_filename}; n={len(self.aero_filename)} > 16'
+        filename = self.filename if len(self.filename) == 16 else f' {self.filename:15}'
+        aero_filename = self.aero_filename if len(self.aero_filename) == 16 else f' {self.aero_filename:15}'
+        scale_factor = print_float_8(self.scale_factor)
+
+        # PLTTRIM IDPLT IDTRIM FLEX TYPE   FORM    ---FILENM--- SCALE
+        #         ---AERONM---
+        msg = (
+            f'PLTTRIM {self.set_id:<8d}{self.trim_id:8d}{self.flex:8}{self.out_type:8}{self.output_format:8}'
+            f'{filename:16s}{scale_factor}\n'
+            f'        {aero_filename:16s}'.rstrip())
+        return self.comment + msg + '\n'
+        # return self.comment + print_card_8(card)

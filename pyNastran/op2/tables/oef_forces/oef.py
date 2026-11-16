@@ -208,13 +208,15 @@ class OEF:
 
         """
         op2 = self.op2
+        element_type_int = op2.element_type
         try:
-            op2.element_name = op2.element_mapper[op2.element_type]
+            op2.element_name = op2.element_mapper[element_type_int]
         except KeyError:
-            op2.log.error(op2.code_information())
+            op2.log.error(f'element_type={element_type_int}; nastran_format={op2._nastran_format!r} nastran_revision={op2._nastran_revision!r}')
+            op2.log.error(op2.code_information(stop_on_failure=False))
             raise
 
-        if op2.element_type == 227 and op2.element_name == 'RBAR' and op2.is_msc:
+        if element_type_int == 227 and op2.element_name == 'RBAR' and op2.is_msc:
             op2.to_nx(' because element_type=227 was found')
             op2.element_name = op2.element_mapper[op2.element_type]
         assert op2.element_name != '', op2.code_information()
@@ -314,10 +316,15 @@ class OEF:
 
     def _read_oefmc_4(self, data: bytes, ndata: int) -> int:
         op2 = self.op2
+        if op2._results.is_not_saved('force'):
+            # self.log.debug('skipping OEF due to force')
+            return ndata
         # n = 0
         # log = op2.log
-        raise NotImplementedError(op2.code_information())
-        return n
+        # op2.log.warning(op2.code_information())
+        op2.log.warning(f'skipping {op2.table_name} with {op2.element_name}-{op2.element_type}')
+        # raise NotImplementedError(op2.code_information())
+        return ndata
 
     def _read_oef1_4(self, data: bytes, ndata: int):
         """Table 4 parser for OEF1 table"""
@@ -868,7 +875,7 @@ class OEF:
                                              result_type, prefix, postfix)
 
         elif element_type in [11, 12, 13, 14,   # springs
-                                  20, 21, 22, 23]:  # dampers
+                              20, 21, 22, 23]:  # dampers
             # 11-CELAS1
             # 12-CELAS2
             # 13-CELAS3
@@ -1112,10 +1119,11 @@ def get_oef_prefix_postfix(op2: OP2) -> tuple[str, str]:
     postfix = ''
     table_name_bytes = op2.table_name
     assert isinstance(table_name_bytes, bytes), table_name_bytes
+
     is_sort1 = table_name_bytes in SORT1_TABLES_BYTES
     assert table_name_bytes in TABLES_BYTES, table_name_bytes
 
-    if table_name_bytes in [b'OEF1X', b'OEF1', b'OEF2']:
+    if table_name_bytes in [b'OEF1X', b'OEF1', b'OEF2', b'OEF1XMC']:
         if op2.thermal == 0:
             prefix = 'force.'
         elif op2.thermal == 1:

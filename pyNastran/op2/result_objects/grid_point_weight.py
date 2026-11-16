@@ -7,7 +7,7 @@ import numpy as np
 
 from pyNastran.utils import object_attributes, object_methods
 from pyNastran.op2.result_objects.op2_objects import _write_table_header, Date
-from pyNastran.op2.op2_interface.write_utils import export_to_hdf5
+from pyNastran.op2.op2_interface.write_utils import get_title_subtitle_label
 #from pyNastran.op2.writer.utils import fix_table3_types
 
 # restricted b/c we dont support 64-bit writing
@@ -109,12 +109,13 @@ class GridPointWeight:
         self.title = title
         self.subtitle = subtitle
         self.label = label
-        self.superelement_adaptivity_index = subtitle
+        self.superelement_adaptivity_index = superelement_adaptivity_index
         self.approach_code = approach_code
         self.table_code = table_code
 
     def export_to_hdf5(self, group, log) -> None:
         """exports the object to HDF5 format"""
+        from pyNastran.op2.op2_interface.write_utils_hdf5 import export_to_hdf5
         export_to_hdf5(self, group, log)
 
     def object_attributes(self, mode: str='public', keys_to_skip=None,
@@ -246,9 +247,9 @@ class GridPointWeight:
         reference_point = self.reference_point
         #reference_point = 22
         #thermal = self.thermal
-        title = b'%-128s' % self.title.encode('ascii')
-        subtitle = b'%-128s' % self.subtitle.encode('ascii')  # missing superelement_adaptivity_index
-        label = b'%-128s' % self.label.encode('ascii')
+        title, subtitle, label = get_title_subtitle_label(
+            self.title, self.subtitle, self.label,
+            self.superelement_adaptivity_index)
 
         #1, 13, 0, 0, 0, 0, 0, 0, 0, 78, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
         ftable3 = b'i' * 50 + b'128s 128s 128s'

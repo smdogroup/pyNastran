@@ -86,7 +86,10 @@ class FortranFormat:
         self.read_mode = 1
         self._endian = None
         self._table_mapper = {}
-        self._nastran_format = None
+        if hasattr(self, '_nastran_format'):
+            pass
+        else:
+            self._nastran_format = None
         self._data_factor = 1
 
         #: stores if the user entered [] for isubcases
@@ -96,6 +99,13 @@ class FortranFormat:
         self.IS_TESTING = False
 
         self._op2_readers = Op2Tables(self)
+
+    def show_file(self, file, n: int, types: str='ifs', endian=None, force: bool=False):
+        nold = self.n
+        data_out = self.f.read(n)
+        self.n = nold
+        self.f.seek(self.n)
+        msg = self.op2_reader._write_data(file, data_out, types='ifs', endian=endian, force=force)
 
     def show(self, n: int, types: str='ifs', endian=None, force: bool=False):  # pragma: no cover
         """Shows binary data"""

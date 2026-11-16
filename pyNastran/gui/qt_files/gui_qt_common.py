@@ -583,6 +583,8 @@ class GuiQtCommon(GuiAttributes):
         self.icase_fringe = icase
         self.grid.Modified()
         self.grid_selected.Modified()
+        if len(self.groups):
+            self.post_group_by_name(self.group_active)
         self._update_min_max_actors(location, icase_fringe,
                                     imin, min_value,
                                     imax, max_value)
@@ -778,6 +780,8 @@ class GuiQtCommon(GuiAttributes):
 
             grid.Modified()
             self.grid_selected.Modified()
+            if len(self.groups):
+                self.post_group_by_name(self.group_active)
             self.icase_disp = icase
         else:
             self.icase_vector = icase
@@ -1248,7 +1252,7 @@ class GuiQtCommon(GuiAttributes):
 
         #location = self.get_case_location(key)
         res_widget.update_method(methods)
-        if explicit:
+        if explicit and show_msg:
             self.log_command(f'self.cycle_results(case={self.icase:d})')
         assert self.icase is not False, self.icase
         return self.icase
@@ -1624,6 +1628,8 @@ class GuiQtCommon(GuiAttributes):
     def _update_follower_grids(self, nodes: np.ndarray) -> None:
         """updates grids that use the same ids as the parent model"""
         for name, nids in self.follower_nodes.items():
+            if name not in self.alt_grids:
+                continue
             grid: vtkUnstructuredGrid = self.alt_grids[name]
             points: vtkPoints = grid.GetPoints()
             for j, nid in enumerate(nids):
@@ -1634,6 +1640,8 @@ class GuiQtCommon(GuiAttributes):
     def _update_follower_grids_complex(self, nodes: np.ndarray) -> None:
         """updates grids that use a complicated update method"""
         for name, follower_function in self.follower_functions.items():
+            if name not in self.alt_grids:
+                continue
             grid: vtkUnstructuredGrid = self.alt_grids[name]
             points: vtkPoints = grid.GetPoints()
             follower_function(self.nid_map, grid, points, nodes)

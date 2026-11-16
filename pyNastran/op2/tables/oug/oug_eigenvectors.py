@@ -1,11 +1,54 @@
+from __future__ import annotations
+from typing import Optional
 import numpy as np
+
+from pyNastran.op2.result_objects.scalar6_table_object import float_types
 from pyNastran.op2.result_objects.table_object import RealTableArray, ComplexTableArray
 from pyNastran.f06.f06_formatting import write_floats_13e
 
 
 class ComplexEigenvectorArray(ComplexTableArray):
-    def __init__(self, data_code, is_sort1, isubcase, dt):
+    def __init__(self, data_code, is_sort1: bool, isubcase: int, dt: int):
         ComplexTableArray.__init__(self, data_code, is_sort1, isubcase, dt)
+
+    def get_phi(self, common_nodes: Optional[np.ndarray]=None) -> np.ndarray:
+        """
+        gets the eigenvector matrix
+
+        Returns
+        -------
+        phi : (ndof, nmodes)
+            the eigenvector matrix
+
+        TODO: doesn't consider SPOINTs/EPOINTs
+        """
+        if common_nodes is not None:
+            missing_nodes = np.setdiff1d(common_nodes, self.node_gridtype[:, 0])
+            if len(missing_nodes):
+                raise RuntimeError(f'missing_nodes = {missing_nodes}')
+            inode = np.searchsorted(self.node_gridtype[:, 0], common_nodes)
+            assert np.array_equal(self.node_gridtype[inode, 0], common_nodes)
+            data = self.data[:, inode, :]
+        else:
+            data = self.data
+        nmodes, nnodes = data.shape[:2]
+        ndof = nnodes * 6
+        phi_transpose = data.reshape(nmodes, ndof)
+        return phi_transpose.T
+
+    @classmethod
+    def phi_to_data(cls, phi: np.ndarray) -> np.ndarray:
+        """(ndof, nmodes) -> (nmodes, nnodes, 6)"""
+        ndof, nmodes = phi.shape
+        nnodes = ndof // 6
+        assert ndof % 6 == 0, phi.shape
+        phi2 = phi.T  # nmodes, ndof
+        data = phi2.reshape(nmodes, nnodes, 6)
+        return data
+
+    def set_phi(self, phi: np.ndarray) -> None:
+        """(ndof, nmodes) -> (nmodes, nnodes, 6)"""
+        self.data = self.phi_to_data(phi)
 
     def write_f06(self, f06_file, header=None, page_stamp: str='PAGE %s',
                   page_num: int=1, is_mag_phase: bool=False, is_sort1: bool=True):
@@ -37,6 +80,7 @@ class RealEigenvectorArray(RealTableArray):
     def __init__(self, data_code, is_sort1: bool,
                  isubcase: int, dt, f06_flag: bool=False):
         RealTableArray.__init__(self, data_code, is_sort1, isubcase, dt)
+        # assert self.data_code['name'] == 'mode', self.data_code
 
     def scale(self, factors: np.ndarray) -> None:
         """
@@ -64,7 +108,7 @@ class RealEigenvectorArray(RealTableArray):
         assert np.allclose(data, data2)
         self.data = data
 
-    def get_phi(self) -> np.ndarray:
+    def get_phi(self, common_nodes: Optional[np.ndarray]=None) -> np.ndarray:
         """
         gets the eigenvector matrix
 
@@ -75,9 +119,18 @@ class RealEigenvectorArray(RealTableArray):
 
         TODO: doesn't consider SPOINTs/EPOINTs
         """
-        nmodes, nnodes = self.data.shape[:2]
+        if common_nodes is not None:
+            missing_nodes = np.setdiff1d(common_nodes, self.node_gridtype[:, 0])
+            if len(missing_nodes):
+                raise RuntimeError(f'missing_nodes = {missing_nodes}')
+            inode = np.searchsorted(self.node_gridtype[:, 0], common_nodes)
+            assert np.array_equal(self.node_gridtype[inode, 0], common_nodes)
+            data = self.data[:, inode, :]
+        else:
+            data = self.data
+        nmodes, nnodes = data.shape[:2]
         ndof = nnodes * 6
-        phi_transpose = self.data.reshape(nmodes, ndof)
+        phi_transpose = data.reshape(nmodes, ndof)
         return phi_transpose.T
 
     @classmethod
@@ -85,7 +138,7 @@ class RealEigenvectorArray(RealTableArray):
         """(ndof, nmodes) -> (nmodes, nnodes, 6)"""
         ndof, nmodes = phi.shape
         nnodes = ndof // 6
-        assert ndof % 6 == 0
+        assert ndof % 6 == 0, phi.shape
         phi2 = phi.T  # nmodes, ndof
         data = phi2.reshape(nmodes, nnodes, 6)
         return data
@@ -94,8 +147,11 @@ class RealEigenvectorArray(RealTableArray):
         """(ndof, nmodes) -> (nmodes, nnodes, 6)"""
         self.data = self.phi_to_data(phi)
 
-    def mac(self, obj) -> np.ndarray:
+    def mac(self, obj: RealEigenvectorArray,
+            common_nodes: Optional[np.array]=None) -> np.ndarray:
         """
+        Gets the modal assurance criterion (MAC)
+
         Parameters
         ----------
         obj : RealEigenvectorArray
@@ -111,10 +167,10 @@ class RealEigenvectorArray(RealTableArray):
         freedom (rows) in both mode shape matrices must be the same.
 
         """
-        phi1 = self.get_phi()
-        phi2 = self.get_phi()
-        nmodes1, ndof1 = phi1.shape
-        nmodes2, ndof2 = phi1.shape
+        phi1 = self.get_phi(common_nodes)
+        phi2 = obj.get_phi(common_nodes)
+        ndof1, nmodes1 = phi1.shape
+        ndof2, nmodes2 = phi2.shape
         assert ndof1 == ndof2, (ndof1, ndof2)
         mac_matrix = np.zeros((nmodes1, nmodes2), dtype='float64')
         for i in range(nmodes1):
@@ -131,11 +187,27 @@ class RealEigenvectorArray(RealTableArray):
             #return self._write_f06_transient(header, page_stamp, page_num, f06_file,
                                              #is_mag_phase=is_mag_phase, is_sort1=is_sort1)
         # modes get added
-        words = '                                         R E A L   E I G E N V E C T O R   N O . %10i\n \n' \
-                '      POINT ID.   TYPE          T1             T2             T3             R1             R2             R3\n'
+        # should be 22s
+        words = (
+            '      EIGENVALUE = %11.6E\n'
+            '          CYCLES = %11.6E           R E A L   E I G E N V E C T O R   N O . %10d\n \n' \
+            '      POINT ID.   TYPE          T1             T2             T3             R1             R2             R3\n' \
+            # '                                         R E A L   E I G E N V E C T O R   N O .\n'
+        )
 
         #if not len(header) >= 3:
             #header.append('')
+
+        # no self.cycles
+        # cycle = freq = eign / (2*pi)
+        if hasattr(self, 'eigns'):
+            # modes
+            eigns = self.eigns
+        else:
+            assert hasattr(self, 'eigrs'), self.data_code
+            eigns = self.eigrs
+        omegas = np.sqrt(np.abs(eigns))
+        freqs = omegas / (2 * np.pi)
         for itime in range(self.ntimes):
             node = self.node_gridtype[:, 0]
             gridtype = self.node_gridtype[:, 1]
@@ -147,18 +219,25 @@ class RealEigenvectorArray(RealTableArray):
             r3 = self.data[itime, :, 5]
 
             dt = self._times[itime]
-            #if isinstance(dt, float):
-                #header[1] = ' %s = %10.4E\n' % (self.data_code['name'], dt)
-            #else:
-                #header[1] = ' %s = %10i\n' % (self.data_code['name'], dt)
-            f06_file.write(''.join(header + [words % dt]))
+            # '      EIGENVALUE = -4.811883E-04'
+            # '          CYCLES =  3.491224E-03         R E A L   E I G E N V E C T O R   N O .          1'
+            # assert self.data_code['name'] == 'mode', self.data_code
+            # 'data_names': ['mode', 'eign', 'mode_cycle']
+            eign = eigns[itime]
+            freq = freqs[itime]
+            # header[0] = f'      EIGENVALUE = {eign:10.4E}\n'
+            # if isinstance(dt, float_types):
+            #     header[1] = ' %s = %10.4E\n' % (self.data_code['name'], dt)
+            # else:
+            #     header[1] = ' %s = %10d\n' % (self.data_code['name'], dt)
+            f06_file.write(''.join(header + [words % (eign, freq, dt)]))
             for node_id, gridtypei, t1i, t2i, t3i, r1i, r2i, r3i in zip(node, gridtype, t1, t2, t3, r1, r2, r3):
                 sgridtype = self.recast_gridtype_as_string(gridtypei)
                 vals = [t1i, t2i, t3i, r1i, r2i, r3i]
                 vals2 = write_floats_13e(vals)
                 (dx, dy, dz, rx, ry, rz) = vals2
                 f06_file.write(
-                    '%14i %6s     %-13s  %-13s  %-13s  %-13s  %-13s  %s\n' % (
+                    '%14d %6s     %-13s  %-13s  %-13s  %-13s  %-13s  %s\n' % (
                         node_id, sgridtype, dx, dy, dz, rx, ry, rz))
 
             f06_file.write(page_stamp % page_num)

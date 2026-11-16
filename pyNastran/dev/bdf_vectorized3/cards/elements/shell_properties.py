@@ -4,7 +4,7 @@ from itertools import count, zip_longest
 from typing import Optional, Any, TYPE_CHECKING
 
 import numpy as np
-#from pyNastran.bdf.field_writer_8 import print_field_8, print_card_8
+from pyNastran.bdf.field_writer_8 import print_field_8  #, print_card_8
 #from pyNastran.bdf.field_writer_16 import print_field_16, print_card_16
 #from pyNastran.bdf.field_writer_double import print_scientific_double
 from pyNastran.bdf.bdf_interface.assign_type import (
@@ -25,7 +25,7 @@ from pyNastran.dev.bdf_vectorized3.cards.base_card import (
     #vslice_by_idim,
 )
 from pyNastran.dev.bdf_vectorized3.cards.write_utils import (
-    array_str,
+    array_str, array_float,
     array_default_int, array_default_float,
     get_print_card_size,
     #print_card_8_comment, print_card_16_comment,
@@ -190,7 +190,14 @@ class PSHELL(Property):
         if ifile is None:
             ifile = np.zeros(ncards, dtype='int32')
         if len(self.property_id) != 0:
-            raise NotImplementedError()
+            ifile = np.hstack([self.ifile, ifile])
+            property_id = np.hstack([self.property_id, property_id])
+            material_id = np.vstack([self.material_id, material_id])
+            t = np.hstack([self.t, t])
+            twelveIt3 = np.hstack([self.twelveIt3, twelveIt3])
+            tst = np.hstack([self.tst, tst])
+            nsm = np.hstack([self.nsm, nsm])
+            z = np.vstack([self.z, z])
 
         save_ifile_comment(self, ifile, comment)
         self.property_id = property_id
@@ -200,9 +207,9 @@ class PSHELL(Property):
         self.tst = tst
         self.nsm = nsm
         self.z = z
-        self.n = ncards
+        self.n = len(property_id)
 
-    def set_used(self, used_dict: [str, list[np.ndarray]]) -> None:
+    def set_used(self, used_dict: dict[str, list[np.ndarray]]) -> None:
         material_id = np.unique(self.material_id.flatten())
         material_id = material_id[material_id > 0]
         used_dict['material_id'].append(material_id)
@@ -272,11 +279,49 @@ class PSHELL(Property):
     def max_id(self) -> int:
         return max(self.property_id.max(), self.material_id.max())
 
+    def write_h5(self, h5file, element_group):
+        nprop = self.property_id.shape
+        if nprop == 0:
+            return
+        from tables import Int64Col, Float64Col
+        h5_dict = {
+            'PID': Int64Col(pos=0),
+            'MID1': Int64Col(pos=1),
+            'T': Float64Col(pos=2),
+            'MID2': Int64Col(pos=3),
+            'BK': Float64Col(pos=4),
+            'MID3': Int64Col(pos=5),
+            'TS': Float64Col(pos=6),
+            'NSM': Float64Col(pos=7),
+            'Z1': Float64Col(pos=8),
+            'Z2': Float64Col(pos=9),
+            'MID4': Int64Col(pos=10),
+            'DOMAIN_ID': Int64Col(pos=11),
+        }
+        table = h5file.create_table(element_group, self.type, h5_dict)
+        arr = np.empty(nprop, dtype=table.dtype)
+        arr["PID"] = self.property_id
+        arr["MID1"] = self.material_id[:, 0]
+        arr["MID2"] = self.material_id[:, 1]
+        arr["MID3"] = self.material_id[:, 2]
+        arr["MID4"] = self.material_id[:, 3]
+        arr["T"] = self.t
+        arr["BK"] = self.twelveIt3
+        arr["TS"] = self.tst
+        arr["Z1"] = self.z[:, 0]
+        arr["Z2"] = self.z[:, 1]
+        arr["NSM"] = self.nsm
+        arr["DOMAIN_ID"] = np.ones(nprop, dtype='int64')
+        table.append(arr)
+
     @parse_check
     def write_file(self, bdf_file: TextIOLike,
                    size: int=8, is_double: bool=False,
                    write_card_header: bool=False) -> None:
         print_card, size = get_print_card_size(size, self.max_id)
+        if size == 8:
+            self.write_file_8(bdf_file, write_card_header=write_card_header)
+            return
 
         for pid, mids, t, twelveIt3, tst, nsm, z in zip_longest(self.property_id, self.material_id, self.t,
                                                                 self.twelveIt3, self.tst, self.nsm, self.z):
@@ -300,11 +345,106 @@ class PSHELL(Property):
             mid2b = None if mid2 == -1 else mid2
             mid3b = None if mid3 == -1 else mid3
             mid4b = None if mid4 == -1 else mid4
+
+            # If MID4 is present, the 3rd line (z1, z2, mid4) must be written.
+            # If the 2nd line (twelveIt3, mid3, tst, nsm) would be all blank,
+            # force twelveIt3 to be written so the continuation isn't dropped.
+            if mid4b is not None:
+                if twelveIt3 is None and mid3b is None and tst is None and nsm is None:
+                    twelveIt3 = 1.0
+                if z1b is None and z2b is None:
+                    z1b = z1
+
             list_fields = ['PSHELL', pid, mid1b, t, mid2b,
                            twelveIt3, mid3b, tst, nsm, z1b, z2b, mid4b]
+            while list_fields[-1] is None:
+                list_fields.pop()
             msg = print_card(list_fields)
             bdf_file.write(msg)
         return
+
+    @parse_check
+    def write_file_8(self, bdf_file: TextIOLike,
+                     write_card_header: bool=False) -> None:
+        if self.max_id >= 100_000_000:
+            self.write_file(bdf_file, size=16, write_card_header=write_card_header)
+            return
+
+        mid1 = self.material_id[:, 0]
+        mid2 = self.material_id[:, 1]
+        mid3 = self.material_id[:, 2]
+        mid4 = self.material_id[:, 3]
+        t = self.t
+        z1 = self.z[:, 0]
+        z2 = self.z[:, 1]
+
+        # fast path: all defaults (12It3=1, tst=0.833333, nsm=0, z=+-t/2, no mid3/mid4)
+        all_defaults = (
+            np.all(self.twelveIt3 == 1.0) and
+            np.all((self.tst > 0.83332) & (self.tst < 0.83334)) and
+            np.all(self.nsm == 0.0) and
+            np.all(mid3 == -1) and
+            np.all(mid4 == -1)
+        )
+        # check z defaults: z1==-t/2, z2==t/2
+        if all_defaults:
+            t_valid = (t != 0.0) & ~np.isnan(t)
+            if np.any(t_valid):
+                t_half = t[t_valid] / 2.0
+                all_defaults = (
+                    np.allclose(z1[t_valid], -t_half) and
+                    np.allclose(z2[t_valid], t_half)
+                )
+
+        if not all_defaults:
+            # per-element fallback with full default logic
+            from pyNastran.bdf.field_writer_8 import print_card_8
+            for pid, mids, ti, twelveIt3, tst, nsm, z in zip_longest(
+                    self.property_id, self.material_id, self.t,
+                    self.twelveIt3, self.tst, self.nsm, self.z):
+                mid1i, mid2i, mid3i, mid4i = mids
+                z1i, z2i = z
+                twelveIt3 = set_blank_if_default(twelveIt3, 1.0)
+                tst = set_blank_if_default(tst, 0.833333)
+                tst2 = set_blank_if_default(tst, 0.83333)
+                if tst is None or tst2 is None:
+                    tst = None
+                nsm = set_blank_if_default(nsm, 0.0)
+                if ti is not None:
+                    t_over_2 = ti / 2.
+                    z1b = set_blank_if_default(z1i, -t_over_2)
+                    z2b = set_blank_if_default(z2i, t_over_2)
+                else:
+                    z1b = z1i
+                    z2b = z2i
+                mid1b = None if mid1i == -1 else mid1i
+                mid2b = None if mid2i == -1 else mid2i
+                mid3b = None if mid3i == -1 else mid3i
+                mid4b = None if mid4i == -1 else mid4i
+
+                if mid4b is not None:
+                    if twelveIt3 is None and mid3b is None and tst is None and nsm is None:
+                        twelveIt3 = 1.0
+                    if z1b is None and z2b is None:
+                        z1b = z1i
+
+                list_fields = ['PSHELL', pid, mid1b, ti, mid2b,
+                               twelveIt3, mid3b, tst, nsm, z1b, z2b, mid4b]
+                while list_fields[-1] is None:
+                    list_fields.pop()
+                bdf_file.write(print_card_8(list_fields))
+            return
+
+        pids = np.char.rjust(array_str(self.property_id, size=8), 8).tolist()
+        t_str = np.char.rjust(array_float(t, size=8, is_double=False), 8).tolist()
+
+        # mid1/mid2: -1 means blank
+        mid1_str = np.char.rjust(array_default_int(mid1, default=-1, size=8), 8).tolist()
+        mid2_str = np.char.rjust(array_default_int(mid2, default=-1, size=8), 8).tolist()
+        lines = [f'PSHELL  {pid}{m1}{th}{m2}'.rstrip() + '\n'
+                 for pid, m1, th, m2
+                 in zip(pids, mid1_str, t_str, mid2_str)]
+        bdf_file.writelines(lines)
 
     @property
     def allowed_materials(self) -> list[Any]:
@@ -358,7 +498,6 @@ class PSHELL(Property):
         theta_offset : float
             rotates the ABD matrix; measured in degrees
 
-        http://www2.me.rochester.edu/courses/ME204/nx_help/index.html#uid:id503291
         Understanding Classical Lamination Theory
         """
         #mids = self.get_material_ids()
@@ -391,11 +530,11 @@ class PSHELL(Property):
 
         #if self.mid2_ref:
         Qbar2 = self.get_Qbar_matrix(mid2, theta=theta)
-        D += Qbar2 * (z1 ** 3 - z0 ** 3) * self.twelveIt3
+        D += Qbar2 * (z1 ** 3 - z0 ** 3) / 3. * self.twelveIt3
         #Qbar3 = self.get_Qbar_matrix(self.mid3_ref, theta=0.)
         #if self.mid4_ref:
         Qbar4 = self.get_Qbar_matrix(mid4, theta=theta)
-        B += Qbar4 * (z1 ** 2 - z0 ** 2)
+        B += Qbar4 * (z1 ** 2 - z0 ** 2) / 2.
 
         unused_ts = self.tst * thickness
 
@@ -431,15 +570,6 @@ class PSHELL(Property):
         #Qbarv = np.linalg.inv(Sbarv)
         Qbar = np.array(Qbar_list, dtype=S2.dtype)
         return Qbar
-
-    def get_Sbar_matrix(self, mid_ref, theta=0.):
-        """theta must be in radians"""
-        # this is the inverse of Sbar
-        S2, unused_S3 = get_mat_props_S(mid_ref)
-        T = get_2d_plate_transform(theta)
-        #Tinv = np.linalg.inv(T)
-        Sbar = np.linalg.multi_dot([T.T, S2, T])
-        return Sbar
 
     def get_ABD_matrices(self, theta_offset=0.) -> np.ndarray:
         """
@@ -611,7 +741,15 @@ class PAABSF(Property):
             ifile = np.zeros(ncards, dtype='int32')
 
         if len(self.property_id) != 0:
-            raise NotImplementedError()
+            ifile = np.hstack([self.ifile, ifile])
+            property_id = np.hstack([self.property_id, property_id])
+            table_reactance_real = np.hstack([self.table_reactance_real, table_reactance_real])
+            table_reactance_imag = np.hstack([self.table_reactance_imag, table_reactance_imag])
+            s = np.hstack([self.s, s])
+            a = np.hstack([self.a, a])
+            b = np.hstack([self.b, b])
+            k = np.hstack([self.k, k])
+            rho_c = np.hstack([self.rho_c, rho_c])
 
         save_ifile_comment(self, ifile, comment)
         self.property_id = property_id
@@ -622,7 +760,7 @@ class PAABSF(Property):
         self.b = b
         self.k = k
         self.rho_c = rho_c
-        self.n = ncards
+        self.n = len(property_id)
 
     def set_used(self, used_dict: [str, list[np.ndarray]]) -> None:
         tableds = np.unique(np.hstack([
@@ -922,6 +1060,7 @@ class CompositeProperty(Property):
 
         assert len(total_thickness) == nproperties
         return total_thickness
+
 
 class PCOMP(CompositeProperty):
     """
@@ -1432,10 +1571,31 @@ class PCOMP(CompositeProperty):
         is_symmetric = (self.lam == 'SYM')
         return is_symmetric
 
+    @property
+    def failure_theory_int(self) -> np.ndarray:
+        mapper = {
+            '': 0,
+            'HILL': 1,
+            'HOFF': 2,
+            'TSAI': 3,
+            'STRN': 4,
+            'HFAI': 5,  # secret MSC
+            'HTAP': 6,  # secret MSC
+            'HFAP': 7,  # secret MSC
+        }
+        ft = np.array([mapper[ft] for ft in self.failure_theory], dtype='int32')
+        return ft
+
+    @property
+    def sout_int(self) -> np.ndarray:
+        mapper = {'NO': 0, 'YES': 1}
+        sout = np.array([mapper[souti] for souti in self.sout], dtype='int32')
+        return sout
+
     def slice_card_by_property_id(self, property_id: np.ndarray) -> PCOMP:
         """uses a node_ids to extract GRIDs"""
         iprop = self.index(property_id)
-        print(f'iprop = {iprop}')
+        # print(f'iprop = {iprop}')
         assert len(self.ifile) == len(self.property_id)
         #assert len(self.node_id) > 0, self.node_id
         #i = np.searchsorted(self.node_id, node_id)
@@ -1488,6 +1648,59 @@ class PCOMP(CompositeProperty):
     def max_id(self) -> int:
         return max(self.property_id.max(), self.material_id.max())
 
+    def write_h5(self, h5file, property_group):
+        nprop = self.property_id.shape
+        if nprop == 0:
+            return
+        pcomp_group = h5file.create_group(property_group, 'PCOMP')
+        from tables import Int64Col, Float64Col
+
+        h5_identity_dict = {
+            'PID': Int64Col(pos=0),
+            'NPLIES': Int64Col(pos=1),
+            'Z0': Float64Col(pos=2),
+            'NSM': Float64Col(pos=3),
+            'SB': Float64Col(pos=4),
+            'FT': Int64Col(pos=5),
+            'TREF': Float64Col(pos=6),
+            'GE': Float64Col(pos=7),
+            'PLY_POS': Int64Col(pos=8),
+            'PLY_LEN': Int64Col(pos=9),
+            'DOMAIN_ID': Int64Col(pos=10),
+        }
+        nlayer = len(self.material_id)
+        identity_table = h5file.create_table(pcomp_group, 'IDENTITY', h5_identity_dict)
+        arr = np.empty(nprop, dtype=identity_table.dtype)
+
+        ilayer = self.ilayer
+        arr["PID"] = self.property_id
+        arr["NPLIES"] = self.nplies
+        arr["Z0"] = self.z0
+        arr["NSM"] = self.nsm
+        arr["SB"] = self.sb
+        arr["FT"] = self.failure_theory_int
+        arr["TREF"] = self.tref
+        arr["GE"] = self.ge
+        arr["PLY_POS"] = ilayer[:, 0]
+        arr["PLY_LEN"] = self.nplies
+        arr["DOMAIN_ID"] = np.ones(nprop, dtype='int64')
+        identity_table.append(arr)
+
+        #----------------------------------
+        h5_dict = {
+            'MID': Int64Col(pos=0),
+            'T': Float64Col(pos=1),
+            'THETA': Float64Col(pos=2),
+            'SOUT': Int64Col(pos=3),
+        }
+        ply_table = h5file.create_table(pcomp_group, 'PLY', h5_dict)
+        arr = np.empty(nlayer, dtype=ply_table.dtype)
+        arr["MID"] = self.material_id
+        arr["T"] = self.thickness
+        arr["THETA"] = self.theta
+        arr["SOUT"] = self.sout_int
+        ply_table.append(arr)
+
     @parse_check
     def write_file(self, bdf_file: TextIOLike,
                    size: int=8, is_double: bool=False,
@@ -1495,15 +1708,19 @@ class PCOMP(CompositeProperty):
         print_card, size = get_print_card_size(size, self.max_id)
 
         assert self.failure_theory.dtype.name == 'str256', self.failure_theory.dtype.name
+        nsms = array_default_float(self.nsm, default=0., size=size, is_double=False)
+        trefs = array_default_float(self.tref, default=0.0)
+        ges = array_default_float(self.ge, default=0.0)
+        print_float = print_field_8
         for pid, nsm, shear_bonding, failure_theory, ge, tref, lam, z0, \
-            nlayer, ilayer in zip_longest(self.property_id, self.nsm, self.shear_bonding,
-                                          self.failure_theory, self.tref, self.ge, self.lam, self.z0,
+            nlayer, ilayer in zip_longest(self.property_id, nsms, self.shear_bonding,
+                                          self.failure_theory, trefs, ges, self.lam, self.z0,
                                           self.nlayer, self.ilayer):
 
             nsm2 = set_blank_if_default(nsm, 0.0)
             sb2 = set_blank_if_default(shear_bonding, 0.0)
-            tref2 = set_blank_if_default(tref, 0.0)
-            ge2 = set_blank_if_default(ge, 0.0)
+            #tref2 = set_blank_if_default(tref, 0.0)
+            #ge2 = set_blank_if_default(ge, 0.0)
 
             ilayer0, ilayer1 = ilayer
             material_ids = self.material_id[ilayer0 : ilayer1].tolist()
@@ -1512,11 +1729,14 @@ class PCOMP(CompositeProperty):
             souts = self.sout[ilayer0 : ilayer1].tolist()
 
             _total_thickness = sum(thicknesses)
-            z02 = set_blank_if_default(z0, -0.5 * _total_thickness)
+            z0_str = print_float(z0)
+            z0_def = print_float(-0.5 * _total_thickness)
+            if z0_str == z0_def:
+                z0_str = ''
 
             #ndim = self.valid_types[beam_type]
             #assert len(dim) == ndim, 'PCOMP ndim=%s len(dims)=%s' % (ndim, len(dim))
-            list_fields = ['PCOMP', pid, z02, nsm2, sb2, failure_theory, tref2, ge2, lam]
+            list_fields = ['PCOMP', pid, z0_str, nsm2, sb2, failure_theory, tref, ge, lam]
             for (mid, t, theta, sout) in zip(material_ids, thicknesses,
                                              thetas, souts):
                 #assert sout not in ['0', 0.0, 0]
@@ -1559,7 +1779,6 @@ class PCOMP(CompositeProperty):
         theta_offset : float
             rotates the ABD matrix; measured in degrees
 
-        http://www2.me.rochester.edu/courses/ME204/nx_help/index.html#uid:id503291
         Understanding Classical Lamination Theory
         """
         #mids = self.get_material_ids()
@@ -1583,11 +1802,8 @@ class PCOMP(CompositeProperty):
         #z0 = self.z0
         #z1 = self.z[:, 1]
         #mean = (z0 + z1) / 2.
-
         #thicknesses = self.get_thicknesses()
-
         #if self.mid1_ref:
-
         #if self.is_symmetrical:
             #mids_ref = copy.deepcopy(self.mids_ref)
             #mids_ref += mids_ref[::-1]
@@ -1595,11 +1811,11 @@ class PCOMP(CompositeProperty):
         #assert len(mids) == len(mids_ref), f'mids={mids} ({len(mids)}) mids_ref:\n{mids_ref}; {len(mids_ref)}'
         for lam, z0, (ilayer0, ilayer1) in zip(self.lam, self.z0, self.ilayer):
             mids = self.material_id[ilayer0:ilayer1]
-            thetas = self.theta[ilayer0:ilayer1]
+            thetas = np.radians(self.theta[ilayer0:ilayer1])
             thicknesses = self.thickness[ilayer0:ilayer1]
             csum = np.cumsum(thicknesses)
             z0 = z0 + np.hstack([0., csum[:-1]])
-            z1 = z0 + csum
+            z1 = z0 + thicknesses
             zmeans = (z0 + z1) / 2
 
             Qbar = self.get_Qbar_matrix(mids, thetas)
@@ -1642,15 +1858,6 @@ class PCOMP(CompositeProperty):
         #Qbarv = np.linalg.inv(Sbarv)
         Qbarv = np.array(Qbar, dtype=S2.dtype)
         return Qbarv
-
-    def get_Sbar_matrix(self, mid_ref, theta=0.):
-        """theta must be in radians"""
-        # this is the inverse of Sbar
-        S2, unused_S3 = get_mat_props_S(mid_ref)
-        T = get_2d_plate_transform(theta)
-        #Tinv = np.linalg.inv(T)
-        Sbar = np.linalg.multi_dot([T.T, S2, T])
-        return Sbar
 
     def get_ABD_matrices(self, theta_offset: float=0.) -> np.ndarray:
         """
@@ -1890,7 +2097,21 @@ class PCOMPG(CompositeProperty):
         if ifile is None:
             ifile = np.zeros(ncards, dtype='int32')
         if len(self.property_id) != 0:
-            raise RuntimeError(f'stacking of {self.type} is not supported')
+            ifile = np.hstack([self.ifile, ifile])
+            property_id = np.hstack([self.property_id, property_id])
+            nsm = np.hstack([self.nsm, nsm])
+            shear_bonding = np.hstack([self.shear_bonding, shear_bonding])
+            failure_theory = np.hstack([self.failure_theory, failure_theory])
+            tref = np.hstack([self.tref, tref])
+            lam = np.hstack([self.lam, lam])
+            z0 = np.hstack([self.z0, z0])
+            ge = np.hstack([self.ge, ge])
+            nlayer = np.hstack([self.nlayer, nlayer])
+            global_ply_id = np.hstack([self.global_ply_id, global_ply_id])
+            material_id = np.hstack([self.material_id, material_id])
+            thickness = np.hstack([self.thickness, thickness])
+            sout = np.hstack([self.sout, sout])
+            theta = np.hstack([self.theta, theta])
 
         save_ifile_comment(self, ifile, comment)
         self.property_id = property_id
@@ -1910,6 +2131,12 @@ class PCOMPG(CompositeProperty):
         self.thickness = thickness
         self.sout = sout
         self.theta = theta
+
+    def slice_card_by_property_id(self, property_id: np.ndarray) -> PCOMPG:
+        """uses a property_id to extract PCOMPGs"""
+        iprop = self.index(property_id)
+        prop = self.slice_card_by_index(iprop)
+        return prop
 
     def __apply_slice__(self, prop: PCOMPG, i: np.ndarray) -> None:  # ignore[override]
         prop.n = len(i)
@@ -1966,15 +2193,11 @@ class PCOMPG(CompositeProperty):
         shear_bondings = array_default_float(self.shear_bonding, default=0., size=size, is_double=False)
         trefs = array_default_float(self.tref, default=0., size=size, is_double=False)
         ges = array_default_float(self.ge, default=0., size=size, is_double=False)
+        print_float = print_field_8
         for pid, nsm, sb, failure_theory, ge, tref, lam, z0, \
             ilayer in zip_longest(property_id, nsms, shear_bondings,
                                   self.failure_theory, trefs, ges, self.lam, self.z0,
                                   self.ilayer):
-            #nsm = set_blank_if_default(nsm, 0.0)
-            #sb = set_blank_if_default(sb, 0.0)
-            #tref = set_blank_if_default(tref, 0.0)
-            #ge = set_blank_if_default(ge, 0.0)
-
             ilayer0, ilayer1 = ilayer
             global_ids = self.global_ply_id[ilayer0 : ilayer1].tolist()
             material_ids = self.material_id[ilayer0 : ilayer1].tolist()
@@ -1983,11 +2206,14 @@ class PCOMPG(CompositeProperty):
             souts = self.sout[ilayer0 : ilayer1].tolist()
 
             _total_thickness = sum(thicknesses)
-            z02 = set_blank_if_default(z0, -0.5 * _total_thickness)
+            z0_str = print_float(z0)
+            z0_def = print_float(-0.5 * _total_thickness)
+            if z0_str == z0_def:
+                z0_str = ''
 
             #ndim = self.valid_types[beam_type]
             #assert len(dim) == ndim, 'PCOMP ndim=%s len(dims)=%s' % (ndim, len(dim))
-            list_fields = ['PCOMPG', pid, z02, nsm, sb, failure_theory, tref, ge, lam]
+            list_fields = ['PCOMPG', pid, z0_str, nsm, sb, failure_theory, tref, ge, lam]
             for (global_id, mid, t, theta, sout) in zip(global_ids, material_ids, thicknesses,
                                                         thetas, souts):
                 #theta = set_blank_if_default(theta, 0.0)
@@ -2462,7 +2688,14 @@ class PSHLN1(Property):
         if ifile is None:
             ifile = np.zeros(ncards, dtype='int32')
         if len(self.property_id) != 0:
-            raise RuntimeError(f'stacking of {self.type} is not supported')
+            ifile = np.hstack([self.ifile, ifile])
+            property_id = np.hstack([self.property_id, property_id])
+            material_id = np.vstack([self.material_id, material_id])
+            analysis = np.hstack([self.analysis, analysis])
+            beh = np.vstack([self.beh, beh])
+            beh_h = np.vstack([self.beh_h, beh_h])
+            integration = np.vstack([self.integration, integration])
+            integration_h = np.vstack([self.integration_h, integration_h])
         save_ifile_comment(self, ifile, comment)
         self.property_id = property_id
         self.material_id = material_id
@@ -2908,7 +3141,7 @@ def get_2d_plate_transform(theta: np.ndarray) -> np.ndarray:
 
     T126 = np.zeros((ntheta, 3, 3), dtype='float64')
     T126[:, 0, 0] = T126[:, 1, 1] = ct2
-    T126[:, 0, 1] = T126[:, 0, 1] = st2
+    T126[:, 0, 1] = T126[:, 1, 0] = st2
     T126[:, 0, 2] = 2 * cst
     T126[:, 1, 2] = -2 * cst
     T126[:, 2, 0] = -cst
@@ -2939,112 +3172,3 @@ def get_2d_plate_transform(theta: np.ndarray) -> np.ndarray:
         #[-ct * st, ct * st, ct2 - st2],
     #])
     return T
-
-def get_mat_props_S(mid: np.ndarray):
-    """
-    Gets the material matrix [S] or [C] for plane strain
-
-    [e] = [S][o]
-    """
-    mtype = mid_ref.type
-    if mtype == 'MAT1':
-        e = mid_ref.e
-        g = mid_ref.g
-        nu = mid_ref.nu
-        # http://web.mit.edu/16.20/homepage/3_Constitutive/Constitutive_files/module_3_with_solutions.pdf
-        # [e11, e22, 2*e12] = ei @  [o11, o22, o12]
-        #[e] = [S][o]
-        #[o] = [C][e]
-        # eq 3.35 (2d)
-        # eq 3.50 (3d)
-        ei2 = np.array([
-            [  1 / e, -nu / e,    0.],
-            [-nu / e,   1 / e,    0.],
-            [     0.,      0., 1 / g],
-        ])
-        #G = E / (2*(1 + nu))
-        #1 / G = (2*(1 + nu)) / E
-        nu2 = 2 * (1 + nu)
-        ei3 = np.array([
-            [1, -nu, -nu, 0., 0., 0.],
-            [-nu, 1, -nu, 0., 0., 0.],
-            [-nu, -nu, 1, 0., 0., 0.],
-            [0., 0., 0., nu2, 0., 0.],
-            [0., 0., 0., 0., nu2, 0.],
-            [0., 0., 0., 0., 0., nu2],
-        ]) / e
-
-        #denom = e / (1 - nu ** 2)
-        #C2 = np.array([
-            #[1., -nu, 0.],
-            #[nu, 1., 0.],
-            #[0., 0., g / denom],
-        #]) * denom
-
-        #lambd = e * nu / (1 + nu) / (1 - 2 * nu)
-        #lambda_2u = lambd + 2 * g
-        #C3 = np.array([
-            #[lambda_2u, lambd, lambd, 0., 0., 0.],
-            #[lambd, lambda_2u, lambd, 0., 0., 0.],
-            #[lambd, lambd, lambda_2u, 0., 0., 0.],
-            #[0., 0., 0., g, 0., 0.],
-            #[0., 0., 0., 0., g, 0.],
-            #[0., 0., 0., 0., 0., g],
-        #])
-
-    elif mtype == 'MAT8':
-        # orthotropic
-        material = mid_ref
-        # http://web.mit.edu/16.20/homepage/3_Constitutive/Constitutive_files/module_3_with_solutions.pdf
-        # [e11, e22, 2*e12] = ei @  [o11, o22, o12]
-        # eq 3.35 (2d)
-        # eq 3.50 (3d)
-        #ei2 = np.array([
-            #[e, -nu / e, 0., ],
-            #[-nu / e, e, 0., ],
-            #[0., 0., 1/g],
-        #])
-        #G = E / (2*(1 + nu))
-        #1 / G = (2*(1 + nu)) / E
-
-        #  https://en.wikipedia.org/wiki/Orthotropic_material
-        e1, e2 = material.e11, material.e22 # , material.e33
-        e3 = 1.
-        nu12 = material.nu12
-        g12, g31, g23 = material.g12, material.g1z, material.g2z
-        if g12 == 0.:
-            g12 = 1.
-        if g31 == 0.:
-            g31 = 1.
-        if g23 == 0.:
-            g23 = 1.
-
-        # nu21 * E1 = nu12 * E2
-        nu13 = nu12 # assume; should fall out in calcs given e3=0
-        nu23 = nu12 # assume; should fall out in calcs given e3=0
-        nu21 = nu12 * e2 / e1
-        nu31 = nu13 * e3 / e1
-        nu32 = nu23 * e3 / e2
-        ei2 = np.array([
-            [    1/e1, -nu21/e2,    0.],
-            [-nu12/e1,     1/e2,    0.],
-            [      0.,       0., 1/g12],
-        ])
-        ei3 = np.array([
-            [    1/e1, -nu21/e2, -nu31/e3,    0.,    0.,    0.],
-            [-nu12/e1,     1/e2, -nu32/e3,    0.,    0.,    0.],
-            [-nu13/e1, -nu23/e2,     1/e3,    0.,    0.,    0.],
-            [      0.,       0.,       0., 1/g23,    0.,    0.],
-            [      0.,       0.,       0.,    0., 1/g31,    0.],
-            [      0.,       0.,       0.,    0.,    0., 1/g12],
-        ])
-        #denom = 1 - nu12 * nu21
-        #C2 = np.array([
-            #[e1, -nu21 * e1, 0.],
-            #[nu12 * e2, e2, 0.],
-            #[0., 0., g12 * denom],
-        #]) / denom
-
-    else:
-        raise NotImplementedError(mid_ref.get_stats())
-    return ei2, ei3

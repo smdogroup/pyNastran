@@ -17,7 +17,11 @@ from vtkmodules.vtkRenderingCore import (
     vtkPolyDataMapper, vtkRenderer)
 from vtkmodules.vtkRenderingLOD import vtkLODActor
 from vtkmodules.vtkRenderingLabel import vtkLabeledDataMapper
-from vtkmodules.vtkFiltersCore import vtkCellCenters, vtkIdFilter
+try:
+    from vtkmodules.vtkFiltersCore import vtkCellCenters, vtkIdFilter
+except ImportError:
+    # VTK 9.6+ renamed vtkIdFilter to vtkGenerateIds
+    from vtkmodules.vtkFiltersCore import vtkCellCenters, vtkGenerateIds as vtkIdFilter
 from vtkmodules.vtkFiltersGeometry import vtkUnstructuredGridGeometryFilter
 from vtkmodules.vtkFiltersGeneral import vtkVertexGlyphFilter
 
@@ -32,7 +36,7 @@ from pyNastran.gui.utils.vtk.vtk_utils import (
     create_vtk_selection_node_by_cell_ids,
     extract_selection_node_from_grid_to_ugrid,
     create_unstructured_point_grid, numpy_to_vtk_points, numpy_to_vtk)
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # pragma: no cover
     from pyNastran.gui.main_window import MainWindow
 
 

@@ -1,7 +1,7 @@
 """interface to ``bdf ...``"""
 from __future__ import annotations
 import sys
-from typing import TYPE_CHECKING
+from typing import Any
 
 import pyNastran
 
@@ -10,13 +10,16 @@ from pyNastran.bdf.mesh_utils.host_jobs import cmd_line_host_jobs
 
 from .inclzip import cmd_line_inclzip
 from .convert import cmd_line_convert
-from .diff import cmd_line_diff
+from .diff import cmd_line_diff, cmd_line_apply_diff
 from .delete import cmd_line_delete
+from .find_duplicates import cmd_line_find_duplicates
+from .remove_duplicates import cmd_line_remove_duplicates
 from .export_mcids import cmd_line_export_mcids
 from .equivalence import cmd_line_equivalence
 from .merge import cmd_line_merge
 from .mass import cmd_line_mass
 from .renumber import cmd_line_renumber
+from .replace import cmd_line_replace
 from .scale import cmd_line_scale
 from .remove_unused import cmd_line_remove_unused
 from .free_faces import cmd_line_free_faces
@@ -43,10 +46,12 @@ from .utils import filter_no_args
 
 CMD_MAPS = {
     'inclzip': cmd_line_inclzip,
+    'diff_apply': cmd_line_apply_diff,
     'diff': cmd_line_diff,
     'merge': cmd_line_merge,
     'equivalence': cmd_line_equivalence,
     'renumber': cmd_line_renumber,
+    'replace': cmd_line_replace,
     'remove_comments': cmd_line_remove_comments,
     'mirror': cmd_line_mirror,
     'convert': cmd_line_convert,
@@ -69,6 +74,8 @@ CMD_MAPS = {
     'nsm_split': cmd_line_nsm_split,
 
     'delete': cmd_line_delete,
+    'find_duplicates': cmd_line_find_duplicates,
+    'remove_duplicates': cmd_line_remove_duplicates,
     #'summary': cmd_line_summary,
 
     'export_caero_mesh': cmd_line_export_caero_mesh,
@@ -91,7 +98,7 @@ SCALES = (
     '[--pressure PRESSURE_SF] [--time TIME_SF] [--velocity VEL_SF]')
 
 
-def cmd_line(argv=None, log=None, quiet: bool=False) -> None:
+def cmd_line(argv=None, log=None, quiet: bool=False) -> Any:
     """command line interface to multiple other command line scripts"""
     if argv is None:  # pragma: no cover
         argv = sys.argv
@@ -100,11 +107,12 @@ def cmd_line(argv=None, log=None, quiet: bool=False) -> None:
     help_bin_msg = '  bdf bin                         -h | --help\n' if dev else ''
     msg = (
         'Usage:\n'
-        '  bdf diff                        IN_BDF_FILENAME1 IN_BDF_FILENAME2 [--punch]\n'
+        '  bdf diff                        IN_BDF_FILENAME1 IN_BDF_FILENAME2 [--punch] [--skip_cards CARDS]\n'
         '  bdf merge                       (IN_BDF_FILENAMES)... [-o OUT_BDF_FILENAME]\n'
         '  bdf equivalence                 IN_BDF_FILENAME EQ_TOL [--punch]\n'
         '  bdf inclzip                     IN_BDF_FILENAME EQ_TOL [-o OUT_BDF_FILENAME] [--punch]\n'
         '  bdf renumber                    IN_BDF_FILENAME [OUT_BDF_FILENAME] [--superelement] [--size SIZE]\n'
+        '  bdf replace                     IN_BDF_FILENAME [-o OUT_BDF_FILENAME] [--punch]\n'
         '  bdf remove_unused               IN_BDF_FILENAME [-o OUT_BDF_FILENAME] [--punch]\n'
         '  bdf filter                      IN_BDF_FILENAME [-o OUT_BDF_FILENAME] [--punch] [--x YSIGN X] [--y YSIGN Y] [--z YSIGN Z]\n'
        f'  bdf delete_bad_shells           IN_BDF_FILENAME [-o OUT_BDF_FILENAME] [--punch] {SHELL_QUALITY}\n'
@@ -121,6 +129,8 @@ def cmd_line(argv=None, log=None, quiet: bool=False) -> None:
         '  bdf export_caero_mesh           IN_BDF_FILENAME [-o OUT_BDF_FILENAME] [--punch] [--aerobox] [--pid PID]\n'
         '  bdf split_cbars_by_pin_flags    IN_BDF_FILENAME [-o OUT_BDF_FILENAME] [--punch] [-p PIN_FLAGS_CSV_FILENAME]\n'
         '  bdf solid_dof                   IN_BDF_FILENAME [-o OUT_BDF_FILENAME] [--punch] [--lax] [--allow_dup]\n'
+        '  bdf find_duplicates              IN_BDF_FILENAME [-o OUT_JSON] [--csv] [--punch]\n'
+        '  bdf remove_duplicates            IN_BDF_FILENAME REPORT_JSON [-o OUT_BDF] [--punch]\n'
         '  bdf stats                       IN_BDF_FILENAME [--punch]\n'
         '  bdf rbe3_to_rbe2                IN_BDF_FILENAME [--infile INFILE] [--punch] [--lax]\n'
         '  bdf merge_rbe2                  IN_BDF_FILENAME [--infile INFILE] [--punch] [--lax]\n'
@@ -134,6 +144,7 @@ def cmd_line(argv=None, log=None, quiet: bool=False) -> None:
         '  bdf merge              -h | --help\n'
         '  bdf equivalence        -h | --help\n'
         '  bdf renumber           -h | --help\n'
+        '  bdf replace            -h | --help\n'
         '  bdf remove_unused      -h | --help\n'
         '  bdf delete_bad_shells  -h | --help\n'
         '  bdf collapse_quads     -h | --help\n'
@@ -153,6 +164,9 @@ def cmd_line(argv=None, log=None, quiet: bool=False) -> None:
         '  bdf export_caero_mesh  -h | --help\n'
         '  bdf split_cbars_by_pin_flags    -h | --help\n'
         '  bdf solid_dof                   -h | --help\n'
+        'Duplicate Tools:\n'
+        '  bdf find_duplicates    -h | --help\n'
+        '  bdf remove_duplicates  -h | --help\n'
         'Comparision Tools:\n'
         '  bdf diff               -h | --help\n'
         '  bdf stats              -h | --help\n'
@@ -170,6 +184,7 @@ def cmd_line(argv=None, log=None, quiet: bool=False) -> None:
     method = argv[1]
     if method in ['-v', '--version']:
         print(pyNastran.__version__)
+        return None
     else:
         try:
             func = CMD_MAPS[method]

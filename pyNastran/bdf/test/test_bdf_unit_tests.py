@@ -1,18 +1,20 @@
 import os
-import unittest
+from copy import deepcopy
 from pathlib import Path
 from io import StringIO
+import unittest
+
 import numpy as np
 from cpylog import SimpleLogger
 
 import pyNastran
 from pyNastran.utils import object_attributes, object_methods, PathLike
-#from pyNastran.bdf.cards.collpase_card import collapse_thru_by
 from pyNastran.bdf.bdf import BDF, read_bdf, CrossReferenceError
 from pyNastran.bdf.write_path import write_include, _split_path
 from pyNastran.bdf.mesh_utils.mass_properties import mass_properties
 from pyNastran.bdf.mesh_utils.forces_moments import get_forces_moments_array
 from pyNastran.bdf.test.test_bdf import run_bdf, compare, run_lots_of_files, main as test_bdf
+from pyNastran.bdf.mesh_utils.bdf_renumber import superelement_renumber
 
 from pyNastran.bdf.bdf import BDF
 
@@ -55,19 +57,22 @@ class TestBDFUnit(Tester):
 
     def test_bdf_pickle_copy(self):
         """verify we get 5 include files if they are one after the other"""
-        model = BDF(debug=False)
-        #from copy import deepcopy
+        log = SimpleLogger(level='warning')
+        model = BDF(debug=False, log=log)
         #from pyNastran.bdf.bdf import read_bdf
         #from pyNastran.bdf.mesh_utils.mass_properties import mass_properties
 
-        dirname = os.path.join(MODEL_PATH, 'bugs', 'euler_column_linear_buckling')
+        dirname = MODEL_PATH / 'bugs' / 'euler_column_linear_buckling'
 
-        bdf_filename = os.path.join(dirname, 'euler_column_linear_buckling.bdf')
-        obj_filename = os.path.join(dirname, 'model.obj')
-        model = read_bdf(bdf_filename)
+        bdf_filename = dirname / 'euler_column_linear_buckling.bdf'
+        obj_filename = dirname / 'model.obj'
+        model = read_bdf(bdf_filename, log=log)
         model.log.debug('model')
         model2 = model.__deepcopy__({})
         model2.log.debug('model2')
+
+        model3 = deepcopy(model)
+        model3.log.debug('model3')
 
         #model2.cross_reference()
         mass = mass_properties(model2)[0]  # fails because of missing cross-reference, comment to reach next line
@@ -110,7 +115,7 @@ class TestBDFUnit(Tester):
         run_lots_of_files(filenames, folder='', debug=None, xref=True, check=True, punch=False,
                           nastran='', encoding=None, size=None, is_double=None, post=None,
                           sum_load=True, dev=True, crash_cards=None, run_pickle=True,
-                          write_hdf5=True, quiet=True)
+                          hdf5=True, quiet=True)
 
     def test_forces_moments_ctria3(self):
         bdf_filename = os.path.join(GUI_MODEL_DIRNAME, 'ctria3_pload_pload2_pload4.bdf')
@@ -890,15 +895,15 @@ class TestBDFUnit(Tester):
 
     def test_bdf_superelement_5(self):
         """checks flyswatter.bdf"""
-        from pyNastran.bdf.mesh_utils.bdf_renumber import superelement_renumber
-        model_path = os.path.join(MODEL_PATH, 'superelements', 'flyswatter')
-        bdf_filename = os.path.join(model_path, 'flyswatter.bdf')
-        bdf_filename_out = os.path.join(model_path, 'flyswatter.re.bdf')
+        model_path = MODEL_PATH / 'superelements' / 'flyswatter'
+        bdf_filename = model_path / 'flyswatter.bdf'
+        bdf_filename_out = model_path / 'flyswatter.re.bdf'
         #log = SimpleLogger(level='error', encoding='utf-8')
 
+        log = SimpleLogger(level='warning')
         fem1 = read_bdf(bdf_filename, validate=True, xref=True, punch=False,
                         save_file_structure=False, skip_cards=None, read_cards=None,
-                        encoding=None, log=None, debug=True, mode='msc')
+                        encoding=None, log=log, debug=True, mode='msc')
 
         superelement_renumber(
             fem1, bdf_filename_out=bdf_filename_out,
@@ -906,13 +911,14 @@ class TestBDFUnit(Tester):
 
     def test_bdf_other_1(self):
         """checks axisymmetric model"""
-        bdf_filename = os.path.join(MODEL_PATH, 'other', 'd07d2.bdf')
-        bdf_filename_test = os.path.join(MODEL_PATH, 'other', 'd07d2.test_bdf.bdf')
+        bdf_filename = MODEL_PATH / 'other' / 'd07d2.bdf'
+        bdf_filename_test = MODEL_PATH / 'other' / 'd07d2.test_bdf.bdf'
+        log = SimpleLogger(level='warning')
         fem1 = read_bdf(bdf_filename, validate=True, xref=False, punch=False,
                         skip_cards=None, read_cards=None,
-                        encoding=None, log=None, debug=False, mode='msc')
+                        encoding=None, log=log, debug=False, mode='msc')
         fem1.write_bdf(bdf_filename_test)
-        fem2 = read_bdf(bdf_filename_test, debug=None, xref=False)
+        fem2 = read_bdf(bdf_filename_test, debug=None, xref=False, log=log)
 
         diff_cards = compare(fem1, fem2, xref=True, check=False,
                              print_stats=True, quiet=True)
@@ -1032,7 +1038,8 @@ class TestBDFUnit(Tester):
         #assert len(diff_cards2) == 0, diff_cards2
 
     def test_write_bdfs(self):
-        model = BDF()
+        log = SimpleLogger(level='warning')
+        model = BDF(log=log)
         base_dir = TEST_PATH / 'unit' / 'include_bug'
         bdf_filename = base_dir / 'main_input.bdf'
         assert bdf_filename.exists(), bdf_filename

@@ -326,7 +326,9 @@ MSC_MATRIX_TABLES: list[bytes] = [
     b'CLAMMAT', b'CLFMAT', b'CMAT', b'CMBXPHG', b'CMSQE', b'CMSTQE', b'CNVTST',
     b'CON', b'CONS1T', b'CONSBL', b'CONTVDIF', b'COORD', b'COORDO', b'CPH1',
     b'CPH2', b'CPHP', b'CPHX', b'CPHL', b'CVAL', b'CVALO', b'CVAL', b'CVALR',
-    b'CVALRG', b'CVECT', b'D', b'D1JE', b'D1JK', b'D2JE', b'D2JK', b'DAR',
+    b'CVALRG', b'CVECT', b'CPHSF',
+
+    b'D', b'D1JE', b'D1JK', b'D2JE', b'D2JK', b'DAR',
     b'DBUG', b'DCLDXT', b'DELB1', b'DELBSH', b'DELCE', b'DELDV', b'DELF1',
     b'DELFL', b'DELGM', b'DELGS', b'DELS', b'DELS1', b'DELTGM', b'DELVS',
     b'DELWS', b'DELX', b'DELX1', b'DESVCP', b'DESVEC', b'DESVECP', b'DJX',
@@ -339,6 +341,7 @@ MSC_MATRIX_TABLES: list[bytes] = [
     b'FMPF', b'FN', b'FOLMAT', b'FORE', b'FREQMASS', b'FRMDS', b'GC', b'GDGK',
     b'GDKI', b'GDKSKS', b'GEG', b'GLBRSP', b'GLBRSPDS', b'GM', b'GMD', b'GMNE',
     b'GMS', b'GOA', b'GOD', b'GPFMAT', b'GPGK', b'GPKH', b'GPIK', b'GPKE',
+    b'GPAK',
     b'GPMPF', b'GRDRM', b'GS', b'HMKT', b'IFD', b'IFG', b'IFP', b'IFS', b'IFST',
     b'IMAT', b'IMATG', b'K2DD', b'K2GG', b'K2PP', b'K4AA', b'K4KK', b'K4XX',
     b'KAA', b'KAAL', b'KDD', b'KDICTDS', b'KDICTX', b'KFHH', b'KFS', b'KGG',
@@ -407,13 +410,13 @@ MSC_RESULT_TABLES: list[bytes] = [b'ASSIG', b'ASEPS'] + [
     b'MKLIST',
 
     # stress
-    b'OES1X1', b'OES1', b'OES1X', b'OES1C', b'OESCP',
+    b'OES1X1', b'OES1', b'OES1X', b'OES1XMC', b'OES1C', b'OESCP',
     b'OESNLXR', b'OESNLXD', b'OESNLBR', b'OESTRCP',
     b'OESNL1X', b'OESRT',
     b'OES1A',
     #----------------------
     # strain
-    b'OSTR1', b'OSTR1X', b'OSTR1C',
+    b'OSTR1', b'OSTR1X', b'OSTR1XMC', b'OSTR1C',
 
     #----------------------
     # forces
@@ -421,8 +424,10 @@ MSC_RESULT_TABLES: list[bytes] = [b'ASSIG', b'ASEPS'] + [
     # HOEF1 - Element heat flux
     # OEF1X - Element forces with intermediate (CBAR and CBEAM) station forces
     #         and forces on nonlinear elements
+    # OEF1XMC/OES1XMC/OSTR1XMC - XMC variants of the base tables written by
+    #         newer MSC Nastran versions; format-identical to the base tables
     # DOEF1 - Scaled Response Spectra
-    b'OEFIT', b'OEF1X', b'OEF1', b'DOEF1',
+    b'OEFIT', b'OEF1X', b'OEF1XMC', b'OEF1', b'DOEF1',
     b'OEFITSTN', # output.op2
     b'OGPSTRS', b'OGPFI', b'OQS2SGT1', b'OGTEMP', b'OERPM',
 

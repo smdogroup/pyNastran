@@ -2,6 +2,7 @@
 defines:
 
 """
+import copy
 from struct import Struct, pack
 import warnings
 
@@ -14,7 +15,8 @@ from pyNastran.op2.result_objects.utils_pandas import (
 from pyNastran.op2.result_objects.table_object import get_gridtype_str, pandas_extract_rows
 from pyNastran.f06.f06_formatting import write_floats_13e, write_float_12e # write_imag_floats_13e
 from pyNastran.op2.errors import SixtyFourBitError
-from pyNastran.op2.op2_interface.write_utils import set_table3_field
+from pyNastran.op2.op2_interface.write_utils import (
+    set_table3_field, get_title_subtitle_label)
 # from pyNastran.op2.writer.utils import fix_table3_types
 
 float_types = (float, np.float32)
@@ -118,6 +120,23 @@ class RealContactTractionAndPressureArray(ScalarObject):  # displacement style t
         #self.ntimes = 0  # or frequency/mode
         self.ntotal = 0
         self._nnodes = 0  # result specific
+
+    def slice_by_node_id(self, nids: np.ndarray,
+                         assume_exists: bool=False, inplace: bool=False):
+        # contact nodes aren't necessarily sorted/unique, so use isin
+        # instead of searchsorted
+        nodes = self.node_gridtype[:, 0]
+        nids = np.asarray(nids)
+        if not assume_exists:
+            nids = np.intersect1d(nodes, nids)
+        inid = np.where(np.isin(nodes, nids))[0]
+        assert len(inid) > 0, inid
+        obj = self if inplace else copy.deepcopy(self)
+        obj.node_gridtype = self.node_gridtype[inid, :]
+        obj.gridtype_str = self.gridtype_str[inid]
+        obj.data = self.data[:, inid, :]
+        obj.nnodes = len(np.unique(nodes[inid]))
+        return obj
 
     def __eq__(self, table):  # pragma: no cover
         return self.assert_equal(table)
@@ -329,7 +348,7 @@ class RealContactTractionAndPressureArray(ScalarObject):  # displacement style t
         self.set_as_sort1()
         gridtypes = self.node_gridtype[:, 1]
         nnodes = len(gridtypes)
-        self.gridtype_str = np.chararray(nnodes, unicode=True)
+        self.gridtype_str = np.zeros(nnodes, dtype='U1')
         ugridtypes = np.unique(gridtypes)
         for ugridtype in ugridtypes:
             i = np.where(gridtypes == ugridtype)
@@ -464,9 +483,9 @@ class RealContactTractionAndPressureArray(ScalarObject):  # displacement style t
         acoustic_flag = self.acoustic_flag if hasattr(self, 'acoustic_flag') else 0
         #thermal = self.thermal
         thermal = 0
-        title = b'%-128s' % self.title.encode('ascii')
-        subtitle = b'%-128s' % self.subtitle.encode('ascii')  # missing superelement_adaptivity_index
-        label = b'%-128s' % self.label.encode('ascii')
+        title, subtitle, label = get_title_subtitle_label(
+            self.title, self.subtitle, self.label,
+            self.superelement_adaptivity_index)
         oCode = 0
 
         ftable3 = b'i' * 50 + b'128s 128s 128s'
